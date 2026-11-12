@@ -1,0 +1,68 @@
+[project]
+name = "openstrategy-studio"
+version = "0.1.0"
+description = "Define, backtest and optimise trading strategies without writing code, on vectorbtX."
+readme = "README.md"
+# vectorbt 1.1.0 needs >=3.11,<3.15; .python-version pins 3.12.
+requires-python = ">=3.12,<3.14"
+license = { text = "Personal and internal use only (vectorbt carries the Commons Clause)" }
+dependencies = [
+    # vectorbtX comes from GitHub until it is on PyPI (see [tool.uv.sources]).
+    # excel: openpyxl reads .xlsx universes. rates: requests, needed for FRED.
+    "vectorbtx[excel,rates]",
+    "vectorbt==1.1.0",
+    # ⚠️ plotly<7 is MANDATORY. vectorbt 1.1.0 registers a template containing a
+    # `scattermapbox` key that plotly 7 removed, so `import vectorbt` fails on 7.
+    "plotly<7",
+    # numpy / pandas / numba floors come from vectorbt itself. Do not loosen them.
+    "numpy>=2.4.6",
+    "pandas>=3.0.3,<4",
+    "numba>=0.66",
+    # 1.50+ for width="stretch" (use_container_width is deprecated), st.fragment
+    # with run_every, and streamlit.testing.v1.AppTest.
+    "streamlit>=1.50",
+    "ta_patterns>=1.2.1",
+    "butchc>=0.6.1",
+    "optuna>=4",
+    "scipy>=1.15",          # rng= replaces seed= in qmc and optimize
+    "plotly-themes>=0.1.0",
+    "yfinance",
+    "pyarrow",
+    "platformdirs",
+]
+
+[project.optional-dependencies]
+# marsopt builds a Cython extension from source when no wheel matches the
+# platform, so it is an optional extra and imported lazily in optimise.py.
+marsopt = ["marsopt>=0.2.0"]
+# `openstrategy-studio desktop`: the app in its own window. On Linux pywebview
+# also needs GTK or Qt from the system packages.
+desktop = ["pywebview>=5"]
+
+[project.scripts]
+openstrategy-studio = "openstrategy_studio.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+# The PyInstaller bundle spike (packaging/pyinstaller/studio.spec).
+bundle = ["pyinstaller>=6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openstrategy_studio"]
+
+[tool.uv.sources]
+# Not on PyPI yet, so installed from GitHub. uv.lock pins the exact commit, so every
+# `uv sync` is reproducible. Once a package is on PyPI, delete its line here: the
+# dependency in [project] stays as it is.
+vectorbtx = { git = "https://github.com/AdventuresInDataScience/vectorbtx" }
+plotly-themes = { git = "https://github.com/AdventuresInDataScience/plotly-themes" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "needs_vbt: needs vectorbt and vectorbtX installed (skipped otherwise)",
+]

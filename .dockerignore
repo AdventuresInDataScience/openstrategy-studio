@@ -1,0 +1,9 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+dist
+build
+openstrategy-studio.sh
+OpenStrategy Studio.cmd

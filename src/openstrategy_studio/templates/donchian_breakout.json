@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "name": "GBPUSD Donchian breakout",
+  "data": {
+    "symbols": [
+      "GBPUSD=X"
+    ],
+    "timeframe": "1d",
+    "start": "2015-01-01",
+    "end": "2024-12-31"
+  },
+  "instruments": {
+    "GBPUSD=X": {
+      "mode": "spreadbet",
+      "asset_class": "fx",
+      "point_size": 0.0001,
+      "base_currency": "GBP",
+      "quote_currency": "USD",
+      "min_size": 1.0,
+      "increment": 0.01,
+      "rounding": "floor",
+      "spread_points": 1.2,
+      "slippage": 0.0002,
+      "leverage": 30
+    }
+  },
+  "features": {
+    "entry_high": {
+      "block": "highest",
+      "source": "high",
+      "window": {
+        "value": 20,
+        "opt": {
+          "min": 10,
+          "max": 60,
+          "int": true
+        }
+      }
+    },
+    "entry_low": {
+      "block": "lowest",
+      "source": "low",
+      "window": {
+        "value": 20,
+        "opt": {
+          "min": 10,
+          "max": 60,
+          "int": true
+        }
+      }
+    },
+    "exit_high": {
+      "block": "highest",
+      "source": "high",
+      "window": 10
+    },
+    "exit_low": {
+      "block": "lowest",
+      "source": "low",
+      "window": 10
+    }
+  },
+  "rules": {
+    "long_entry": {
+      "all": [
+        {
+          "left": {
+            "price": "close"
+          },
+          "op": ">",
+          "right": {
+            "feature": "entry_high",
+            "shift": 1
+          }
+        }
+      ]
+    },
+    "long_exit": {
+      "all": [
+        {
+          "left": {
+            "price": "close"
+          },
+          "op": "<",
+          "right": {
+            "feature": "exit_low",
+            "shift": 1
+          }
+        }
+      ]
+    },
+    "short_entry": {
+      "all": [
+        {
+          "left": {
+            "price": "close"
+          },
+          "op": "<",
+          "right": {
+            "feature": "entry_low",
+            "shift": 1
+          }
+        }
+      ]
+    },
+    "short_exit": {
+      "all": [
+        {
+          "left": {
+            "price": "close"
+          },
+          "op": ">",
+          "right": {
+            "feature": "exit_high",
+            "shift": 1
+          }
+        }
+      ]
+    }
+  },
+  "risk": {
+    "sizing": {
+      "risk_pct": 0.01
+    },
+    "stop": {
+      "kind": "fixed",
+      "points": {
+        "value": 80,
+        "opt": {
+          "min": 30,
+          "max": 200,
+          "int": true
+        }
+      }
+    },
+    "target": null
+  },
+  "account": {
+    "init_cash": 10000,
+    "freq": "D"
+  },
+  "engine_extra": {
+    "upon_opposite_entry": "reverse"
+  }
+}

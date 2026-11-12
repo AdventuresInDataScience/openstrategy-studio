@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "name": "Top-3 momentum, monthly",
+  "data": {
+    "symbols": [
+      "AAPL",
+      "MSFT",
+      "NVDA",
+      "AMZN",
+      "GOOGL"
+    ],
+    "timeframe": "1d",
+    "start": "2015-01-01",
+    "end": "2024-12-31"
+  },
+  "instruments": {
+    "AAPL": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005
+    },
+    "MSFT": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005
+    },
+    "NVDA": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005
+    },
+    "AMZN": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005
+    },
+    "GOOGL": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005
+    }
+  },
+  "features": {
+    "mom": {
+      "block": "momentum",
+      "source": "close",
+      "window": {
+        "value": 126,
+        "opt": {
+          "min": 20,
+          "max": 252,
+          "int": true
+        }
+      }
+    }
+  },
+  "selection": {
+    "score": {
+      "feature": "mom"
+    },
+    "mode": "top",
+    "top_n": {
+      "value": 3,
+      "opt": {
+        "min": 1,
+        "max": 5,
+        "int": true
+      }
+    },
+    "min_score": 0.0
+  },
+  "weighting": {
+    "scheme": {
+      "value": "equal",
+      "opt": {
+        "values": [
+          "equal",
+          "inverse_vol"
+        ]
+      }
+    },
+    "vol_window": 20
+  },
+  "schedule": {
+    "calendar": {
+      "freq": "M",
+      "on": "first"
+    },
+    "threshold": null,
+    "combine": "and",
+    "min_trade": 0.005
+  },
+  "risk": {},
+  "account": {
+    "init_cash": 100000,
+    "freq": "D"
+  },
+  "engine_extra": {}
+}

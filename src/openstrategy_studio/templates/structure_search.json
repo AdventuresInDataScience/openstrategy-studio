@@ -1,0 +1,172 @@
+{
+  "version": 1,
+  "name": "EURUSD entry structure search",
+  "data": {
+    "symbols": [
+      "EURUSD=X"
+    ],
+    "timeframe": "1d",
+    "start": "2019-01-01",
+    "end": "2024-12-31"
+  },
+  "instruments": {
+    "EURUSD=X": {
+      "mode": "spreadbet",
+      "asset_class": "fx",
+      "point_size": 0.0001,
+      "base_currency": "EUR",
+      "quote_currency": "USD",
+      "min_size": 1.0,
+      "increment": 0.01,
+      "rounding": "floor",
+      "spread_points": 0.9,
+      "slippage": 0.0002,
+      "leverage": 30
+    }
+  },
+  "features": {
+    "rsi": {
+      "block": "rsi",
+      "source": "close",
+      "window": {
+        "value": 14,
+        "opt": {
+          "min": 5,
+          "max": 30,
+          "int": true
+        }
+      }
+    },
+    "upper": {
+      "block": "highest",
+      "source": "high",
+      "window": {
+        "value": 20,
+        "opt": {
+          "min": 10,
+          "max": 60,
+          "int": true
+        }
+      }
+    },
+    "lower": {
+      "block": "lowest",
+      "source": "low",
+      "window": 10
+    },
+    "trend": {
+      "block": "ma",
+      "source": "close",
+      "window": 200
+    }
+  },
+  "rules": {
+    "long_entry": {
+      "choose": {
+        "value": "reversion",
+        "opt": {
+          "values": [
+            "reversion",
+            "breakout"
+          ]
+        }
+      },
+      "options": {
+        "reversion": {
+          "all": [
+            {
+              "left": {
+                "feature": "rsi"
+              },
+              "op": "crosses_above",
+              "right": {
+                "const": {
+                  "value": 30,
+                  "opt": {
+                    "min": 15,
+                    "max": 40
+                  }
+                }
+              }
+            },
+            {
+              "left": {
+                "price": "close"
+              },
+              "op": ">",
+              "right": {
+                "feature": "trend"
+              }
+            }
+          ]
+        },
+        "breakout": {
+          "all": [
+            {
+              "left": {
+                "price": "close"
+              },
+              "op": ">",
+              "right": {
+                "feature": "upper",
+                "shift": 1
+              }
+            }
+          ]
+        }
+      }
+    },
+    "long_exit": {
+      "any": [
+        {
+          "left": {
+            "price": "close"
+          },
+          "op": "<",
+          "right": {
+            "feature": "lower",
+            "shift": 1
+          }
+        },
+        {
+          "left": {
+            "feature": "rsi"
+          },
+          "op": ">",
+          "right": {
+            "const": 75
+          }
+        }
+      ]
+    },
+    "short_entry": null,
+    "short_exit": null
+  },
+  "risk": {
+    "sizing": {
+      "risk_pct": 0.01
+    },
+    "stop": {
+      "kind": "fixed",
+      "points": 60
+    },
+    "target": {
+      "points": 120
+    }
+  },
+  "account": {
+    "init_cash": 10000,
+    "freq": "D",
+    "rates": {
+      "source": "static",
+      "values": {
+        "EUR": 0.03,
+        "USD": 0.045
+      }
+    }
+  },
+  "engine_extra": {
+    "upon_opposite_entry": "reverse",
+    "seed": 42
+  }
+}

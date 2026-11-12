@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "name": "60/40, monthly rebalance",
+  "data": {
+    "symbols": [
+      "SPY",
+      "AGG"
+    ],
+    "timeframe": "1d",
+    "start": "2010-01-01",
+    "end": "2024-12-31"
+  },
+  "instruments": {
+    "SPY": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005
+    },
+    "AGG": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005
+    }
+  },
+  "features": {},
+  "weighting": {
+    "scheme": "fixed",
+    "table": {
+      "SPY": 0.6,
+      "AGG": 0.4
+    }
+  },
+  "schedule": {
+    "calendar": {
+      "freq": "M",
+      "on": "first"
+    },
+    "threshold": 0.05,
+    "combine": "or",
+    "min_trade": 0.005
+  },
+  "risk": {},
+  "account": {
+    "init_cash": 100000,
+    "freq": "D"
+  },
+  "engine_extra": {}
+}

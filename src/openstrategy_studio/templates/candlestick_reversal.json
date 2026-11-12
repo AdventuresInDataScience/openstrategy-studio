@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "name": "EURUSD hammer reversal",
+  "data": {
+    "symbols": [
+      "EURUSD=X"
+    ],
+    "timeframe": "1d",
+    "start": "2015-01-01",
+    "end": "2024-12-31"
+  },
+  "instruments": {
+    "EURUSD=X": {
+      "mode": "spreadbet",
+      "asset_class": "fx",
+      "point_size": 0.0001,
+      "base_currency": "EUR",
+      "quote_currency": "USD",
+      "min_size": 1.0,
+      "increment": 0.01,
+      "rounding": "floor",
+      "spread_points": 0.9,
+      "slippage": 0.0002,
+      "leverage": 30
+    }
+  },
+  "features": {
+    "rsi": {
+      "block": "rsi",
+      "source": "close",
+      "window": 14,
+      "ewm": false
+    }
+  },
+  "rules": {
+    "long_entry": {
+      "all": [
+        {
+          "pattern": "hammer",
+          "module": "candle",
+          "side": "bullish",
+          "params": {
+            "shadow_factor": {
+              "value": 2.0,
+              "opt": {
+                "min": 1.2,
+                "max": 3.0
+              }
+            },
+            "require_trend": true
+          }
+        },
+        {
+          "left": {
+            "feature": "rsi"
+          },
+          "op": "<",
+          "right": {
+            "const": 40
+          }
+        }
+      ]
+    },
+    "long_exit": {
+      "all": [
+        {
+          "left": {
+            "feature": "rsi"
+          },
+          "op": "crosses_above",
+          "right": {
+            "const": 60
+          }
+        }
+      ]
+    },
+    "short_entry": null,
+    "short_exit": null
+  },
+  "risk": {
+    "sizing": {
+      "risk_pct": 0.01
+    },
+    "stop": {
+      "kind": "fixed",
+      "points": 50
+    },
+    "target": {
+      "points": 100
+    }
+  },
+  "account": {
+    "init_cash": 10000,
+    "freq": "D"
+  },
+  "engine_extra": {}
+}

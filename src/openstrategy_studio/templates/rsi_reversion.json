@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "name": "SPY RSI reversion",
+  "data": {
+    "symbols": [
+      "SPY"
+    ],
+    "timeframe": "1d",
+    "start": "2015-01-01",
+    "end": "2024-12-31"
+  },
+  "instruments": {
+    "SPY": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005
+    }
+  },
+  "features": {
+    "rsi": {
+      "block": "rsi",
+      "source": "close",
+      "window": {
+        "value": 14,
+        "opt": {
+          "min": 5,
+          "max": 30,
+          "int": true
+        }
+      }
+    },
+    "trend": {
+      "block": "ma",
+      "source": "close",
+      "window": 200,
+      "ewm": false
+    }
+  },
+  "rules": {
+    "long_entry": {
+      "all": [
+        {
+          "left": {
+            "feature": "rsi"
+          },
+          "op": "crosses_above",
+          "right": {
+            "const": {
+              "value": 30,
+              "opt": {
+                "min": 15,
+                "max": 40
+              }
+            }
+          }
+        },
+        {
+          "left": {
+            "price": "close"
+          },
+          "op": ">",
+          "right": {
+            "feature": "trend"
+          }
+        }
+      ]
+    },
+    "long_exit": {
+      "any": [
+        {
+          "left": {
+            "feature": "rsi"
+          },
+          "op": "crosses_above",
+          "right": {
+            "const": {
+              "value": 70,
+              "opt": {
+                "min": 55,
+                "max": 85
+              }
+            }
+          }
+        }
+      ]
+    },
+    "short_entry": null,
+    "short_exit": null
+  },
+  "risk": {
+    "sizing": {
+      "notional": 9000
+    },
+    "stop": {
+      "kind": "none"
+    },
+    "target": null
+  },
+  "account": {
+    "init_cash": 10000,
+    "freq": "D"
+  },
+  "engine_extra": {}
+}

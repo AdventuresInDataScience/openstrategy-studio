@@ -1,0 +1,16 @@
+# docker compose -f packaging/docker/compose.yaml up --build
+services:
+  studio:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    image: openstrategy-studio
+    ports:
+      - "127.0.0.1:8501:8501"     # this machine only
+    volumes:
+      - studio-data:/data          # prices, strategies, runs, jobs and settings
+    environment:
+      FRED_API_KEY: "${FRED_API_KEY:-}"
+    restart: unless-stopped
+volumes:
+  studio-data: {}

@@ -1,0 +1,26 @@
+# One job, on Linux and Windows: a clean `uv sync` from the lock file, the tests, then the
+# self-check (the automated half of the phase 4 gate: build, backtest and optimise offline).
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install from the lock file
+        run: uv sync --locked          # marsopt (an optional extra) is skipped: it may need a C compiler
+      - name: Run the tests
+        run: uv run pytest -rs
+      - name: Self-check
+        run: uv run openstrategy-studio selfcheck
