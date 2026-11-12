@@ -178,7 +178,10 @@ def download_yahoo(symbol, timeframe, start=None, end=None):
     Daily history is deep. Intraday history is limited to recent windows (the
     limit varies by interval). auto_adjust=False keeps the raw close beside
     "Adj Close", so the loader can choose per instrument mode.
-    ⚠️ VERIFY: vectorbt 1.1.0 passes interval= and auto_adjust= on to yfinance.
+    Verified in phase 0: vectorbt 1.1.0's YFData.download_symbol passes interval= and
+    auto_adjust= on to yfinance's Ticker.history, a single symbol's get() is the field
+    frame (Open ... Adj Close, Volume, Dividends, Stock Splits), and the adjusted series
+    the loader builds matches Yahoo's own (AAPL 2024, four dividends, within 3.3e-7).
     """
     import vectorbt as vbt
 

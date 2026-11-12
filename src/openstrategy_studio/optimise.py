@@ -182,20 +182,6 @@ def _scalar(value, how="mean"):
     return float(np.nansum(array) if how == "sum" else np.nanmean(array))
 
 
-def _from_stats(pf, *words):
-    """A vectorbtX metric read from pf.stats(tags="vectorbtx") by label.
-
-    ⚠️ VERIFY the labels at build time: the accessor names for K-ratio (v3), Ulcer
-    Performance Index, geometric Sharpe, recovery factor and GHPR were not
-    confirmed, so the lookup matches every word, case-insensitively.
-    """
-    table = pf.stats(tags="vectorbtx")
-    for label, value in table.items():
-        if all(word.lower() in str(label).lower() for word in words):
-            return _scalar(value)
-    raise KeyError(f"No vectorbtX metric labelled like {' '.join(words)!r} in pf.stats(tags='vectorbtx').")
-
-
 def sqn(pf):
     # Neither library provides SQN: mean(pnl) / std(pnl) * sqrt(number of trades).
     pnl = np.asarray(pf.trades.pnl.values, dtype=float)
@@ -213,14 +199,19 @@ METRICS = {
                "fn": lambda pf: _scalar(pf.calmar_ratio(group_by=True))},
     "total_return": {"label": "Total return", "direction": "maximize",
                      "fn": lambda pf: _scalar(pf.total_return(group_by=True))},
-    "k_ratio": {"label": "K-ratio (v3)", "direction": "maximize", "fn": lambda pf: _from_stats(pf, "k", "ratio")},
+    # vectorbtX's metrics, by their accessors (phase 0: each equals its stats-table entry).
+    # K-ratio, UPI and geometric Sharpe live on the returns accessor, recovery factor
+    # and GHPR on the trades. ⚠️ Not pf.stats(tags="vectorbtx"): that table holds only
+    # the last two, so a label lookup failed every trial for the first three.
+    "k_ratio": {"label": "K-ratio (v3)", "direction": "maximize",
+                "fn": lambda pf: _scalar(pf.get_returns_acc(group_by=True).k_ratio_v3())},
     "upi": {"label": "Ulcer performance index", "direction": "maximize",
-            "fn": lambda pf: _from_stats(pf, "ulcer", "performance")},
+            "fn": lambda pf: _scalar(pf.get_returns_acc(group_by=True).ulcer_performance_index())},
     "geometric_sharpe": {"label": "Geometric Sharpe", "direction": "maximize",
-                         "fn": lambda pf: _from_stats(pf, "geometric", "sharpe")},
+                         "fn": lambda pf: _scalar(pf.get_returns_acc(group_by=True).geometric_sharpe_ratio())},
     "recovery_factor": {"label": "Recovery factor", "direction": "maximize",
-                        "fn": lambda pf: _from_stats(pf, "recovery")},
-    "ghpr": {"label": "GHPR", "direction": "maximize", "fn": lambda pf: _from_stats(pf, "ghpr")},
+                        "fn": lambda pf: _scalar(pf.trades.recovery_factor(group_by=True))},
+    "ghpr": {"label": "GHPR", "direction": "maximize", "fn": lambda pf: _scalar(pf.trades.ghpr(group_by=True))},
     "profit_factor": {"label": "Profit factor", "direction": "maximize",
                       "fn": lambda pf: _scalar(pf.trades.profit_factor(group_by=True))},
     "expectancy": {"label": "Expectancy", "direction": "maximize",
@@ -323,12 +314,12 @@ def evaluate_chunk(tasks):
         return [evaluate_trial(task) for task in tasks]
     params_list = [{key: _python(value) for key, value in task["params"].items()} for task in tasks]
     try:
-        pf, columns = engine.run_vectorised(job["spec"], CONTEXT["data"], params_list, window=tasks[0].get("window"),
-                                            data_dir=job["data_dir"], offline=job["settings"].get("offline", False),
-                                            static_rate=job["settings"]["vectorbtx"].get("static_rate"))
+        trials = engine.run_vectorised(job["spec"], CONTEXT["data"], params_list, window=tasks[0].get("window"),
+                                       data_dir=job["data_dir"], offline=job["settings"].get("offline", False),
+                                       static_rate=job["settings"]["vectorbtx"].get("static_rate"))
     except engine.backtest_error():
         return [evaluate_trial(task) for task in tasks]
-    return [score(pf[column], job, params) for params, column in zip(params_list, columns)]
+    return [score(pf, job, params) for params, pf in zip(params_list, trials)]
 
 
 def selftest_objective(space, params):
@@ -394,7 +385,10 @@ def run_optuna(space, evaluate_batch, budget, direction, seed, options):
     """Ask-and-tell in batches, so trials run in the job's process pool. Handles
     conditional spaces by asking for a branch's parameters only when it is chosen.
 
-    ⚠️ VERIFY names and multi-process storage advice against Optuna's current docs.
+    Verified on Optuna 5.0.0: ask() with no distributions, trial.suggest_* on the
+    returned trial, tell() with a value or state=FAIL, and SQLite storage holding one
+    study per walk-forward fold in one file. Only the worker's main process asks and
+    tells (the pool only evaluates), so SQLite never sees concurrent writers.
     """
     import optuna
 
@@ -560,7 +554,7 @@ BACKENDS = {
     "grid": {"label": "Grid", "fn": run_grid},
     # The same points as "grid", evaluated many per backtest call (worker.py routes
     # its batches through evaluate_chunk). Eligibility: engine.vectorisable.
-    "grid_vectorised": {"label": "Grid, many trials per call (experimental)", "fn": run_grid},
+    "grid_vectorised": {"label": "Grid, many trials per call", "fn": run_grid},
     "random": {"label": "Random (Sobol)", "fn": run_random},
     "scipy": {"label": "scipy", "fn": run_scipy},
     "butchc": {"label": "BUTChC", "fn": run_butchc},
@@ -657,8 +651,8 @@ def freq_timedelta(freq):
 
 
 def periods_per_year(freq):
-    # vectorbt annualises with year_freq = 365 days by default.
-    # ⚠️ VERIFY that vectorbtX does not change year_freq.
+    # vectorbt annualises with year_freq = 365 days by default, and vectorbtX keeps it
+    # (phase 0: vbt.settings["returns"]["year_freq"] is 365 days).
     return pd.Timedelta(days=365) / freq_timedelta(freq)
 
 

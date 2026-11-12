@@ -117,6 +117,14 @@ def apply_environment(settings):
     # Keep the numba cache in a folder we know is writable (it matters for a
     # bundled app, where the package folder may be read-only).
     os.environ.setdefault("NUMBA_CACHE_DIR", str(folder / "numba_cache"))
+    # ⚠️ On Windows, the standalone CPython that uv installs aborts the whole process
+    # ("OPENSSL_Uplink ... no OPENSSL_Applink") the moment any HTTPS context is created
+    # while SSLKEYLOGFILE is set, because OpenSSL then writes the key log through a C
+    # FILE* it cannot reach. Some IDEs, proxies and debugging tools set it. The Studio
+    # never needs it, and the crash would take down the Streamlit server on the first
+    # FRED or Yahoo download, so it is dropped for this process and its workers.
+    if os.name == "nt":
+        os.environ.pop("SSLKEYLOGFILE", None)
 
 
 def apply_settings(settings):

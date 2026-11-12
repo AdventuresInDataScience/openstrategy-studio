@@ -4,10 +4,11 @@ Needs the `desktop` extra (pywebview): `uv sync --extra desktop`. On Linux,
 pywebview also needs a GUI backend (GTK or Qt) from the system packages.
 """
 
+import http.client
 import socket
 import subprocess
 import time
-import urllib.request
+from urllib.parse import urlsplit
 
 from .cli import self_command
 
@@ -19,17 +20,27 @@ def free_port():
 
 
 def wait_until_up(url, process, timeout=180):
-    """Poll Streamlit's health endpoint. The first start can take a while (numba compiles)."""
+    """Poll Streamlit's health endpoint. The first start can take a while (numba compiles).
+
+    Plain http.client, not urllib.request: urlopen builds an HTTPS context even for
+    an http:// URL, and on Windows that aborts the whole process (OPENSSL_Uplink: no
+    OPENSSL_Applink) when SSLKEYLOGFILE is set, as some proxies and IDEs do.
+    """
+    parts = urlsplit(url)
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
             raise RuntimeError("The Studio's server stopped while starting; run `openstrategy-studio run` to see why.")
+        connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=2)
         try:
-            with urllib.request.urlopen(f"{url}/_stcore/health", timeout=2) as response:
-                if response.status == 200:
-                    return
-        except OSError:
-            time.sleep(0.5)
+            connection.request("GET", "/_stcore/health")
+            if connection.getresponse().status == 200:
+                return
+        except (OSError, http.client.HTTPException):
+            pass                                    # not listening yet
+        finally:
+            connection.close()
+        time.sleep(0.5)
     raise RuntimeError(f"The Studio's server did not start within {timeout} seconds.")
 
 

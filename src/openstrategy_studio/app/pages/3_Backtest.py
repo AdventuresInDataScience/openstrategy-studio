@@ -27,15 +27,16 @@ if ui.has_python_block(spec) and st.session_state.get("untrusted_python"):
 
 row = st.columns([1, 2, 2])
 compare = row[1].checkbox("Compare with buy and hold", value=True,
-                          help="The same instruments and costs with no signals, in the same currency.")
+                          help="The market: the same instruments held from the first bar without leverage, "
+                               "equally weighted, before costs, in the same currency. Beta, alpha and the other "
+                               "relative statistics are measured against it either way.")
 if row[0].button("Run backtest", type="primary", disabled=bool(problems) or not trusted):
     def run_all():
         frames = ui.load_frames_for(spec, data_dir)
         keywords = {"data_dir": data_dir, "offline": bool(settings.get("offline")),
                     "static_rate": settings["vectorbtx"].get("static_rate")}
         run = engine.run_backtest(spec, frames, **keywords)
-        benchmark = engine.run_backtest(spec, frames, benchmark=True, **keywords) if compare else None
-        results = analysis.extract_results(run, benchmark)
+        results = analysis.extract_results(run, benchmark=compare)
         return {"results": results, "spec": run["spec"], "fingerprint": data_module.fingerprint(data_dir, spec, frames),
                 "saved": None, "id": uuid.uuid4().hex}
 

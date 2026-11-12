@@ -29,10 +29,16 @@ Favourable excursion is measured on COMPLETED bars only (entry bar to i - 1),
 because the adjustment runs before bar i's stop check: using bar i's own high
 would be lookahead.
 
-⚠️ VERIFY (the phase 3 gate): the context field names (vectorbt 0.2x's
-AdjustSLContext / AdjustTPContext), that the adjustment runs before the stop
-check, and when vectorbt updates curr_price for a trailing stop. The
-hand-built-bar tests in tests/test_exit_rules.py answer all three.
+Verified in phase 0 against vectorbt 1.1.0 (the phase 3 gate passes):
+* The contexts are AdjustSLContext / AdjustTPContext with the 0.2x field names used
+  here (vectorbt adds val_price_now and curr_i, which the templates do not need).
+* The callbacks exist only in simulate_from_signal_func_nb; from_signals routes there
+  whenever an adjust function is given (can_use_static is False).
+* Order on each bar: adjust_sl, adjust_tp, then the stop check, then the trailing
+  reference is updated from that bar's high (long) or low (short).
+* init_price is the order price, the fill open before the spread, because the engine
+  passes stop_entry_price="price" (engine.STOP_ENTRY_PRICE).
+tests/test_exit_rules.py::test_gate_matches_the_reference_simulator pins all of it.
 """
 
 import inspect

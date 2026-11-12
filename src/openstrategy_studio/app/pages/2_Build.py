@@ -435,7 +435,7 @@ with form:
                                  key=ui.key("risk.leverage_budget"))
             if budget != bool(risk.get("leverage_budget")):
                 ui.set_value("risk.leverage_budget", budget)
-            st.markdown("**Extra exits** (experimental until their checks pass: see docs/VERIFY.md)")
+            st.markdown("**Extra exits**")
             exits = risk.get("exits") or {}
             extra = [("time_bars", "Close after a number of bars", {"type": "int", "default": 20, "min": 1, "max": 500},
                       "Bars after entry"),
@@ -455,7 +455,9 @@ with form:
             if any(exits.get(name) is not None for name, *_ in extra) and stop_kind != "fixed":
                 st.warning("The extra exits adjust a stop, so they need a fixed stop.")
             rule = engine.SAME_BAR_STOP_RULE
-            st.caption("Orders fill at the next bar's open. A bar that opens beyond the stop fills at its open. "
+            st.caption("Orders fill at the next bar's open. Stops and targets are measured from that open, and a "
+                       "stopped-out trade pays the spread on exit like any other. A bar that opens beyond the "
+                       "stop fills at its open. "
                        + (f"When one bar's range holds both the stop and the target, the {rule} is taken."
                           if rule else "Which of stop and target wins inside one bar has not been confirmed yet."))
             st.caption("Points are price distances divided by the instrument's point size. Time stops and breakeven "

@@ -105,30 +105,39 @@ def _jsonable(value):
     return str(value)
 
 
-def stats_tables(pf, benchmark_returns=None):
+def stats_tables(pf):
     """{"portfolio", "trades", "returns"} x {"all", "mt5", "vectorbtx"} as {label: value} dicts.
 
     ⚠️ absolute_drawdown and recovery_factor need a RESOLVED init_cash: pass
-    pf.get_init_cash(), not the raw argument. ⚠️ VERIFY how benchmark returns are
-    best handed to returns_stats (benchmark_rets= here).
+    pf.get_init_cash(), not the raw argument. Benchmark-relative statistics (beta,
+    alpha, M2, Treynor) use returns_stats' own default, pf.benchmark_returns(): the
+    market, held unlevered. Phase 0 checked they come out finite (VERIFY 2.7).
     """
     settings = {"init_cash": pf.get_init_cash()}
     out = {}
     for tag in ("all", "mt5", "vectorbtx"):
         keywords = {} if tag == "all" else {"tags": tag}
-        returns_keywords = dict(keywords)
-        if benchmark_returns is not None:
-            returns_keywords["benchmark_rets"] = benchmark_returns
         tables = {"portfolio": pf.stats(settings=settings, **keywords),
                   "trades": pf.trades.stats(**keywords),
-                  "returns": pf.returns_stats(**returns_keywords)}
+                  "returns": pf.returns_stats(**keywords)}
         for name, table in tables.items():
-            out.setdefault(name, {})[tag] = {str(label): _jsonable(value) for label, value in table.items()}
+            # A tag that no metric carries gives None, not an empty table: vectorbt 1.1.0's
+            # returns_stats has no MT5 metrics, so returns_stats(tags="mt5") is None.
+            values = {}
+            if table is not None:
+                values = {str(label): _jsonable(value) for label, value in table.items()}
+            out.setdefault(name, {})[tag] = values
     return out
 
 
-def extract_results(run, benchmark=None):
-    """Everything the tear sheet draws, as plain frames and dicts. `run` is engine.run_backtest's result."""
+def extract_results(run, benchmark=False):
+    """Everything the tear sheet draws, as plain frames and dicts. `run` is engine.run_backtest's result.
+
+    benchmark=True adds the buy-and-hold line: vectorbt's pf.benchmark_value(), the
+    same instruments held unlevered and equal-weighted from the first bar, before
+    costs, in the same currency. See the note above engine.run_backtest for why it
+    is not a second front-door call.
+    """
     pf = run["pf"]
     data = run["data"]
     spec = run["spec"]
@@ -137,24 +146,38 @@ def extract_results(run, benchmark=None):
     returns = value.pct_change()
     returns.iloc[0] = value.iloc[0] / init_cash - 1
     frame = pd.DataFrame({"value": value, "returns": returns, "drawdown": value / value.cummax() - 1})
-    intrabar = _optional(lambda: _total(pf.x.intrabar_drawdown()))
-    if intrabar is not None:
-        # Routinely about a third deeper than the close-to-close drawdown.
-        frame["intrabar_drawdown"] = intrabar.reindex(frame.index)
-    benchmark_returns = None
-    if benchmark is not None:
-        bench_value = _total(benchmark["pf"].value()).reindex(frame.index)
+    if getattr(pf, "high", None) is not None and getattr(pf, "low", None) is not None:
+        # ⚠️ Not pf.x.intrabar_drawdown(), for three phase 0 findings (docs/UPSTREAM.md, issue 11):
+        # 1. It returns only the WORST value (a float); the figure draws the curve.
+        # 2. It sums pf.cash(group_by=False), which counts SHARED starting cash once per
+        #    column, so on every weights portfolio it understates the drawdown (a 4-asset
+        #    book reported -1.9% for a true -7.1%). The group-level pf.cash() reconciles
+        #    exactly with pf.value(), and nets out the margin loan.
+        # 3. It values every position long. A short is best at the LOW and worst at the
+        #    high, so each side is bracketed by its own extremes here.
+        # For a long-only book without shared cash this equals vectorbtX's number exactly
+        # (tests/test_portfolio.py::test_intrabar_drawdown_brackets_the_close_drawdown).
+        assets = pd.DataFrame(pf.assets())
+        highs = pd.DataFrame(pf.high).reindex(columns=assets.columns)
+        lows = pd.DataFrame(pf.low).reindex(columns=assets.columns)
+        cash = _total(pf.cash())
+        longs, shorts = assets.clip(lower=0), assets.clip(upper=0)
+        best = (longs * highs + shorts * lows).sum(axis=1) + cash
+        worst = (longs * lows + shorts * highs).sum(axis=1) + cash
+        # Never shallower than the close-to-close drawdown, and routinely deeper.
+        frame["intrabar_drawdown"] = (worst / best.cummax() - 1).reindex(frame.index)
+    if benchmark:
+        bench_value = _total(pf.benchmark_value()).reindex(frame.index)
         frame["benchmark"] = bench_value / bench_value.iloc[0] * value.iloc[0]
-        benchmark_returns = frame["benchmark"].pct_change().fillna(0.0)
 
     results = {
         "series": frame,
         "trades": pf.trades.records_readable,
         "orders": pf.orders.records_readable,
-        "stats": stats_tables(pf, benchmark_returns),
+        "stats": stats_tables(pf),
         "meta": {"name": spec["name"], "kind": run["plan"]["kind"], "freq": spec["account"]["freq"],
                  "symbols": list(spec["data"]["symbols"]), "init_cash": init_cash,
-                 "front_door": run["plan"]["front_door"], "has_benchmark": benchmark is not None},
+                 "front_door": run["plan"]["front_door"], "has_benchmark": bool(benchmark)},
     }
     # Prices, long format, for the candlestick view and MAE/MFE.
     prices = []
@@ -264,7 +287,7 @@ def trade_column(trades, *words):
 def mae_mfe(results):
     """Worst and best price excursion of each trade between entry and exit, from high and low.
 
-    vectorbt 1.1.0 has no native MAE/MFE (⚠️ VERIFY), so the Studio computes it.
+    vectorbt 1.1.0 has no native MAE/MFE (confirmed in phase 0), so the Studio computes it.
     Returns a frame with mae, mfe (as fractions of the entry price) and the trade's return.
     """
     trades = results["trades"]

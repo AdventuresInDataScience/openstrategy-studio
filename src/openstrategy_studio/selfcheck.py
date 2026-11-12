@@ -115,8 +115,7 @@ def main(quick=False, keep=False):
             keywords = {"data_dir": state["data_dir"], "offline": True,
                         "static_rate": state["settings"]["vectorbtx"].get("static_rate")}
             run = engine.run_backtest(spec, frames, **keywords)
-            benchmark = engine.run_backtest(spec, frames, benchmark=True, **keywords)
-            results = analysis.extract_results(run, benchmark)
+            results = analysis.extract_results(run, benchmark=True)
             run_dir = analysis.save_run(state["data_dir"], results, run["spec"], state["settings"],
                                         data_module.fingerprint(state["data_dir"], spec, frames))
             loaded = analysis.load_results(run_dir)

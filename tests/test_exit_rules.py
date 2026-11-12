@@ -46,7 +46,14 @@ def test_favourable_price_ignores_the_current_bar():
 
 
 def simulate(opens, highs, lows, entry_bar, side, stop_points, settings, point=1.0):
-    """Drive the callbacks bar by bar. Returns (exit bar, exit price)."""
+    """Drive the callbacks bar by bar. Returns (exit bar, exit price).
+
+    The callbacks are called through `.py_func`, their plain-Python bodies: numba
+    cannot type a SimpleNamespace context, and vectorbt hands them a NamedTuple
+    (AdjustSLContext / AdjustTPContext) with the same field names.
+    """
+    adjust_sl = getattr(X.adjust_sl_nb, "py_func", X.adjust_sl_nb)
+    adjust_tp = getattr(X.adjust_tp_nb, "py_func", X.adjust_tp_nb)
     o, h, l = (np.asarray(v, dtype=float).reshape(-1, 1) for v in (opens, highs, lows))
     long = side == "long"
     entry = o[entry_bar, 0]
@@ -60,10 +67,10 @@ def simulate(opens, highs, lows, entry_bar, side, stop_points, settings, point=1
     for i in range(entry_bar, len(o)):
         context = SimpleNamespace(i=i, col=0, position_now=1.0 if long else -1.0, init_i=entry_bar, init_price=entry,
                                   curr_price=reference, curr_stop=stop, curr_trail=trail)
-        stop, trail = X.adjust_sl_nb(context, *sl_args)
+        stop, trail = adjust_sl(context, *sl_args)
         tp_context = SimpleNamespace(i=i, col=0, position_now=context.position_now, init_i=entry_bar,
                                      init_price=entry, curr_stop=target)
-        target = X.adjust_tp_nb(tp_context, o, settings.get("time_bars", NAN))
+        target = adjust_tp(tp_context, o, settings.get("time_bars", NAN))
         base = reference if trail else entry
         stop_price = base * (1 - stop) if long else base * (1 + stop)
         target_price = entry * (1 + target) if long else entry * (1 - target)
@@ -153,8 +160,6 @@ def test_call_plan_wiring(ma_spec):
     plan = engine.call_plan(apply_params(spec))
     assert plan["args"]["adjust_tp_func_nb"] == ("var", "adjust_tp_func_nb")
     assert plan["args"]["target_points"] == ("lit", X.FAR_TARGET_POINTS)
-    benchmark = engine.benchmark_plan(plan)
-    assert not {"adjust_sl_func_nb", "adjust_tp_func_nb", "adjust_sl_args"} & set(benchmark["args"])
     assert engine.call_plan(apply_params(ma_spec))["args"].get("adjust_sl_func_nb") is None
 
 
@@ -183,12 +188,16 @@ def bars(opens, spread=0.5):
 
 
 def gate_spec(exits, stop_points, side="long"):
+    # Zero spread: the gate compares the ORDER OF OPERATIONS with the reference
+    # simulator, which models no costs. Costs on stop exits are pinned separately by
+    # tests/test_engine.py::test_spread_is_paid_on_every_fill.
     code = "out = close * 0.0\nout.iloc[0] = 1.0\nreturn out"
     rules = {"long_entry": None, "long_exit": None, "short_entry": None, "short_exit": None}
     rules[f"{side}_entry"] = {"left": {"feature": "pulse"}, "op": ">", "right": {"const": 0.5}}
     return {"version": 1, "name": "gate", "data": {"symbols": ["X"], "timeframe": "1d", "start": "2000-01-01",
                                                     "end": "2100-01-01"},
-            "instruments": {"X": {"mode": "equity", "point_size": 1.0, "quote_currency": "USD", "cost_currency": "USD"}},
+            "instruments": {"X": {"mode": "equity", "point_size": 1.0, "quote_currency": "USD", "cost_currency": "USD",
+                                  "spread_points": 0.0}},
             "features": {"pulse": {"block": "python", "code": code}}, "rules": rules,
             "risk": {"sizing": {"size": 1}, "stop": {"kind": "fixed", "points": stop_points}, "exits": exits},
             "account": {"init_cash": 10_000, "freq": "D"}}

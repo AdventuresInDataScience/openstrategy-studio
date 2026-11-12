@@ -15,8 +15,17 @@ from conftest import make_ohlcv
 # The call plan (pure: runs without vectorbtX)
 # ---------------------------------------------------------------------------
 
+def without_pair(ma_spec):
+    """The MA-cross spec as a non-FX spread bet, which has no base currency and so stays single."""
+    spec = apply_params(ma_spec)
+    instrument = spec["instruments"]["EURUSD=X"]
+    instrument.pop("base_currency")
+    instrument["asset_class"] = "stocks"
+    return spec
+
+
 def test_single_symbol_plan(ma_spec):
-    plan = engine.call_plan(apply_params(ma_spec))
+    plan = engine.call_plan(without_pair(ma_spec))
     args = plan["args"]
     assert plan["front_door"] == "SingleBacktest" and plan["single"]
     assert args["close"] == ("var", "close") and args["open"] == ("var", "open_")
@@ -28,6 +37,45 @@ def test_single_symbol_plan(ma_spec):
     assert args["freq"] == ("lit", "D") and args["rates"] == ("var", "rates")
     assert args["upon_opposite_entry"] == ("lit", "reverse")
     assert "fees" not in args and "direction" not in args
+    # The two vectorbt stop defaults the Studio overrides (see engine.STOP_ENTRY_PRICE).
+    assert args["stop_entry_price"] == ("lit", "price") and args["stop_exit_price"] == ("lit", "stopmarket")
+
+
+def test_stop_overrides_only_with_a_stop(momentum_spec):
+    args = engine.call_plan(apply_params(momentum_spec))["args"]
+    assert "stop_entry_price" not in args and "stop_exit_price" not in args
+
+
+def test_fx_pair_routes_to_portfolio(ma_spec):
+    """Phase 0 finding (VERIFY 5): a flat base_currency= is read as the ACCOUNT currency.
+
+    So an FX pair keeps its base currency on the instrument, via PortfolioBacktest.
+    """
+    plan = engine.call_plan(apply_params(ma_spec))
+    args = plan["args"]
+    assert plan["front_door"] == "PortfolioBacktest" and not plan["single"]
+    assert args["instruments"][1]["EURUSD=X"]["base_currency"] == "EUR"
+    assert "base_currency" not in args and "mode" not in args
+
+
+def test_fx_carry_uses_the_pair(ma_spec, ohlcv):
+    """No "carry active but no currency pair" warning, and carry is the EUR/USD differential."""
+    pytest.importorskip("vectorbtx")
+    import warnings
+
+    fast = {"features.fast.window": 5, "features.slow.window": 20}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run = engine.run_backtest(ma_spec, ohlcv, params=fast)
+    assert not [w for w in caught if "no currency pair" in str(w.message)]
+    # One night's charge on a long: notional x (EUR 3% - USD 4.5%) / 360, before markup.
+    costs = pd.DataFrame(run["pf"].holding_costs).iloc[:, 0]
+    orders = run["pf"].orders.records_readable
+    first = orders.iloc[0]
+    if first["Side"] == "Buy":
+        night = costs.loc[first["Timestamp"]]
+        notional = first["Size"] * first["Price"]
+        assert night == pytest.approx(-notional * 0.015 / 360, rel=0.05)
 
 
 def test_trailing_stop_replaces_fixed(ma_spec):
@@ -47,21 +95,40 @@ def test_portfolio_plan(momentum_spec):
 
 
 def test_reporting_currency_routes_to_portfolio(ma_spec):
-    spec = apply_params(ma_spec)
+    spec = without_pair(ma_spec)
     spec["account"]["base_currency"] = "GBP"
     assert engine.call_plan(spec)["front_door"] == "PortfolioBacktest"
 
 
 def test_price_field_is_not_sent(ma_spec):
-    spec = apply_params(ma_spec)
-    spec["instruments"]["EURUSD=X"]["price_field"] = "close"
-    assert "price_field" not in engine.call_plan(spec)["args"]
+    for spec in (apply_params(ma_spec), without_pair(ma_spec)):
+        spec["instruments"]["EURUSD=X"]["price_field"] = "close"
+        args = engine.call_plan(spec)["args"]
+        assert "price_field" not in args
+        assert "price_field" not in args.get("instruments", ("lit", {}))[1].get("EURUSD=X", {})
 
 
-def test_benchmark_plan_is_buy_and_hold(ma_spec):
-    plan = engine.benchmark_plan(engine.call_plan(apply_params(ma_spec)))
-    assert not {"entries", "exits", "risk_pct", "stop_points", "target_points"} & set(plan["args"])
-    assert plan["args"]["mode"] == ("lit", "spreadbet")
+def test_benchmark_is_the_market_unlevered(ma_spec, ohlcv, momentum_spec, ohlcv_multi):
+    """Phase 0 finding (VERIFY 2.7): the buy-and-hold line is the market, not a hold at buying power.
+
+    A front-door call with no signals held the 30x FX spread bet at 30x. The benchmark is
+    now vectorbt's own: equal-weight closes, unlevered, from the first bar.
+    """
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import analysis
+
+    fast = {"features.fast.window": 5, "features.slow.window": 20}      # 50/200 never trades in 400 bars
+    for spec, data, params in ((ma_spec, ohlcv, fast), (momentum_spec, ohlcv_multi, None)):
+        run = engine.run_backtest(spec, data, params=params)
+        results = analysis.extract_results(run, benchmark=True)
+        benchmark = results["series"]["benchmark"]
+        close = run["data"]["close"]
+        market = float((close.iloc[-1] / close.iloc[0]).mean() - 1)
+        assert benchmark.iloc[-1] / benchmark.iloc[0] - 1 == pytest.approx(market, rel=1e-9)
+        returns = results["stats"]["returns"]["all"]
+        for label in ("Beta", "Alpha", "Treynor Ratio"):
+            assert returns[label] is not None, f"{label} must be finite against the market"
+        assert "benchmark" not in analysis.extract_results(run)["series"]
 
 
 # ---------------------------------------------------------------------------
@@ -83,21 +150,27 @@ def test_golden_ma_cross(ma_spec, ohlcv):
     run = engine.run_backtest(ma_spec, ohlcv)
 
     symbol = "EURUSD=X"
-    close, open_ = ohlcv["close"][symbol], ohlcv["open"][symbol]
-    high, low = ohlcv["high"][symbol], ohlcv["low"][symbol]
-    fast = vectorbt.MA.run(close, window=50)
-    slow = vectorbt.MA.run(close, window=200)
-    entries = fast.ma_crossed_above(slow)
-    exits = fast.ma_crossed_below(slow)
-    no_shorts = pd.Series(False, index=close.index)
+    # Frames, not Series: an FX pair goes through PortfolioBacktest so its base
+    # currency stays on the instrument (test_fx_pair_routes_to_portfolio).
+    close, open_ = ohlcv["close"][[symbol]], ohlcv["open"][[symbol]]
+    high, low = ohlcv["high"][[symbol]], ohlcv["low"][[symbol]]
+    fast = vectorbt.MA.run(close[symbol], window=50)
+    slow = vectorbt.MA.run(close[symbol], window=200)
+    entries = fast.ma_crossed_above(slow).to_frame(symbol)
+    exits = fast.ma_crossed_below(slow).to_frame(symbol)
+    no_shorts = pd.DataFrame(False, index=close.index, columns=[symbol])
     rates = vbt.x.static_rate_table(["EUR", "USD"], close.index, {"EUR": 0.03, "USD": 0.045})
-    hand = vbt.x.SingleBacktest(
+    instrument = dict(mode="spreadbet", asset_class="fx", point_size=0.0001, base_currency="EUR",
+                      quote_currency="USD", min_size=1.0, increment=0.01, rounding="floor", spread_points=0.9,
+                      slippage=0.0002, leverage=30)
+    hand = vbt.x.PortfolioBacktest(
         close=close, open=open_, high=high, low=low,
         entries=entries, exits=exits, short_entries=no_shorts, short_exits=no_shorts,
-        mode="spreadbet", asset_class="fx", point_size=0.0001, base_currency="EUR", quote_currency="USD",
-        min_size=1.0, increment=0.01, rounding="floor", spread_points=0.9, slippage=0.0002, leverage=30,
+        instruments={symbol: instrument},
         risk_pct=0.01, stop_points=60, target_points=120, rates=rates,
         init_cash=10000, freq="D", upon_opposite_entry="reverse", seed=42,
+        # Stops measured from the fill open and charged the spread (engine.STOP_ENTRY_PRICE).
+        stop_entry_price="price", stop_exit_price="stopmarket",
     )
     assert_stats_equal(run["pf"].stats(), hand.stats())
     assert_stats_equal(run["pf"].trades.stats(), hand.trades.stats())
@@ -108,8 +181,13 @@ def test_golden_ma_cross(ma_spec, ohlcv):
 # Tests 3 and 4: hand-built signals and bars
 # ---------------------------------------------------------------------------
 
-def pulse_spec(slot, bar, exit_slot, exit_bar, risk=None, symbol="X"):
-    """A spec whose rule fires exactly once, at `bar`, via a Python block."""
+def pulse_spec(slot, bar, exit_slot, exit_bar, risk=None, symbol="X", spread_points=0.0):
+    """A spec whose rule fires exactly once, at `bar`, via a Python block.
+
+    The spread defaults to zero so fills are the bare open or stop price: these
+    tests are about timing. Equity mode's own default is one point, charged as
+    half a point on every fill; test_spread_is_paid_on_every_fill pins that.
+    """
     code = (f"out = close * 0.0\nout.iloc[{bar}] = 1.0\nout.iloc[{exit_bar}] = 2.0\nreturn out")
     rules = {"long_entry": None, "long_exit": None, "short_entry": None, "short_exit": None}
     rules[slot] = {"left": {"feature": "pulse"}, "op": "between", "lower": {"const": 0.5}, "upper": {"const": 1.5}}
@@ -117,7 +195,7 @@ def pulse_spec(slot, bar, exit_slot, exit_bar, risk=None, symbol="X"):
     return {"version": 1, "name": "pulse", "data": {"symbols": [symbol], "timeframe": "1d",
                                                      "start": "2000-01-01", "end": "2100-01-01"},
             "instruments": {symbol: {"mode": "equity", "point_size": 1.0, "quote_currency": "USD",
-                                     "cost_currency": "USD"}},
+                                     "cost_currency": "USD", "spread_points": spread_points}},
             "features": {"pulse": {"block": "python", "code": code}}, "rules": rules,
             "risk": risk or {"sizing": {"size": 1}, "stop": {"kind": "none"}},
             "account": {"init_cash": 10_000, "freq": "D"}}
@@ -191,6 +269,41 @@ def test_same_bar_stop_and_target():
         pytest.fail(f"Phase 0: the same-bar rule observed here is {observed!r}. Set "
                     f"engine.SAME_BAR_STOP_RULE = {observed!r} so the UI documents it.")
     assert observed == engine.SAME_BAR_STOP_RULE
+
+
+def test_stop_is_measured_from_the_fill_open():
+    """Phase 0 finding (VERIFY 2.8): vectorbt's default anchors the stop at the entry bar's CLOSE.
+
+    Entry fills at bar 1's open (100); bar 1 closes at 103. A 2-point stop belongs at 98,
+    which bar 2 (low 100.5) never reaches. Anchored at the close it would sit near 100.94,
+    above the entry, and fire on bar 2.
+    """
+    pytest.importorskip("vectorbtx")
+    data = bars(opens=[100, 100, 103, 103, 103, 103], highs=[100.5, 103.5, 103.5, 103.5, 103.5, 103.5],
+                lows=[99.5, 99.5, 100.5, 102.5, 102.5, 102.5], closes=[100, 103, 103, 103, 103, 103])
+    risk = {"sizing": {"size": 1}, "stop": {"kind": "fixed", "points": 2}}
+    run = engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", 5, risk=risk), data)
+    trades = run["pf"].trades.records_readable
+    assert len(trades) == 1 and trades.iloc[0]["Status"] == "Open", "the stop must not fire above the entry"
+
+
+def test_spread_is_paid_on_every_fill():
+    """Phase 0 finding (VERIFY 2.9): a one-point spread costs half a point on entry AND on exit.
+
+    vectorbt's default fills stops with no slippage at all, so a stopped-out trade used to
+    pay half the spread a signal exit pays.
+    """
+    pytest.importorskip("vectorbtx")
+    flat = bars(opens=[100] * 6, highs=[100.5] * 6, lows=[99.5] * 6, closes=[100] * 6)
+    run = engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", 3, spread_points=1.0), flat)
+    orders = run["pf"].orders.records_readable
+    assert orders["Price"].tolist() == pytest.approx([100.5, 99.5]), "signal entry and exit"
+    gapped = bars(opens=[100, 100, 100, 95, 95, 95], highs=[101, 101, 101, 96, 96, 96],
+                  lows=[99, 99, 99, 94, 94, 94], closes=[100, 100, 100, 95, 95, 95])
+    risk = {"sizing": {"size": 1}, "stop": {"kind": "fixed", "points": 2}}
+    run = engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", 5, risk=risk, spread_points=1.0), gapped)
+    _, price = exit_of(run["pf"])
+    assert price == pytest.approx(95.0 * (1 - 0.5 / 95.0)), "a gapped stop fills at the open, less half the spread"
 
 
 def test_trailing_stop_follows_the_peak():

@@ -52,6 +52,10 @@ frame = pd.DataFrame({"setting": numbers + texts,
                       "value": [None if vectorbtx_values.get(key) is None else str(vectorbtx_values[key])
                                 for key in numbers + texts]})
 edited = st.data_editor(frame, hide_index=True, disabled=["setting"], width="stretch")
+# ⚠️ Phase 0 finding (docs/UPSTREAM.md, issue 9): in vectorbtX ace29e2 the front door drops the
+# converted frames' .fx_markup before costs are resolved, so the markup is never charged.
+st.caption("fx_markup is saved but has no effect yet: the installed vectorbtX does not charge the currency "
+           "conversion markup on backtests in a reporting currency.")
 for key, value in zip(edited["setting"], edited["value"]):
     if value is None or str(value).strip() == "":
         vectorbtx_values[key] = None

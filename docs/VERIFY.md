@@ -1,89 +1,100 @@
 # Phase 0: confirm before relying on it
 
-This code was written without vectorbt, vectorbtX, ta_patterns, BUTChC, Optuna, Streamlit, plotly or pyarrow installed, and without network access. The pure pandas, numpy and scipy parts were run and tested. Everything that calls those libraries was written from the plan's verified facts and the libraries' documented signatures, but has not been executed.
+This code was first written without vectorbt, vectorbtX, ta_patterns, BUTChC, Optuna, Streamlit, plotly or pyarrow installed, and without network access. **Phase 0 has now been run** (12 November 2026, Windows 11, Python 3.12.11) against:
 
-The roadmap's phase 0 gate is: **every item below has a passing test or a written answer.** Work through it once after the first `uv sync`.
+| Package | Version |
+|---|---|
+| vectorbt | 1.1.0 |
+| vectorbtX | 0.1.0, commit `ace29e2` (the commit `uv.lock` pins) |
+| numba / numpy / pandas | 0.68.1 / 2.5.4 / 3.1.1 |
+| Streamlit / plotly | 1.67.0 / 6.9.0 |
+| ta_patterns / BUTChC / Optuna / marsopt | 1.2.1 / 0.6.1 / 5.0.0 / 0.2.0 |
+| pywebview | 6.2.1 (the `desktop` extra resolves to 6, not 5) |
+
+Result: `uv run pytest -rs` passes with every extra installed (`uv sync --extra marsopt --extra desktop`). The only skip is the bash installer check on Windows. `uv run openstrategy-studio selfcheck` prints "All checks passed". Both phase 3 gates pass, so the extra exits and the vectorised grid are no longer labelled experimental.
+
+The phase 0 gate is: **every item below has a passing test or a written answer.** Two items need things this machine does not have (a real MT4/MT5 export, and a clean machine for the installers); they are marked ⏳.
 
 ## 1. Run the suite and read the skips
 
 ```bash
-uv sync
+uv sync                          # add --extra marsopt --extra desktop for everything
 uv run pytest -rs
 ```
 
-With every library installed, nothing should skip except `test_marsopt` (unless you installed the extra with `uv sync --extra marsopt`). Each test that fails is a finding to record here, not just a bug to fix: the plan's TEST items are exactly the places where the source was read but not run.
-
-The one failure that is expected until you act on it is `test_same_bar_stop_and_target` (item 2.4).
+The first run found 14 failures. Each one was a finding about the libraries or about Windows, and section 6 lists what changed.
 
 ## 2. The plan's TEST items (section 3)
 
 | # | Question | Test that answers it | Answer |
 |---|---|---|---|
-| 2.1 | Short signals are not shifted by the front door, so the Studio shifts them. Does a short signal at bar t fill at bar t+1's open? | `test_engine.py::test_short_signal_fills_next_open` | |
-| 2.2 | Long signals fill at the next open and are not shifted twice. | `test_engine.py::test_long_signal_fills_next_open` | |
-| 2.3 | A bar that opens beyond the stop fills at the open. | `test_engine.py::test_gap_through_stop_fills_at_open` | |
-| 2.4 | When one bar holds both the stop and the target, which wins? Read `simulate_from_signals_nb` (around `vectorbt/portfolio/nb.py` line 2381). | `test_engine.py::test_same_bar_stop_and_target` fails with the observed answer. Set `engine.SAME_BAR_STOP_RULE` to it, and the Risk tab will document it. | |
-| 2.5 | What does a weight matrix with gross exposure above 1 actually do? Leverage stays off the portfolio path until this is known (`validate_spec` rejects fixed weights above 100%). | No test yet: try a 1.5-gross weight matrix by hand. | |
-| 2.6 | Adjusted equity prices: close from `adj_close`, with open, high and low scaled by the same factor. Check against a stock with a dividend. | Run AAPL through the Data page and compare with Yahoo's adjusted series. | |
-| 2.7 | How should buy-and-hold benchmark returns be handed to `returns_stats`? (`benchmark_rets=` is used now.) | `analysis.stats_tables`; check that m2 and the Treynor ratio are no longer NaN. | |
+| 2.1 | Short signals are not shifted by the front door, so the Studio shifts them. Does a short signal at bar t fill at bar t+1's open? (The missing shift is itself a vectorbtX bug: `docs/UPSTREAM.md`, issue 1.) | `test_engine.py::test_short_signal_fills_next_open` | ✅ Yes, at bar t+1's open. The first failure was the spread: equity mode defaults to `spread_points=1.0`, charged as half a point on each fill. The timing tests now use a zero-spread instrument, and `test_spread_is_paid_on_every_fill` pins the cost. |
+| 2.2 | Long signals fill at the next open and are not shifted twice. | `test_engine.py::test_long_signal_fills_next_open` | ✅ Yes (same spread note as 2.1). |
+| 2.3 | A bar that opens beyond the stop fills at the open. | `test_engine.py::test_gap_through_stop_fills_at_open` | ✅ Yes. With the stop fix of 2.9, it also pays half the spread. |
+| 2.4 | When one bar holds both the stop and the target, which wins? | `test_engine.py::test_same_bar_stop_and_target` | ✅ **The stop.** vectorbt computes the stop-loss price first and only looks at the take-profit when no stop-loss price was hit (in both `simulate_from_signals_nb` and `simulate_from_signal_func_nb`). `engine.SAME_BAR_STOP_RULE = "stop"`; the Risk tab says so. |
+| 2.5 | What does a weight matrix with gross exposure above 1 actually do? | By hand (0.75 + 0.75 on two assets) | ✅ vectorbtX warns ("Target weights sum to 1.50 ... the excess will not fill"), then fills **in column order until the cash runs out**: the first asset got its full 0.75, the second about 0.25, for 1.0x gross in total. So weights above 100% do not give leverage on the portfolio path; they skew the book. `validate_spec` keeps rejecting them. |
+| 2.6 | Adjusted equity prices: close from `adj_close`, with open, high and low scaled by the same factor. | AAPL 2024 through `data.download_yahoo`, `normalise_ohlcv`, `store_dataset`, `load_frames(adjusted=...)`, against yfinance's `auto_adjust=True` | ✅ Open, high, low and close all match Yahoo's adjusted series to within 3.3e-7 (float rounding) over a window with four dividends. |
+| 2.7 | How should buy-and-hold benchmark returns be handed to `returns_stats`? | `test_engine.py::test_benchmark_is_the_market_unlevered` | ✅ **They should not be.** `returns_stats()` already benchmarks against `pf.benchmark_returns()`: the market, an unlevered equal-weight hold of the closes. Beta, alpha, M2 and the Treynor ratio come out finite. The Studio's old benchmark (a front-door call with no signals) was **funded at buying power**: an FX spread bet "held" at 30x lost 247% while the market fell 6.5%, and its returns turned M2 into 786% and the Treynor ratio into -120. `engine.benchmark_plan` is gone; the buy-and-hold line is `pf.benchmark_value()`. |
+| 2.8 | *(new)* Is a stop in points measured from the price the order filled at? | `test_engine.py::test_stop_is_measured_from_the_fill_open` | ❌→✅ **Not by default.** vectorbt's `stop_entry_price` defaults to `"close"`, so the stop fraction (which vectorbtX computed from the fill open) was anchored at the entry bar's CLOSE. A 2-point stop on a buy filled at 100, on a bar that closed at 103, sat at 100.94: above the entry. The engine now passes `stop_entry_price="price"` (`engine.STOP_ENTRY_PRICE`). |
+| 2.9 | *(new)* Does a stopped-out trade pay the spread on exit? | `test_engine.py::test_spread_is_paid_on_every_fill` | ❌→✅ **Not by default.** vectorbt's `stop_exit_price` defaults to `"stoplimit"`, which fills with zero slippage, and vectorbtX puts the spread into slippage. A stopped-out trade paid half the spread a signal exit pays, which flatters every strategy that exits by stops, spread bets most of all. The engine now passes `stop_exit_price="stopmarket"` (`engine.STOP_EXIT_PRICE`). |
 
-## 3. Unverified call sites in the code
+## 3. Call sites that were unverified
 
-Each is marked `⚠️ VERIFY` at the line named.
+Each was marked `⚠️ VERIFY` in the code. The markers are gone where the answer is ✅; the code comments now state the verified fact.
 
-| Where | Assumption |
-|---|---|
-| `engine.mode_rules` | The shape of `MODE_RULES` in `vectorbtx/frontend/prepare.py`. Keys containing "require" are read as required fields, and keys containing "reject", "forbid" or "disallow" as rejected fields. If the shape differs, every instrument field simply stays enabled. |
-| `engine.instrument_fields` | `price_field` is consumed by the loader and NOT sent to the front door. Confirm the front door does not need it. |
-| `engine.load_universe` | `vbt.x.load_universe` accepts a .csv or .xlsx path, as the front door's `instruments=` does. |
-| `engine.benchmark_plan` | A front-door call with neither signals nor weights is buy and hold, and spread-bet or CFD modes size it sensibly without a sizing argument. |
-| `engine.prepare_data` | `to_base_currency` is called with the frame positionally, then `base=`, `fx=` and `instruments=`. `fx_markup` is left at the function's default; check whether it should read `vbt.settings["vectorbtx"]["fx_markup"]`. |
-| `engine` construct wrappers | `drifted_weights(weights, prices, schedule=)` and `threshold_schedule(drifted, weights, tolerance=)` take their first arguments positionally, as the examples do. |
-| `optimise._from_stats` | The vectorbtX metrics (K-ratio v3, Ulcer performance index, geometric Sharpe, recovery factor, GHPR) are read from `pf.stats(tags="vectorbtx")` by label words. Replace them with direct accessors once their names are confirmed. |
-| `optimise.METRICS` and `trial_extras` | `group_by=True` is accepted by `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `total_return`, `max_drawdown` and the trades methods on vectorbtX's portfolio. |
-| `optimise.periods_per_year` | vectorbtX keeps vectorbt's default `year_freq` of 365 days (used to de-annualise Sharpe ratios for the deflated Sharpe ratio). |
-| `optimise.run_optuna` | Ask-and-tell with `study.ask(distributions)`, and SQLite storage per job (one study per walk-forward fold). |
-| `optimise.run_butchc` | An executor that is a `SimpleNamespace` with an order-preserving `map` is accepted, and `result["prob_tree"]` exists. |
-| `optimise.run_marsopt` | `Study(direction=, random_state=, verbose=)` and the `Trial.suggest_*` names. |
-| `data.download_yahoo` | vectorbt 1.1.0's `YFData.download` passes `interval=` and `auto_adjust=False` on to yfinance, and a single symbol's `get()` returns the field frame. |
-| `data.apply_mapping` | Against a real MT4/MT5 history export (the fixture in `tests/fixtures/` is hand-made). |
-| `blocks.pattern_catalogue` | `ta_patterns.scanner`'s BULLISH, BEARISH, DIRECTIONAL and NON_DIRECTIONAL sets hold candlestick names, and `ta_patterns.chart_patterns`' sets hold chart names. |
-| `analysis.stats_tables` | `pf.stats(settings={"init_cash": pf.get_init_cash()})` is how a resolved `init_cash` reaches `absolute_drawdown` and `recovery_factor`. |
-| `analysis.extract_results` | `pf.x.intrabar_drawdown()`, `pf.x.user_size()`, `pf.x.margin_level()`, `pf.x.borrowed_portion()`, `pf.x.drift()` and `pf.holding_costs`. Missing ones are hidden by design, so check that the figures you expect actually appear. |
-| `analysis.mae_mfe` | vectorbt 1.1.0 really has no native MAE/MFE. |
-| `analysis.fig_rolling` | Rolling metrics are computed in pandas. Swap in vectorbtX's `rolling_*` methods (API.md section 11) once their names are confirmed. |
-| `ui.chart`, `ui.table` | `st.plotly_chart(..., width="stretch")` and `st.dataframe(..., width="stretch")` on the installed Streamlit (pinned at 1.50 or later). |
-| `tests/test_app.py` | `streamlit.testing.v1.AppTest` is still the API for app tests. |
+| Where | Assumption | Answer |
+|---|---|---|
+| `engine.mode_rules` | The shape of `MODE_RULES`. | ✅ `{mode: {"required": (...), "rejected": (...)}}`. Reasons are kept separately in `_REJECT_REASONS`. `base_currency` is rejected outside `fx_spot` unless `asset_class == "fx"`. |
+| `engine.instrument_fields` | `price_field` is consumed by the loader, not sent. | ✅ vectorbtX uses it only for defaults and validation. |
+| `engine.load_universe` | `vbt.x.load_universe` accepts a .csv or .xlsx path. | ✅ .csv, .xlsx and .xls. |
+| `engine.benchmark_plan` | A call with neither signals nor weights is buy and hold, sized sensibly. | ❌ It holds at buying power: 30x on the FX spread bet, 2x on equities. Removed; see 2.7. |
+| `engine.prepare_data` | `to_base_currency(frame, base=, fx=, instruments=)`; `fx_markup` left at its default. | ✅ The signature matches. ❌ **The markup is never charged** (`docs/UPSTREAM.md`, issue 9): a 0.5% and a 5% markup fill at the same price. The Settings page now says that `fx_markup` has no effect yet. |
+| `engine` construct wrappers | `drifted_weights` and `threshold_schedule` take their first arguments positionally. | ✅ `tests/test_portfolio.py`. |
+| `engine.call_plan` (single symbol) | *(new)* `SingleBacktest`'s flat `base_currency` keyword is the instrument's. | ❌→✅ **It is the ACCOUNT currency.** `PortfolioBacktest` names `base_currency` as the account currency, so the flat form swallows it. An EURUSD spread bet then lost its pair: carry resolved to zero (with a "no currency pair" warning) and it was charged financing instead, 3x the correct carry at EUR 3% and USD 4.5%. An instrument that names its base currency now goes through `PortfolioBacktest(instruments=...)`. That affects the ma_cross, donchian_breakout, candlestick_reversal and structure_search templates. Pinned by `test_fx_pair_routes_to_portfolio` and `test_fx_carry_uses_the_pair`. |
+| `optimise._from_stats` | The vectorbtX metrics can be read from `pf.stats(tags="vectorbtx")` by label. | ❌→✅ That table holds only recovery factor and GHPR, so **K-ratio, the Ulcer performance index and geometric Sharpe failed every trial**. All five now use direct accessors (`pf.get_returns_acc(group_by=True).k_ratio_v3()` and so on; `pf.trades.recovery_factor(group_by=True)`, `pf.trades.ghpr(group_by=True)`), each equal to its stats-table entry. `test_every_metric_scores_a_real_backtest`. |
+| `optimise.METRICS` and `trial_extras` | `group_by=True` is accepted everywhere. | ✅ |
+| `optimise.periods_per_year` | vectorbtX keeps `year_freq` at 365 days. | ✅ `vbt.settings["returns"]["year_freq"]` is 365 days. |
+| `optimise.run_optuna` | Ask-and-tell, and SQLite storage per job (one study per fold). | ✅ On Optuna 5.0.0, two fold studies share one SQLite file. Only the worker's main process asks and tells, so there are no concurrent writers. |
+| `optimise.run_butchc` | A `SimpleNamespace` executor is accepted, and `result["prob_tree"]` exists. | ✅ Both. The reproducibility test compared lists holding NaN (`NaN != NaN`); it now compares the `repr`. |
+| `optimise.run_marsopt` | `Study(direction=, random_state=, verbose=)` and the `Trial.suggest_*` names. | ✅ marsopt 0.2.0 installs from a wheel on Windows / Python 3.12. It samples the NaN trap region in under 1% of trials, so the test uses seed 1, which visits it. |
+| `data.download_yahoo` | `interval=` and `auto_adjust=False` reach yfinance; one symbol's `get()` is the field frame. | ✅ `YFData.download_symbol` passes `**kwargs` to `Ticker.history`; `get()` returns Open ... Adj Close, Volume, Dividends, Stock Splits. |
+| `data.apply_mapping` | Against a real MT4/MT5 history export. | ⏳ Open: the fixture in `tests/fixtures/` is hand-made. Export one from a terminal and add it. |
+| `blocks.pattern_catalogue` | The ta_patterns sets hold candlestick and chart names. | ✅ 106 candlestick names and 194 chart names. The picker offers 299, because `chart_patterns` lists `double_bottom_ugly` but the function is `ugly_double_bottom` (a ta_patterns naming bug, listed in `docs/UPSTREAM.md`). |
+| `analysis.stats_tables` | `settings={"init_cash": pf.get_init_cash()}` reaches `absolute_drawdown` and `recovery_factor`. | ✅ Both finite. ❌→✅ `returns_stats(tags="mt5")` returns `None`, not an empty table (no returns metric carries that tag); it is now read as empty. |
+| `analysis.extract_results` | The `pf.x` extras and `pf.holding_costs`. | ✅ `user_size`, `margin_level`, `borrowed_portion` and `drift` exist with the assumed shapes; `pf.holding_costs` is a property. ❌→✅ `pf.x.intrabar_drawdown()` returns one float, not a curve, and is wrong for shared cash and shorts (`docs/UPSTREAM.md`, issue 11). The Studio draws its own curve, which reconciles exactly with `pf.value()`. |
+| `analysis.mae_mfe` | vectorbt 1.1.0 has no native MAE/MFE. | ✅ None. |
+| `analysis.fig_rolling` | Swap in vectorbtX's `rolling_*` methods. | ✅ They are `rolling_ulcer_index`, `rolling_geometric_sharpe_ratio`, `rolling_snr` and `rolling_k_ratio` on the returns accessor. The figure keeps its pandas rolling Sharpe and volatility: vectorbtX has neither, and the figure is drawn from saved runs, which hold returns, not a portfolio. |
+| `ui.chart`, `ui.table` | `width="stretch"` on the installed Streamlit. | ✅ It is the default on 1.67. |
+| `tests/test_app.py` | `streamlit.testing.v1.AppTest` is still the API. | ✅ |
 
 ### Phase 3 and 4 additions
 
-| Where | Assumption |
-|---|---|
-| `exit_rules.adjust_sl_nb` / `adjust_tp_nb` | vectorbt 1.1.0's callback contexts carry the 0.2x field names: `i, col, position_now, init_i, init_price, curr_price, curr_stop, curr_trail` for the stop, and `i, col, position_now, init_i, init_price, curr_stop` for the target. |
-| `exit_rules` | The adjustment runs BEFORE bar i's stop check. A trailing stop's `curr_price` is updated after the check, from completed bars. Negative stop fractions are rejected, which is why stops above the entry use the trailing reference. |
-| `engine.call_plan` (extra exits) | The front door passes `adjust_sl_func_nb`, `adjust_sl_args`, `adjust_tp_func_nb` and `adjust_tp_args` through to `Portfolio.from_signals`, and accepts a far `target_points` (1e9) so the time stop's target callback runs. |
-| `engine.run_vectorised` | `PortfolioBacktest` accepts `cash_sharing=False` and `group_by=False`, takes instruments keyed by arbitrary column names (`trial_0`, `trial_1` ...), and `pf[column]` selects one trial. |
-| `optimise.run_optuna` | `study.ask()` with no distributions, then `trial.suggest_*` on the returned trial, before `study.tell`. |
-| `optimise.run_butchc` (conditional) | String option labels as `values` and as `next_level` keys. |
-| `ui.rule_editor`, Build page | `st.graphviz_chart` renders offline (Streamlit bundles its renderer). |
-| `desktop.py` | pywebview 5's `create_window(..., min_size=)` and `start()`; Streamlit's `/_stcore/health` endpoint. |
-| `packaging/` | Everything in `docs/PACKAGING.md`, checked on a clean machine. |
-
-The two phase 3 gates are tests:
-
-* `tests/test_exit_rules.py::test_gate_matches_the_reference_simulator` runs hand-built bars through vectorbtX and compares them with a simulator that encodes the assumptions above. A failure means vectorbt's order of operations differs: adjust the templates, not the test.
-* `tests/test_vectorised.py::test_vectorised_equals_one_by_one` requires each trial in one call to equal that trial run alone. Until it passes, do not use the "Grid, many trials per call" backend.
+| Where | Assumption | Answer |
+|---|---|---|
+| `exit_rules.adjust_sl_nb` / `adjust_tp_nb` | The callback contexts carry the 0.2x field names. | ✅ `AdjustSLContext` and `AdjustTPContext` have them (plus `val_price_now` and `curr_i`, unused). The reference simulator called the `@njit` functions with a `SimpleNamespace`, which numba cannot type; it now calls `.py_func`. |
+| `exit_rules` | The adjustment runs before bar i's stop check; the trailing reference updates after it from completed bars. | ✅ The callbacks exist only in `simulate_from_signal_func_nb`, which `from_signals` uses whenever an adjust function is given. Order: adjust SL, adjust TP, stop check, then the trailing reference from bar i's high or low. |
+| `engine.call_plan` (extra exits) | The front door passes the callbacks through and accepts a far target. | ✅ The gate passes. |
+| `engine.run_vectorised` | `cash_sharing=False`, `group_by=False`, arbitrary column names, and `pf[column]` selects one trial. | ✅ except the last: **`pf[column]` crashes any metric** on a leveraged instrument (`docs/UPSTREAM.md`, issue 10). `run_vectorised` now returns one portfolio per trial, selected as `pf[[column]]`. With the FX fix above, each trial equals the trial run alone. |
+| `optimise.run_optuna` | `study.ask()` with no distributions, then `trial.suggest_*`. | ✅ |
+| `optimise.run_butchc` (conditional) | String option labels as `values` and `next_level` keys. | ✅ `test_butchc_conditional_space`. |
+| `ui.rule_editor`, Build page | `st.graphviz_chart` renders offline. | ✅ The renderer is bundled in Streamlit's static files (no CDN). Not watched in a browser with the network off. |
+| `desktop.py` | pywebview's `create_window(..., min_size=)` and `start()`; the `/_stcore/health` endpoint. | ✅ pywebview 6.2.1 keeps both; the health poll is tested. A window was not opened during phase 0. The health check now uses `http.client`: `urllib.request.urlopen` builds an HTTPS context even for `http://`, which aborts the process on Windows when `SSLKEYLOGFILE` is set (section 6). |
+| `packaging/` | Everything in `docs/PACKAGING.md`, checked on a clean machine. | ⏳ Open: needs a clean machine. |
 
 ## 4. Golden numbers
 
-`test_golden_ma_cross` compares the compiled MA-cross spec with the same strategy written as a direct vectorbtX call. When you run `examples/strategies/01_ma_cross_spreadbet_fx.py` on your machine, save its `pf.stats()`, `pf.trades.stats()` and `pf.returns_stats()` as text in `tests/fixtures/golden/`, and add a test that runs the template on the same Yahoo data and compares the two.
+`test_golden_ma_cross` compares the compiled MA-cross spec with the same strategy written as a direct vectorbtX call, and passes. The direct call is now `PortfolioBacktest(instruments={"EURUSD=X": {...}})`, with `stop_entry_price="price"` and `stop_exit_price="stopmarket"`.
 
-Note that the template uses a static rate table so that it runs without a FRED key; the example uses FRED. Switch the template's `account.rates` to `{"source": "fred"}` for that comparison.
+⚠️ `examples/strategies/01_ma_cross_spreadbet_fx.py` in vectorbtX passes `base_currency="EUR"` to `SingleBacktest` with the comment "the pair, so carry can use the differential". That hits `docs/UPSTREAM.md` issue 2, so a long is charged the whole USD rate instead of the EUR/USD differential. Fix the example (or vectorbtX) before saving its `pf.stats()`, `pf.trades.stats()` and `pf.returns_stats()` as golden text in `tests/fixtures/golden/`. Otherwise the golden numbers would encode the bug.
+
+The template uses a static rate table so that it runs without a FRED key; the example uses FRED. Switch the template's `account.rates` to `{"source": "fred"}` for that comparison.
 
 ## 5. Decisions taken where the plan left a choice
 
 * **compile.py and vectorbtX.** compile.py needs vectorbtX's schedule and weighting helpers, but engine.py is the only file allowed to import vectorbtX. They are therefore thin wrappers in engine.py.
-* **Reporting currency.** A single-symbol spec with a reporting currency (`account.base_currency`) runs through `PortfolioBacktest`. `SingleBacktest`'s flat `base_currency` keyword is the instrument's own (EUR for EURUSD).
+* **Which front door.** `SingleBacktest` is used only for one symbol whose instrument names no base currency, with no reporting currency. Everything else goes through `PortfolioBacktest`, which is the same implementation with one column. That covers any FX pair (finding in section 3) and a reporting currency (`account.base_currency`).
+* **Stops.** Measured from the open the order filled at, before the spread (`stop_entry_price="price"`), and charged the spread on exit (`stop_exit_price="stopmarket"`). Both are set in `engine.call_plan` whenever a stop or target is present, so the export uses them too.
+* **Benchmark.** The buy-and-hold line and every benchmark-relative statistic use vectorbt's own benchmark: the same instruments, equal-weighted, unlevered, from the first bar, before costs. A cost-inclusive unlevered hold is not offered: at 1x a £10,000 account cannot reach a spread bet's £1/pt minimum stake on EURUSD, so the hold may not trade at all.
 * **Filters.** Filters are leaves allowed only in entry rules, and `validate_spec` rejects them in exits.
 * **Selection is optional.** A portfolio with no selection holds every asset, which is what the 60/40 template needs. Fixed weights are used as given and are not re-normalised.
 * **Weights left out.** Cap weighting (there is no market-cap data source) and long/short selection (negative weights are unverified) are not offered yet.
@@ -91,3 +102,15 @@ Note that the template uses a static rate table so that it runs without a FRED k
 * **Structure search uses choice nodes.** A choice is `{"choose": label or optimisable categorical, "options": {label: subtree}}`, and it can sit anywhere in the spec. `apply_params` resolves choices, so nothing downstream sees them. `validate_spec` checks every alternative. BUTChC and Optuna search the conditional space; the other backends fix the structure at the current choice.
 * **The extra exits need a fixed stop.** They adjust an existing stop, and vectorbt only calls the adjustment while a stop is active.
 * **The vectorised grid is limited.** It only varies parameters that change the signals, on a single symbol.
+
+## 6. Windows findings in the Studio itself (fixed)
+
+* **`SSLKEYLOGFILE` aborts the process.** On Windows, the standalone CPython that uv installs aborts with `OPENSSL_Uplink ... no OPENSSL_Applink` as soon as any HTTPS context is created while `SSLKEYLOGFILE` is set (some IDEs, proxies and debugging tools set it). That killed the test run silently, and it would take down the Streamlit server on the first FRED or Yahoo download. `config.apply_environment` now drops the variable on Windows, and `desktop.wait_until_up` no longer creates an HTTPS context for a plain HTTP poll. `test_sslkeylogfile_is_dropped_on_windows`.
+* **Job files race.** On Windows, a file the other process has open cannot be replaced, and a file being replaced cannot be opened, for a moment. The page polling `progress.json` failed intermittently with `PermissionError`, and the same race could kill a running worker. `jobs.retry_while_locked` retries briefly, and `trials.parquet` is now written atomically like the JSON files (`jobs.write_parquet`).
+* **Text encoding.** `Path.read_text()` without `encoding=` reads the ANSI code page on Windows. The app code always passed `utf-8`; one test did not.
+
+## 7. Upstream issues
+
+The items that belong in vectorbtX (twelve bugs and one required feature, shared cash with an entry priority, each with a standalone reproduction or acceptance check in `docs/upstream/vectorbtx_issues.py`) are in [`UPSTREAM.md`](UPSTREAM.md), with the line numbers, suggested fixes, and the Studio workaround to remove once each is fixed. That document also covers the ta_patterns naming bug and the shared-cash design question.
+
+Three of the twelve were found after the first pass and have no Studio workaround yet: short signals are not shifted to the next bar (the Studio already pre-shifts them, so it is not affected), a missing FX currency leg is priced at 0%, and the front door's `carry_markup=0.0` overrides the setting (so Studio backtests charge no carry markup until it is fixed).

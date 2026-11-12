@@ -162,8 +162,10 @@ def compile_pattern(params, data, source):
 def pattern_catalogue():
     """Every detector for the picker: module, name, direction class and keyword defaults.
 
-    ⚠️ Assumes ta_patterns.scanner's classification sets hold candlestick names and
-    ta_patterns.chart_patterns' sets hold chart names (plan annex D). Verify.
+    Verified in phase 0 (ta_patterns 1.2.1): ta_patterns.scanner's sets hold the 106
+    candlestick names and ta_patterns.chart_patterns' sets the 194 chart names. Names
+    without a function are skipped: chart_patterns lists "double_bottom_ugly" but the
+    function is ugly_double_bottom, so the picker offers 299.
     """
     import ta_patterns
     import ta_patterns.chart_patterns as chart

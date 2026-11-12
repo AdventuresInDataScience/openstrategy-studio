@@ -66,7 +66,9 @@ def test_butchc_is_reproducible_with_an_executor():
     pytest.importorskip("butchc")
     first, _ = drive("butchc", budget=60, seed=7, options={"batch": 4})
     second, _ = drive("butchc", budget=60, seed=7, options={"batch": 4})
-    assert first == second
+    # The selftest objective returns NaN in its trap, and NaN != NaN, so compare the
+    # text: repr is exact for floats and spells every NaN the same way.
+    assert repr(first) == repr(second)
 
 
 def test_butchc_conditional_space():
@@ -85,9 +87,25 @@ def test_butchc_conditional_space():
     assert "gap" not in result["best_params"]
 
 
+def test_every_metric_scores_a_real_backtest(ma_spec, ohlcv, momentum_spec, ohlcv_multi):
+    """Each objective on the Optimise page returns a finite number (phase 0: three used to raise every trial)."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import engine
+
+    fast = {"features.fast.window": 5, "features.slow.window": 20}
+    for spec, data, params in ((ma_spec, ohlcv, fast), (momentum_spec, ohlcv_multi, None)):
+        pf = engine.run_backtest(spec, data, params=params)["pf"]
+        for name, metric in O.METRICS.items():
+            value = metric["fn"](pf)
+            assert isinstance(value, float) and np.isfinite(value), (name, value)
+
+
 def test_marsopt():
     pytest.importorskip("marsopt")
-    check("marsopt", tolerance=0.1, budget=150)
+    # marsopt 0.2.0 converges quickly and samples the top 15% of `a` (the NaN trap) in
+    # under 1% of trials, so seed 0 never visits it and the NaN check would prove nothing.
+    # Seed 1 (deterministic via random_state) visits it; the assertions are unchanged.
+    check("marsopt", tolerance=0.1, budget=150, seed=1)
 
 
 def test_space_helpers(ma_spec):

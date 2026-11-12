@@ -48,6 +48,55 @@ def test_calendar_and_threshold_uses_drift_anchor(momentum_spec, ohlcv_multi):
         "with the drift anchor the threshold is not always true"
 
 
+def test_intrabar_drawdown_brackets_the_close_drawdown(ma_spec, ohlcv, momentum_spec, ohlcv_multi):
+    """The intrabar curve is never shallower than the close-to-close one, at every bar.
+
+    For a long-only book without shared cash it is vectorbtX's own number. Where cash
+    is shared (every weights portfolio) vectorbtX's figure counts the starting cash
+    once per column, so there the Studio's must be deeper (see analysis.extract_results).
+    """
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import analysis
+
+    fast = {"features.fast.window": 5, "features.slow.window": 20}       # enough trades on 400 bars
+    single = engine.run_backtest(ma_spec, ohlcv, params=fast)
+    shared = engine.run_backtest(momentum_spec, ohlcv_multi)
+    assert not single["pf"].cash_sharing and shared["pf"].cash_sharing
+    for run in (single, shared):
+        series = analysis.extract_results(run)["series"]
+        assert (series["intrabar_drawdown"] <= series["drawdown"] + 1e-12).all(), "intrabar is never shallower"
+    series = analysis.extract_results(single)["series"]
+    assert -series["intrabar_drawdown"].min() == pytest.approx(single["pf"].x.intrabar_drawdown(), rel=1e-12)
+    series = analysis.extract_results(shared)["series"]
+    assert -series["intrabar_drawdown"].min() > shared["pf"].x.intrabar_drawdown()
+
+
+def test_intrabar_drawdown_of_a_short_uses_the_high(ma_spec):
+    """A short is hurt by the high: a bar that spikes up must show in the intrabar curve."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import analysis
+
+    index = pd.bdate_range("2024-01-01", periods=8)
+    closes = [100.0] * 8
+    highs = [100.5, 100.5, 100.5, 104.0, 100.5, 100.5, 100.5, 100.5]          # bar 3 spikes up, closes flat
+    frame = lambda values: pd.DataFrame({"X": values}, index=index)
+    data = {"open": frame(closes), "high": frame(highs), "low": frame([99.5] * 8), "close": frame(closes),
+            "volume": frame([1000.0] * 8)}
+    code = "out = close * 0.0\nout.iloc[0] = 1.0\nreturn out"
+    spec = {"version": 1, "name": "short", "data": {"symbols": ["X"], "timeframe": "1d", "start": "2000-01-01",
+                                                     "end": "2100-01-01"},
+            "instruments": {"X": {"mode": "equity", "point_size": 1.0, "quote_currency": "USD",
+                                  "cost_currency": "USD", "spread_points": 0.0}},
+            "features": {"pulse": {"block": "python", "code": code}},
+            "rules": {"long_entry": None, "long_exit": None, "short_exit": None,
+                      "short_entry": {"left": {"feature": "pulse"}, "op": ">", "right": {"const": 0.5}}},
+            "risk": {"sizing": {"size": 10}, "stop": {"kind": "none"}}, "account": {"init_cash": 10_000, "freq": "D"}}
+    series = analysis.extract_results(engine.run_backtest(spec, data))["series"]
+    # Short 10 shares from 100: at the 104 high the book is down 40 of 10,000 (plus the 0.5 bar-2 swing).
+    assert series["intrabar_drawdown"].min() == pytest.approx(-(40 + 5) / (10_000 + 5), rel=1e-9)
+    assert series["drawdown"].min() == pytest.approx(0.0, abs=1e-12), "the closes never move"
+
+
 def test_min_trade_suppression_shows_in_drift(momentum_spec, ohlcv_multi):
     pytest.importorskip("vectorbtx")
     spec = momentum_spec

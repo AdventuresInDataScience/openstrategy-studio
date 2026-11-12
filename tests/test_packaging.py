@@ -60,16 +60,30 @@ def test_desktop_waits_for_the_server():
         desktop.wait_until_up(f"http://127.0.0.1:{desktop.free_port()}", dead, timeout=5)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the OpenSSL key-log crash is Windows-only")
+def test_sslkeylogfile_is_dropped_on_windows(monkeypatch, tmp_path):
+    """With SSLKEYLOGFILE set, creating any HTTPS context aborts the process on Windows (phase 0)."""
+    from openstrategy_studio import config
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    monkeypatch.setenv("SSLKEYLOGFILE", str(tmp_path / "keys.log"))
+    config.apply_environment(config.load_settings())
+    assert "SSLKEYLOGFILE" not in os.environ
+    # And the server's children inherit the cleaned environment: an HTTPS context is safe.
+    subprocess.run([sys.executable, "-c", "import ssl; ssl.create_default_context()"], check=True)
+
+
 @pytest.mark.skipif(shutil.which("bash") is None or os.name == "nt", reason="needs bash")
 def test_installer_script_parses():
     subprocess.run(["bash", "-n", str(ROOT / "packaging" / "installer" / "install.sh")], check=True)
 
 
 def test_packaging_files_reference_real_paths():
-    dockerfile = (ROOT / "packaging" / "docker" / "Dockerfile").read_text()
+    # Explicit encoding: on Windows the default is the ANSI code page, which cannot read UTF-8.
+    dockerfile = (ROOT / "packaging" / "docker" / "Dockerfile").read_text(encoding="utf-8")
     for name in ("pyproject.toml", ".python-version", "README.md"):
         assert name in dockerfile and (ROOT / name).exists()
-    spec = (ROOT / "packaging" / "pyinstaller" / "studio.spec").read_text()
+    spec = (ROOT / "packaging" / "pyinstaller" / "studio.spec").read_text(encoding="utf-8")
     assert '"entry.py"' in spec and (ROOT / "packaging" / "pyinstaller" / "entry.py").exists()
 
 

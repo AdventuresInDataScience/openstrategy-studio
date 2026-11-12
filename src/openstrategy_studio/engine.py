@@ -12,8 +12,9 @@ the spec ("lit") or a named runtime value ("var": close, entries, rates ...).
 renders the same plan as source code, so the two cannot disagree about
 arguments.
 
-Lines marked ⚠️ VERIFY were read from the vectorbtX docs or the plan but could
-not be executed when this was written. docs/VERIFY.md lists them all.
+Phase 0 has been run against vectorbt 1.1.0 and vectorbtX ace29e2: every call
+site here was executed, and the findings (with what changed) are in
+docs/VERIFY.md. Anything still marked ⚠️ VERIFY is listed there as open.
 """
 
 import importlib.metadata
@@ -24,12 +25,30 @@ import pandas as pd
 from .spec import SIZING_KEYS, apply_params, strategy_kind
 
 
-# ⚠️ Which of stop-loss or take-profit wins when one bar's range contains both
-# was NOT established from the source (plan section 3, item 5). Phase 0: read
-# simulate_from_signals_nb (vectorbt/portfolio/nb.py, ~line 2381 on), run
-# tests/test_engine.py::test_same_bar_stop_and_target, and set this to "stop" or
-# "target". The Risk tab shows it to the user.
-SAME_BAR_STOP_RULE = None
+# ⚠️ Which of stop-loss or take-profit wins when one bar's range contains both.
+# Phase 0 answer: the STOP. vectorbt 1.1.0 computes the stop-loss price first and
+# only looks at the take-profit when no stop-loss price was hit (get_stop_price_nb
+# for the SL, then `if np.isnan(stop_price)` for the TP, in both
+# simulate_from_signals_nb and simulate_from_signal_func_nb). That is the
+# pessimistic reading of a bar whose order of high and low is unknown.
+# tests/test_engine.py::test_same_bar_stop_and_target pins it. The Risk tab shows it.
+SAME_BAR_STOP_RULE = "stop"
+
+# ⚠️ Two vectorbt stop defaults that silently give wrong numbers here, overridden
+# on every call with a stop or target (phase 0 findings, docs/VERIFY.md 2.8, 2.9; vectorbtX issues 5 and 6
+# in docs/UPSTREAM.md: delete these two overrides once vectorbtX sets them itself):
+#
+# * stop_entry_price defaults to "close": vectorbt anchors the stop fraction at
+#   the ENTRY BAR'S CLOSE, while vectorbtX converted the points into a fraction of
+#   the OPEN the order filled at. A 2-point stop on a buy at 100 on a bar that
+#   closed at 103 sat at 100.94, above the entry. "price" anchors it at the order
+#   price (the open, before the spread), so the stop is exactly N points away.
+# * stop_exit_price defaults to "stoplimit", which fills a stop with ZERO slippage.
+#   vectorbtX puts the spread into slippage, so a stopped-out trade paid half the
+#   spread on entry and nothing on exit, while a signal exit paid both halves.
+#   "stopmarket" charges the same cost on every exit.
+STOP_ENTRY_PRICE = "price"
+STOP_EXIT_PRICE = "stopmarket"
 
 
 def vectorbtx():
@@ -79,11 +98,12 @@ def mode_defaults(mode):
 def mode_rules(mode):
     """{"required": set of fields, "rejected": {field: reason}} for one instrument mode.
 
-    MODE_RULES lives in vectorbtx.frontend.prepare (line 45) and is not
-    re-exported on vbt.x. ⚠️ VERIFY: its exact shape was not executed; this reads
-    any key containing "require" as required fields and any key containing
-    "reject", "forbid" or "disallow" as rejected fields (a dict of reasons or a
-    list). If the shape differs, every field stays enabled.
+    MODE_RULES lives in vectorbtx.frontend.prepare and is not re-exported on
+    vbt.x. Verified shape (phase 0): {mode: {"required": (fields,), "rejected":
+    (fields,)}}, tuples, with the reasons kept separately. This reads any key
+    containing "require" as required fields and any key containing "reject",
+    "forbid" or "disallow" as rejected fields (a dict of reasons or a list), so a
+    renamed key degrades to "every field stays enabled" rather than an error.
     """
     from vectorbtx.frontend.prepare import MODE_RULES
 
@@ -145,8 +165,8 @@ def instrument_fields(spec):
     """{symbol: Instrument fields} for dict-style instruments, minus Studio-only keys.
 
     `price_field` is consumed by the data loader (adjusted or raw close), because
-    the front door receives only a close frame. ⚠️ VERIFY that the front door does
-    not need it as well.
+    the front door receives only a close frame. Verified: vectorbtX uses the field
+    only for its defaults and validation, never in the simulation.
     """
     instruments = spec.get("instruments") or {}
     out = {}
@@ -170,7 +190,7 @@ def universe_path(spec, data_dir=None):
 def load_universe(spec, data_dir=None):
     vbt = vectorbtx()
     if "from_file" in (spec.get("instruments") or {}):
-        # ⚠️ VERIFY: load_universe accepting a .csv/.xlsx path (the front door does).
+        # load_universe accepts a .csv, .xlsx or .xls path (verified in phase 0).
         return vbt.x.load_universe(universe_path(spec, data_dir))
     fields = instrument_fields(spec)
     return vbt.x.load_universe({symbol: vbt.x.Instrument(**values) for symbol, values in fields.items()})
@@ -290,9 +310,14 @@ def prepare_data(spec, data, data_dir=None):
     universe = load_universe(spec, data_dir)
     out = dict(data)
     for field in ("open", "high", "low", "close"):
-        # Signature: to_base_currency(data, base, fx_table=None, quote_currency=None,
-        # instruments=None, fx_markup=0.005, fill_policy="ffill_with_warning",
-        # validate=True, fx=None). The examples pass fx=<Series>, instruments=<Universe>.
+        # Signature (verified): to_base_currency(data, base, fx_table=None,
+        # quote_currency=None, instruments=None, fx_markup=0.005, fill_policy=
+        # "ffill_with_warning", validate=True, fx=None).
+        # ⚠️ The markup is NOT charged (docs/UPSTREAM.md, issue 9): it rides on the
+        # result's .fx_markup attribute, and PortfolioBacktest's pd.DataFrame(open)
+        # drops it before costs are resolved. A 0.5% and a 5% markup fill at the same
+        # price, and fx_markup= is not a front-door argument. The function default also
+        # ignores vbt.settings["vectorbtx"]["fx_markup"]; passing it would not help.
         out[field] = vectorbtx().x.to_base_currency(data[field], base=account["base_currency"],
                                                     fx=data["fx"], instruments=universe)
     return out
@@ -313,11 +338,18 @@ def call_plan(spec, data_dir=None):
     instruments = spec.get("instruments") or {}
     account = spec.get("account") or {}
     risk = spec.get("risk") or {}
-    # SingleBacktest takes flat instrument keywords and rejects instruments=.
-    # Its base_currency keyword is the INSTRUMENT's (EUR for EURUSD), so a
-    # reporting-currency conversion goes through PortfolioBacktest instead.
+    fields = {} if "from_file" in instruments else instrument_fields(spec)
+    # SingleBacktest takes flat instrument keywords and rejects instruments=, so it
+    # is used only when every instrument field survives the flat form.
+    # ⚠️ Phase 0 finding (docs/UPSTREAM.md, issue 2): a flat `base_currency=` is NOT the instrument's.
+    # PortfolioBacktest names `base_currency` as the ACCOUNT currency, so the flat form
+    # swallows it: an EURUSD spread bet loses its pair, carry resolves to zero (with a
+    # "no currency pair" warning) and it is charged financing instead, 3x the carry at
+    # EUR 3% / USD 4.5%. An instrument that names its base currency (any FX pair), or a
+    # reporting currency, therefore goes through PortfolioBacktest's instruments= form,
+    # which keeps the field on the instrument. Same implementation, one column.
     single = (kind != "portfolio" and len(symbols) == 1 and "from_file" not in instruments
-              and not account.get("base_currency"))
+              and not account.get("base_currency") and not fields[symbols[0]].get("base_currency"))
     args = {}
 
     # All four prices, by keyword: they are keyword-only with no defaults.
@@ -331,7 +363,6 @@ def call_plan(spec, data_dir=None):
     if "from_file" in instruments:
         args["instruments"] = ("lit", universe_path(spec, data_dir))
     else:
-        fields = instrument_fields(spec)
         if single:
             for key, value in fields[symbols[0]].items():
                 args[key] = ("lit", value)
@@ -381,8 +412,13 @@ def call_plan(spec, data_dir=None):
             args["adjust_tp_func_nb"] = ("var", "adjust_tp_func_nb")
             args["adjust_tp_args"] = ("var", "adjust_tp_args")
             if "target_points" not in args:
-                # ⚠️ VERIFY: a far target is accepted, so that adjust_tp_nb is called.
+                # A far target is accepted, so adjust_tp_nb is called on every bar
+                # (verified by the phase 3 gate in tests/test_exit_rules.py).
                 args["target_points"] = ("lit", FAR_TARGET_POINTS)
+    if any(key in args for key in ("stop_points", "trail_points", "target_points")):
+        # See STOP_ENTRY_PRICE and STOP_EXIT_PRICE at the top of this file.
+        args["stop_entry_price"] = ("lit", STOP_ENTRY_PRICE)
+        args["stop_exit_price"] = ("lit", STOP_EXIT_PRICE)
 
     # Account. ⚠️ Always pass freq=, or annualised metrics are filtered out.
     args["init_cash"] = ("lit", account["init_cash"])
@@ -405,17 +441,12 @@ def call_plan(spec, data_dir=None):
             "single": single, "kind": kind, "args": args}
 
 
-def benchmark_plan(plan):
-    """The same front door with no signals, weights or risk: buy and hold.
-
-    ⚠️ VERIFY (plan section 9, TEST): that a call with neither signals nor weights
-    is buy-and-hold, and how its returns are best handed to returns_stats.
-    """
-    drop = {"entries", "exits", "short_entries", "short_exits", "weights", "schedule", "min_trade",
-            "leverage_budget", "stop_points", "trail_points", "target_points", "upon_opposite_entry",
-            "adjust_sl_func_nb", "adjust_sl_args", "adjust_tp_func_nb", "adjust_tp_args", *SIZING_KEYS}
-    args = {key: value for key, value in plan["args"].items() if key not in drop}
-    return dict(plan, kind="hold", args=args)
+# There is deliberately no "benchmark" front-door call. A call with neither signals
+# nor weights is a hold funded at BUYING POWER: an FX spread bet "held" at 30x lost
+# 247% while the market fell 6.5% (phase 0, VERIFY 2.7; vectorbtX issue 7), and handing those returns to
+# returns_stats turned beta, M2 and the Treynor ratio into nonsense. The benchmark is
+# vectorbt's own, pf.benchmark_value(): the market, held unlevered from the first bar.
+# analysis.extract_results draws it.
 
 
 def _slice(value, start, end):
@@ -424,8 +455,7 @@ def _slice(value, start, end):
     return value
 
 
-def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=False,
-                 static_rate=None, benchmark=False):
+def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=False, static_rate=None):
     """Apply trial parameters, compile, and make the one vectorbtX call.
 
     window=(start, end) compiles on the FULL history and slices afterwards, so
@@ -437,10 +467,7 @@ def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=Fa
     spec = apply_params(spec, params)
     prepared = prepare_data(spec, data, data_dir)
     plan = call_plan(spec, data_dir)
-    if benchmark:
-        plan = benchmark_plan(plan)
-        compiled = {}
-    elif plan["kind"] == "signals":
+    if plan["kind"] == "signals":
         compiled = compile_signals(spec, prepared)
     elif plan["kind"] == "portfolio":
         compiled = compile_weights(spec, prepared)
@@ -455,14 +482,15 @@ def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=Fa
     runtime = dict(compiled)
     runtime.update(close=prepared["close"], open_=prepared["open"], high=prepared["high"],
                    low=prepared["low"], volume=prepared["volume"], fx=prepared.get("fx"))
-    if "rates" in plan["args"]:
-        runtime["rates"] = build_rates(spec, prepared["close"].index, offline=offline,
-                                       static_rate=static_rate, data_dir=data_dir)
     if plan["single"]:
         # SingleBacktest takes Series: pick the one symbol's column everywhere.
         symbol = spec["data"]["symbols"][0]
         runtime = {key: value[symbol] if isinstance(value, pd.DataFrame) else value
                    for key, value in runtime.items()}
+    if "rates" in plan["args"]:
+        # Added after the column pick: the rate table is keyed by CURRENCY, not symbol.
+        runtime["rates"] = build_rates(spec, prepared["close"].index, offline=offline,
+                                       static_rate=static_rate, data_dir=data_dir)
 
     if "adjust_sl_func_nb" in plan["args"]:
         from . import exit_rules
@@ -509,11 +537,17 @@ def vectorisable(spec, space):
 
 
 def run_vectorised(spec, data, params_list, window=None, data_dir=None, offline=False, static_rate=None):
-    """One PortfolioBacktest call for many trials. Returns (pf, trial columns).
+    """One PortfolioBacktest call for many trials. Returns one portfolio per trial, in order.
 
-    ⚠️ VERIFY (tests/test_vectorised.py): that PortfolioBacktest accepts
-    cash_sharing=False and group_by=False, so each column is an independent
-    account and pf[column] matches the same trial run alone.
+    PortfolioBacktest accepts cash_sharing=False and group_by=False, so each column
+    is an independent account; tests/test_vectorised.py checks that every trial
+    equals the same trial run alone (the phase 3 gate).
+
+    ⚠️ Each trial is selected as pf[[column]], never pf[column]. vectorbtX (ace29e2)
+    slices its margin loan by the same index in Portfolio.indexing_func, and a scalar
+    label leaves a 0-d array that vectorbt's numba init_cash_grouped_nb cannot index,
+    so every metric of pf[column] raises on a leveraged instrument. Selecting by list
+    keeps the loan 1-D. Selection lives here so no caller can get it wrong.
     """
     from .compile import compile_signals
 
@@ -542,7 +576,8 @@ def run_vectorised(spec, data, params_list, window=None, data_dir=None, offline=
         runtime["rates"] = build_rates(base, runtime["close"].index, offline=offline, static_rate=static_rate,
                                        data_dir=data_dir)
     kwargs = {keyword: runtime[value] if how == "var" else value for keyword, (how, value) in args.items()}
-    return vectorbtx().x.PortfolioBacktest(**kwargs), columns
+    pf = vectorbtx().x.PortfolioBacktest(**kwargs)
+    return [pf[[column]] for column in columns]
 
 
 def backtest_error():

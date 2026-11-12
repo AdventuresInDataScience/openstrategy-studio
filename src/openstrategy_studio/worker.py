@@ -40,8 +40,9 @@ def main(job_dir):
 
     def flush():
         # The whole table is rewritten each batch: simple, and fast at these sizes.
+        # Atomically, because the Results page may be reading it at that moment.
         if rows:
-            pd.DataFrame(rows).to_parquet(job_dir / "trials.parquet")
+            jobs.write_parquet(job_dir / "trials.parquet", pd.DataFrame(rows))
         progress["updated_at"] = jobs.now()
         jobs.write_json(job_dir / "progress.json", progress)
 
@@ -140,7 +141,7 @@ def main(job_dir):
             if stitched:
                 returns = pd.concat(stitched)
                 returns = returns[~returns.index.duplicated(keep="first")]
-                returns.to_frame("returns").to_parquet(job_dir / "walk_forward_returns.parquet")
+                jobs.write_parquet(job_dir / "walk_forward_returns.parquet", returns.to_frame("returns"))
             ins = [row["in_sample_metric"] for row in fold_rows if "in_sample_metric" in row]
             outs = [row["out_of_sample_metric"] for row in fold_rows if "out_of_sample_metric" in row]
             ratio = None

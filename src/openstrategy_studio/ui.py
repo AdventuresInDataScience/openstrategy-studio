@@ -113,7 +113,7 @@ def _get(path, default):
 def chart(fig):
     # ⚠️ theme=None ALWAYS: the default theme="streamlit" overrides the template's
     # colours and defeats plotly-themes. width="stretch" replaces the deprecated
-    # use_container_width (Streamlit 1.50+; VERIFY against the installed version).
+    # use_container_width (Streamlit 1.50+; confirmed on 1.67, where it is the default).
     st.plotly_chart(fig, theme=None, width="stretch", config={"displaylogo": False})
 
 

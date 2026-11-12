@@ -171,7 +171,7 @@ def evaluate_rule(node, data, features, spec_features, fingerprint):
         if kind == "session":
             return _mask_frame(_session_mask(close.index, node["from"], node["to"]), close)
         if kind == "weekday":
-            return _mask_frame(close.index.weekday.isin(node["days"]), close)
+            return _mask_frame(close.index.day_of_week.isin(node["days"]), close)
         if kind == "month":
             return _mask_frame(close.index.month.isin(node["months"]), close)
         # Higher timeframe: compute the condition on resampled bars, then shift by
@@ -271,6 +271,10 @@ def compile_signals(spec, data, shift_shorts=True):
     # Portfolio.from_signals UNSHIFTED. A short computed at bar t's close would
     # fill at bar t's open: lookahead. So shorts are shifted here, and long
     # signals must NOT be shifted again (the front door does it).
+    # This is a vectorbtX bug (docs/UPSTREAM.md, issue 1). Remove this shift, and
+    # the matching lines in export_script, in the SAME change that bumps to a
+    # vectorbtX that shifts shorts itself; otherwise shorts are shifted twice.
+    # test_engine.py::test_short_signal_fills_next_open fails either way round.
     if shift_shorts:
         out["short_entries"] = out["short_entries"].shift(1, fill_value=False)
         out["short_exits"] = out["short_exits"].shift(1, fill_value=False)
@@ -500,7 +504,7 @@ def _rule_code(node, spec_features, frames="P", feats="F"):
         if kind == "session":
             return f"mask_frame(session_mask({close}.index, {node['from']!r}, {node['to']!r}), {close})"
         if kind == "weekday":
-            return f"mask_frame({close}.index.weekday.isin({list(node['days'])!r}), {close})"
+            return f"mask_frame({close}.index.day_of_week.isin({list(node['days'])!r}), {close})"
         if kind == "month":
             return f"mask_frame({close}.index.month.isin({list(node['months'])!r}), {close})"
         condition = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars", "shift")

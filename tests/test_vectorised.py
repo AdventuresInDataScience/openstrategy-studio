@@ -28,11 +28,12 @@ def test_vectorised_equals_one_by_one(ma_spec, ohlcv):
     space = O.build_space(ma_spec)
     params_list = [{"features.fast.window": fast, "features.slow.window": slow}
                    for fast in (10, 30, 50) for slow in (100, 200)]
-    pf, columns = engine.run_vectorised(ma_spec, ohlcv, params_list)
+    trials = engine.run_vectorised(ma_spec, ohlcv, params_list)
+    assert len(trials) == len(params_list)
     job = {"metric": "sharpe", "constraints": {}}
-    for params, column in zip(params_list, columns):
+    for params, pf in zip(params_list, trials):
         alone = engine.run_backtest(ma_spec, ohlcv, params=params)["pf"]
-        together = O.score(pf[column], job, params)
+        together = O.score(pf, job, params)
         single = O.score(alone, job, params)
         for key in ("objective", "total_return", "n_trades", "max_drawdown"):
             assert together[key] == pytest.approx(single[key], nan_ok=True), (params, key)

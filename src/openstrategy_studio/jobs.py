@@ -19,6 +19,7 @@ import json
 import os
 import pickle
 import subprocess
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,19 +33,44 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def retry_while_locked(action, attempts=100):
+    """Run `action`, retrying for up to about two seconds while Windows reports the file locked.
+
+    ⚠️ On Windows a file the other process has open cannot be replaced, and a file
+    that is being replaced cannot be opened, for a moment: both raise PermissionError.
+    The page and the worker poll each other's files, so without this a page refresh
+    could fail, or worse, kill a running job. Elsewhere this never retries.
+    """
+    for attempt in range(attempts):
+        try:
+            return action()
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.02)
+
+
 def write_json(path, value):
     """Write atomically (temp file, then replace), so a reader never sees half a file."""
     path = Path(path)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, default=str), encoding="utf-8")
-    os.replace(temporary, path)
+    retry_while_locked(lambda: os.replace(temporary, path))
+
+
+def write_parquet(path, frame):
+    """Write a frame atomically, like write_json: the page reads trials while the worker writes them."""
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    frame.to_parquet(temporary)
+    retry_while_locked(lambda: os.replace(temporary, path))
 
 
 def read_json(path, default=None):
     path = Path(path)
     if not path.exists():
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(retry_while_locked(lambda: path.read_text(encoding="utf-8")))
 
 
 def start_job(data_dir, job, frames):
@@ -104,7 +130,7 @@ def read_trials(job_dir):
     path = Path(job_dir) / "trials.parquet"
     if not path.exists():
         return pd.DataFrame()
-    return pd.read_parquet(path)
+    return retry_while_locked(lambda: pd.read_parquet(path))
 
 
 def trial_params(row):

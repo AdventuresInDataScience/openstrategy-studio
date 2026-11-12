@@ -2,7 +2,7 @@
 
 Define a trading strategy through forms, a rule builder and expressions, then backtest it, optimise it and read a tear sheet, all without writing code. Everything runs locally on [vectorbtX](https://github.com/AdventuresInDataScience/vectorbtx) (`vbt.x.SingleBacktest` and `vbt.x.PortfolioBacktest`), vectorbt 1.1.0, ta_patterns, BUTChC, Optuna, marsopt and plotly-themes.
 
-**Status: all five phases of the implementation plan are written. Phase 0, confirming the code against the real libraries, is yours to run.** The code was written without the backtest libraries available, so start with [`docs/VERIFY.md`](docs/VERIFY.md). It is the checklist of every item to confirm, with the test that answers each one. Working on this with Claude Code? [`CLAUDE.md`](CLAUDE.md) is its orientation file.
+**Status: all five phases of the implementation plan are written, and phase 0 (confirming the code against the real libraries) has been run.** The test suite and `openstrategy-studio selfcheck` pass on vectorbt 1.1.0 and vectorbtX `ace29e2`. [`docs/VERIFY.md`](docs/VERIFY.md) records every answer, what changed, and the two items still open (a real MT4/MT5 export and a clean-machine install). The issues found in vectorbtX itself are in [`docs/UPSTREAM.md`](docs/UPSTREAM.md), each with a standalone reproduction. Working on this with Claude Code? [`CLAUDE.md`](CLAUDE.md) is its orientation file.
 
 ## Install and run
 
@@ -21,7 +21,7 @@ For people who are not developers, the first-run installers in `packaging/instal
 
 Notes:
 
-* **marsopt** is an optional extra, because it builds a Cython extension when no wheel matches your platform. Install it with `uv sync --extra marsopt`.
+* **marsopt** is an optional extra, because it builds a Cython extension when no wheel matches your platform. Install it with `uv sync --extra marsopt`. Extras are not remembered: a later plain `uv sync` removes them, so name every extra you want each time (`uv sync --extra marsopt --extra desktop`).
 * **Proxies.** Behind a TLS-inspecting proxy or antivirus, `uv` fails every fetch with `UnknownIssuer` unless you use `uv sync --native-tls`. The Yahoo and FRED downloaders also need `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`; see the vectorbtX README.
 * **FRED rates** need a free key in the `FRED_API_KEY` environment variable, a `.env` file in the data folder, or the Settings page. The starter templates use fixed rates, so they run without one.
 * **Moving everything.** `OPENSTRATEGY_STUDIO_HOME=<folder>` puts settings and data under one folder, which is useful for a portable install.
@@ -62,7 +62,8 @@ src/openstrategy_studio/
   app/Home.py, app/pages/1_Data.py ... 7_Patterns.py
   templates/*.json
 tests/            plan section 12, tests 1 to 14, plus fixtures
-docs/VERIFY.md    the phase 0 checklist
+docs/VERIFY.md    the phase 0 record: answers and findings
+docs/UPSTREAM.md  issues to fix in vectorbtX, with docs/upstream/vectorbtx_issues.py reproducing each
 docs/PACKAGING.md the phase 4 spikes, the decision and the gate
 packaging/        installers, Docker, the PyInstaller spike
 CLAUDE.md         orientation for Claude Code
@@ -70,7 +71,8 @@ CLAUDE.md         orientation for Claude Code
 
 ## Known limits
 
-* **The extra exits and the vectorised grid are experimental** until their gates pass (see `docs/VERIFY.md`).
+* **The FX conversion markup and the carry markup are not charged**, because of bugs in the installed vectorbtX (`docs/UPSTREAM.md`, issues 9 and 4). The Settings field is kept for when they are fixed.
+* **The buy-and-hold benchmark is before costs.** It is the market itself, held unlevered, which is what beta and alpha are measured against.
 * **The bundled app is a spike.** The installer is the shipped route.
 * **The instrument grid** warns about fields a mode rejects instead of greying them out.
 * **Cap weighting and long/short selection** are not offered yet.
