@@ -574,7 +574,8 @@ def compute_preview(spec_json, data_dir_text, mtimes):
     applied = apply_params(preview_spec)
     computed = compile_features(applied.get("features") or {}, frames)
     if strategy_kind(applied) == "signals":
-        return frames, computed, compile_signals(applied, frames, shift_shorts=False)
+        # The compiler's signals are on the bar they fire, which is what the preview marks.
+        return frames, computed, compile_signals(applied, frames)
     return frames, computed, compile_weights(applied, frames)
 
 

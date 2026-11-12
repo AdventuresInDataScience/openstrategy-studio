@@ -128,13 +128,15 @@ def test_higher_timeframe_uses_only_completed_bars(ohlcv):
         assert bool(signal.loc[day]) == expected, day
 
 
-def test_short_signals_are_shifted_one_bar(ohlcv):
+def test_the_compiler_shifts_no_signal(ohlcv):
+    """The front door shifts all four signal arrays to the next open (vectorbtX issue 1
+    fixed). The compiler must shift none of them, or they would be delayed two bars."""
     spec = apply_params(signal_spec(FEATURES, OPERATOR_RULES[">"]))
-    shifted = C.compile_signals(spec, ohlcv)
-    raw = C.compile_signals(spec, ohlcv, shift_shorts=False)
-    pd.testing.assert_frame_equal(shifted["short_entries"], raw["short_entries"].shift(1, fill_value=False))
-    # Long signals are NOT shifted by the compiler: the front door does that.
-    pd.testing.assert_frame_equal(shifted["entries"], raw["entries"])
+    compiled = C.compile_signals(spec, ohlcv)
+    # signal_spec gives the long and the short entry the same rule, so if neither is
+    # shifted the two frames are identical.
+    assert compiled["entries"].to_numpy().any()
+    pd.testing.assert_frame_equal(compiled["short_entries"], compiled["entries"])
 
 
 def test_weights_are_causal(momentum_spec, ohlcv_multi):

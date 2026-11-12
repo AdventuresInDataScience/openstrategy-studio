@@ -37,12 +37,7 @@ def test_single_symbol_plan(ma_spec):
     assert args["freq"] == ("lit", "D") and args["rates"] == ("var", "rates")
     assert args["upon_opposite_entry"] == ("lit", "reverse")
     assert "fees" not in args and "direction" not in args
-    # The two vectorbt stop defaults the Studio overrides (see engine.STOP_ENTRY_PRICE).
-    assert args["stop_entry_price"] == ("lit", "price") and args["stop_exit_price"] == ("lit", "stopmarket")
-
-
-def test_stop_overrides_only_with_a_stop(momentum_spec):
-    args = engine.call_plan(apply_params(momentum_spec))["args"]
+    # vectorbtX's front door sets the stop anchor and stop fill price itself (issues 5, 6).
     assert "stop_entry_price" not in args and "stop_exit_price" not in args
 
 
@@ -68,14 +63,19 @@ def test_fx_carry_uses_the_pair(ma_spec, ohlcv):
         warnings.simplefilter("always")
         run = engine.run_backtest(ma_spec, ohlcv, params=fast)
     assert not [w for w in caught if "no currency pair" in str(w.message)]
-    # One night's charge on a long: notional x (EUR 3% - USD 4.5%) / 360, before markup.
+    # One night's charge on a long: notional x ((USD 4.5% - EUR 3%) + the carry markup) / 360.
+    # vectorbtX ace29e2 dropped the markup (docs/UPSTREAM.md issue 4); it is now charged.
+    import vectorbtx
+
+    markup = vectorbtx.settings["vectorbtx"]["carry_markup"]
+    assert markup > 0
     costs = pd.DataFrame(run["pf"].holding_costs).iloc[:, 0]
     orders = run["pf"].orders.records_readable
     first = orders.iloc[0]
     if first["Side"] == "Buy":
         night = costs.loc[first["Timestamp"]]
         notional = first["Size"] * first["Price"]
-        assert night == pytest.approx(-notional * 0.015 / 360, rel=0.05)
+        assert night == pytest.approx(-notional * (0.015 + markup) / 360, rel=0.05)
 
 
 def test_trailing_stop_replaces_fixed(ma_spec):
@@ -97,7 +97,10 @@ def test_portfolio_plan(momentum_spec):
 def test_reporting_currency_routes_to_portfolio(ma_spec):
     spec = without_pair(ma_spec)
     spec["account"]["base_currency"] = "GBP"
-    assert engine.call_plan(spec)["front_door"] == "PortfolioBacktest"
+    plan = engine.call_plan(spec)
+    assert plan["front_door"] == "PortfolioBacktest"
+    # The account goes by vectorbtX's unambiguous name: its base_currency= can mean a pair's base.
+    assert plan["args"]["account_currency"] == ("lit", "GBP") and "base_currency" not in plan["args"]
 
 
 def test_price_field_is_not_sent(ma_spec):
@@ -169,8 +172,6 @@ def test_golden_ma_cross(ma_spec, ohlcv):
         instruments={symbol: instrument},
         risk_pct=0.01, stop_points=60, target_points=120, rates=rates,
         init_cash=10000, freq="D", upon_opposite_entry="reverse", seed=42,
-        # Stops measured from the fill open and charged the spread (engine.STOP_ENTRY_PRICE).
-        stop_entry_price="price", stop_exit_price="stopmarket",
     )
     assert_stats_equal(run["pf"].stats(), hand.stats())
     assert_stats_equal(run["pf"].trades.stats(), hand.trades.stats())
@@ -224,6 +225,46 @@ def test_short_signal_fills_next_open():
         index = data["close"].index
         assert when == index[bar + 1], "a short signal at bar t must fill at bar t+1, never t"
         assert price == pytest.approx(data["open"]["X"].iloc[bar + 1], rel=1e-9)
+
+
+def test_fx_conversion_markup_is_charged_in_a_reporting_currency():
+    """vectorbtX ace29e2 never charged the FX markup (docs/UPSTREAM.md issue 9). Through
+    the Studio's own path (prepare_data -> to_base_currency -> the front door), a fill
+    must now move by exactly the markup, including in a window (walk-forward), where the
+    converted frames are sliced before the call."""
+    pytest.importorskip("vectorbtx")
+    data = bars(opens=[100.0] * 8, highs=[101.0] * 8, lows=[99.0] * 8, closes=[100.0] * 8)
+    data["fx"] = pd.Series(1.25, index=data["close"].index, name="GBPUSD=X")
+    spec = pulse_spec("long_entry", 1, "long_exit", 5)
+    spec["account"].update(base_currency="GBP", fx={"symbol": "GBPUSD=X"})
+    window = (data["close"].index[0], data["close"].index[-1])
+    settings = engine.vectorbtx().settings["vectorbtx"]
+    before = settings["fx_markup"]
+    fills = {}
+    try:
+        for markup in (0.0, 0.05):
+            engine.apply_vectorbtx_settings({"fx_markup": markup})
+            for label, kwargs in (("full", {}), ("window", {"window": window})):
+                run = engine.run_backtest(spec, data, **kwargs)
+                fills[markup, label] = first_order(run["pf"])[1]
+    finally:
+        settings["fx_markup"] = before
+    for label in ("full", "window"):
+        assert fills[0.0, label] == pytest.approx(80.0)                     # 100 USD at 1.25
+        assert fills[0.05, label] == pytest.approx(80.0 * 1.05)
+
+
+def test_stop_is_checked_on_the_entry_bar():
+    """vectorbtX 16293a2 checks a stop on the bar it was entered. Signal at bar 0, entry at
+    bar 1's open (100), and bar 1 itself trades down to 97: the 2-point stop fills at 98
+    on bar 1. On whole bars it was missed and the trade survived."""
+    pytest.importorskip("vectorbtx")
+    data = bars(opens=[100] * 6, highs=[101] * 6, lows=[99, 97, 99, 99, 99, 99], closes=[100] * 6)
+    risk = {"sizing": {"size": 1}, "stop": {"kind": "fixed", "points": 2}}
+    run = engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", 5, risk=risk), data)
+    when, price = exit_of(run["pf"])
+    assert when == data["close"].index[1]
+    assert price == pytest.approx(98.0)
 
 
 def test_long_signal_fills_next_open():

@@ -17,9 +17,11 @@ def test_every_template_exports_valid_python():
         assert "def run(open_, high, low, close, volume, fx=None):" in source
 
 
-def test_export_shifts_shorts_and_names_every_argument(ma_spec):
+def test_export_names_every_argument_and_shifts_nothing(ma_spec):
     source = export_script(ma_spec)
-    assert "short_entries = short_entries.shift(1, fill_value=False)" in source
+    # The front door shifts all four signal arrays itself; a shift here would double it.
+    assert "short_entries = short_entries.shift" not in source
+    assert "short_exits = short_exits.shift" not in source
     for keyword in engine.call_plan(S.apply_params(ma_spec))["args"]:
         assert f"    {keyword}=" in source
 

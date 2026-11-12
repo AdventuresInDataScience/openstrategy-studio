@@ -14,7 +14,7 @@ import platformdirs
 APP_NAME = "openstrategy-studio"
 
 # Keys written to vbt.settings["vectorbtx"]. None means "leave vectorbtX's default".
-VECTORBTX_KEYS = ["rounding", "financing_markup", "fx_markup", "slippage_max", "slippage_coef", "vol_window",
+VECTORBTX_KEYS = ["rounding", "financing_markup", "carry_markup", "fx_markup", "slippage_max", "slippage_coef", "vol_window",
                   "triple_day", "end_of_day", "day_count", "fill_policy", "static_rate",
                   "triangulation_tolerance"]
 

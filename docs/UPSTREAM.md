@@ -10,6 +10,25 @@ uv run python -I docs/upstream/vectorbtx_issues.py     # prints PRESENT or FIXED
 
 Run it in vectorbtX's own environment while patching, or copy the checks into vectorbtX's tests. At `ace29e2`, all 13 are present.
 
+## Status (12 November 2026)
+
+**All 13 are fixed in vectorbtX `16293a2`**, which `uv.lock` now pins: the script reports 0 of 13 present, and vectorbtX carries the same checks in `tests/test_upstream_fixes.py`. The Studio workarounds below are removed, except where an issue says it can stay:
+
+| Issue | Studio side now |
+|---|---|
+| 1 | Removed: `compile_signals` and `export_script` shift nothing; `shift_shorts` is gone. |
+| 2 | Kept by choice: an FX pair still goes through `PortfolioBacktest(instruments=...)`. The account currency is now passed as `account_currency=`, since vectorbtX's flat `base_currency=` names a pair's base on FX terms. |
+| 3 | Studio to-do still open: require both currencies on an FX instrument. vectorbtX now skips carry for a missing leg, with a warning. |
+| 4 | Carry now includes `carry_markup`, which the Settings page can set. Saved FX runs change by the markup. |
+| 5, 6 | Removed: `engine.STOP_ENTRY_PRICE` / `STOP_EXIT_PRICE` and their `call_plan` lines. |
+| 7, 8 | Nothing to remove; `validate_spec` still rejects fixed weights above 100%. |
+| 9 | Removed: the Settings caption. The markup is charged, from the Settings page. |
+| 10 | `pf[[column]]` stays in `run_vectorised` (harmless). |
+| 11 | Removed: `analysis.extract_results` draws `pf.x.intrabar_drawdown_series()`. |
+| 12 | Nothing to remove. |
+| 13 | The API exists (`cash`, `entry_priority`, `when_cash_short`); the Studio side is still to build. |
+| 14 | **New, open.** See below. |
+
 ## Where each phase 0 finding belongs
 
 | Belongs in | Findings |
@@ -169,3 +188,10 @@ Severity: **wrong numbers** means a plausible result with no error, which is the
   * an account choice between "each symbol trades its own copy of the account" and "one shared account";
   * for a shared account, a priority picker (symbol order, random with a seed, or by a feature such as the strongest momentum) and a skip-or-shrink choice;
   * results that label the replicated case as N accounts, with a per-symbol table. Today the stats tables silently average the columns.
+
+### 14. Stops on the entry bar are not checked when an adjust callback is given (open)
+
+* **Where.** vectorbtX `16293a2`, `frontend/split_bars.py` (`can_split`) and the signals branch of `frontend/backtest.py`.
+* **What happens.** vectorbtX now checks a stop on the bar a position is entered, by simulating each bar as its open plus the rest of the bar, and mapping the orders back. A custom `adjust_sl_func_nb`, `adjust_tp_func_nb` or `signal_func_nb` takes opaque arguments that cannot be re-indexed to the two-step index, so with one the front door falls back to whole bars and warns ("stops are NOT checked on the bar a position is entered"). The Studio's extra exits (`exit_rules.py`: time stop, breakeven, step trailing) are exactly such callbacks, so **every strategy with an extra exit keeps the entry-bar bias**: a stop the entry bar trades through is missed. It always flatters the result, most for tight stops on daily bars.
+* **Fix, a suggestion.** Let a callback opt in to split bars, for example `split_bars=True` on the front door (or a marker attribute on the function), documented as: on the split index `c.i` and `c.init_i` are steps, the bar is `c.i // 2`, even steps are the open (O = H = L = C = open) and odd steps the rest of the bar; per-bar arrays in the callback's arguments stay per bar. The Studio's templates would then index by `c.i // 2` and count bars as `c.i // 2 - c.init_i // 2`, and the time stop would fire on the open step. The phase 3 gate (`tests/test_exit_rules.py::test_gate_matches_the_reference_simulator`) would need its reference simulator to check the entry bar too.
+* **Studio side, until then.** `test_exit_rules.py::test_extra_exits_say_the_entry_bar_is_not_checked` pins the warning, so the gap stays visible; delete it when this is fixed.

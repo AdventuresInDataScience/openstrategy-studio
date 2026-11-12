@@ -2,7 +2,7 @@
 
 Define a trading strategy through forms, a rule builder and expressions, then backtest it, optimise it and read a tear sheet, all without writing code. Everything runs locally on [vectorbtX](https://github.com/AdventuresInDataScience/vectorbtx) (`vbt.x.SingleBacktest` and `vbt.x.PortfolioBacktest`), vectorbt 1.1.0, ta_patterns, BUTChC, Optuna, marsopt and plotly-themes.
 
-**Status: all five phases of the implementation plan are written, and phase 0 (confirming the code against the real libraries) has been run.** The test suite and `openstrategy-studio selfcheck` pass on vectorbt 1.1.0 and vectorbtX `ace29e2`. [`docs/VERIFY.md`](docs/VERIFY.md) records every answer, what changed, and the two items still open (a real MT4/MT5 export and a clean-machine install). The issues found in vectorbtX itself are in [`docs/UPSTREAM.md`](docs/UPSTREAM.md), each with a standalone reproduction. Working on this with Claude Code? [`CLAUDE.md`](CLAUDE.md) is its orientation file.
+**Status: all five phases of the implementation plan are written, and phase 0 (confirming the code against the real libraries) has been run.** The test suite and `openstrategy-studio selfcheck` pass on vectorbt 1.1.0 and vectorbtX `16293a2`, which fixes the 13 issues phase 0 found in it. [`docs/VERIFY.md`](docs/VERIFY.md) records every answer, what changed, and the two items still open (a real MT4/MT5 export and a clean-machine install). The issues found in vectorbtX itself are in [`docs/UPSTREAM.md`](docs/UPSTREAM.md), each with a standalone reproduction. Working on this with Claude Code? [`CLAUDE.md`](CLAUDE.md) is its orientation file.
 
 ## Install and run
 
@@ -71,7 +71,7 @@ CLAUDE.md         orientation for Claude Code
 
 ## Known limits
 
-* **The FX conversion markup and the carry markup are not charged**, because of bugs in the installed vectorbtX (`docs/UPSTREAM.md`, issues 9 and 4). The Settings field is kept for when they are fixed.
+* **With an extra exit (time stop, breakeven, step trailing), a stop is not checked on the bar the trade was entered.** Without one it is. That flatters tight stops on daily bars, and the backtest warns about it (`docs/UPSTREAM.md`, issue 14).
 * **The buy-and-hold benchmark is before costs.** It is the market itself, held unlevered, which is what beta and alpha are measured against.
 * **The bundled app is a spike.** The installer is the shipped route.
 * **The instrument grid** warns about fields a mode rejects instead of greying them out.

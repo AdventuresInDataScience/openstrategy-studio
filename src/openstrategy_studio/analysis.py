@@ -147,25 +147,12 @@ def extract_results(run, benchmark=False):
     returns.iloc[0] = value.iloc[0] / init_cash - 1
     frame = pd.DataFrame({"value": value, "returns": returns, "drawdown": value / value.cummax() - 1})
     if getattr(pf, "high", None) is not None and getattr(pf, "low", None) is not None:
-        # ⚠️ Not pf.x.intrabar_drawdown(), for three phase 0 findings (docs/UPSTREAM.md, issue 11):
-        # 1. It returns only the WORST value (a float); the figure draws the curve.
-        # 2. It sums pf.cash(group_by=False), which counts SHARED starting cash once per
-        #    column, so on every weights portfolio it understates the drawdown (a 4-asset
-        #    book reported -1.9% for a true -7.1%). The group-level pf.cash() reconciles
-        #    exactly with pf.value(), and nets out the margin loan.
-        # 3. It values every position long. A short is best at the LOW and worst at the
-        #    high, so each side is bracketed by its own extremes here.
-        # For a long-only book without shared cash this equals vectorbtX's number exactly
-        # (tests/test_portfolio.py::test_intrabar_drawdown_brackets_the_close_drawdown).
-        assets = pd.DataFrame(pf.assets())
-        highs = pd.DataFrame(pf.high).reindex(columns=assets.columns)
-        lows = pd.DataFrame(pf.low).reindex(columns=assets.columns)
-        cash = _total(pf.cash())
-        longs, shorts = assets.clip(lower=0), assets.clip(upper=0)
-        best = (longs * highs + shorts * lows).sum(axis=1) + cash
-        worst = (longs * lows + shorts * highs).sum(axis=1) + cash
+        # vectorbtX's own curve (16293a2): shared cash counted once, each side bracketed
+        # by its own extremes (a long is worst at the low, a short at the high). Before
+        # that fix (docs/UPSTREAM.md issue 11) the Studio computed it here. vectorbtX
+        # reports a positive fraction; the tear sheet draws drawdowns as negatives.
         # Never shallower than the close-to-close drawdown, and routinely deeper.
-        frame["intrabar_drawdown"] = (worst / best.cummax() - 1).reindex(frame.index)
+        frame["intrabar_drawdown"] = (-pf.x.intrabar_drawdown_series()).reindex(frame.index)
     if benchmark:
         bench_value = _total(pf.benchmark_value()).reindex(frame.index)
         frame["benchmark"] = bench_value / bench_value.iloc[0] * value.iloc[0]

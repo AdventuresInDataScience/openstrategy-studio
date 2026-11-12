@@ -237,11 +237,12 @@ def evaluate_rule(node, data, features, spec_features, fingerprint):
 # Signal strategies
 # ---------------------------------------------------------------------------
 
-def compile_signals(spec, data, shift_shorts=True):
+def compile_signals(spec, data):
     """{"entries", "exits", "short_entries", "short_exits"}: boolean frames like close.
 
-    `spec` must already have its parameters applied (no "opt" nodes).
-    shift_shorts=False is only for the live preview, which marks signal bars.
+    `spec` must already have its parameters applied (no "opt" nodes). All four are
+    on the bar the signal is computed on: the front door shifts every one of them to
+    the next bar's open itself, so none is shifted here.
     """
     close = data["close"]
     fingerprint = data_fingerprint(data)
@@ -265,19 +266,11 @@ def compile_signals(spec, data, shift_shorts=True):
         else:
             out[names[slot]] = pd.DataFrame(False, index=close.index, columns=close.columns)
 
-    # 4. Shift short signals by one bar.
-    # ⚠️ PortfolioBacktest shifts entries, exits and schedule itself (_next_bar),
-    # but short_entries/short_exits travel through **kwargs to
-    # Portfolio.from_signals UNSHIFTED. A short computed at bar t's close would
-    # fill at bar t's open: lookahead. So shorts are shifted here, and long
-    # signals must NOT be shifted again (the front door does it).
-    # This is a vectorbtX bug (docs/UPSTREAM.md, issue 1). Remove this shift, and
-    # the matching lines in export_script, in the SAME change that bumps to a
-    # vectorbtX that shifts shorts itself; otherwise shorts are shifted twice.
-    # test_engine.py::test_short_signal_fills_next_open fails either way round.
-    if shift_shorts:
-        out["short_entries"] = out["short_entries"].shift(1, fill_value=False)
-        out["short_exits"] = out["short_exits"].shift(1, fill_value=False)
+    # ⚠️ No shift here, for any of the four. The front door shifts entries, exits,
+    # short entries and short exits to the next bar's open itself (vectorbtX 16293a2,
+    # docs/UPSTREAM.md issue 1, which used to leave the shorts unshifted). Shifting
+    # here as well would delay every signal two bars.
+    # test_engine.py::test_short_signal_fills_next_open checks the outcome.
     return out
 
 
@@ -640,10 +633,7 @@ def export_script(spec, data_dir=None):
                 body.append(f"{names[slot]} = {_rule_code(rules[slot], spec_features)}")
             else:
                 body.append(f"{names[slot]} = pd.DataFrame(False, index=close.index, columns=close.columns)")
-        body += ["# ⚠️ The front door shifts entries and exits by one bar itself, but NOT the",
-                 "# short arrays (they pass through **kwargs unshifted), so shift them here.",
-                 "short_entries = short_entries.shift(1, fill_value=False)",
-                 "short_exits = short_exits.shift(1, fill_value=False)"]
+        body.append("# The front door shifts all four signal arrays to the next bar's open itself.")
     elif kind == "portfolio":
         body += _portfolio_code(spec)
         body.append(f"min_trade = {float(spec['schedule'].get('min_trade', 0.0))!r}")

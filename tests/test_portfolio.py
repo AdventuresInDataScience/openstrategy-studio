@@ -51,9 +51,10 @@ def test_calendar_and_threshold_uses_drift_anchor(momentum_spec, ohlcv_multi):
 def test_intrabar_drawdown_brackets_the_close_drawdown(ma_spec, ohlcv, momentum_spec, ohlcv_multi):
     """The intrabar curve is never shallower than the close-to-close one, at every bar.
 
-    For a long-only book without shared cash it is vectorbtX's own number. Where cash
-    is shared (every weights portfolio) vectorbtX's figure counts the starting cash
-    once per column, so there the Studio's must be deeper (see analysis.extract_results).
+    It is vectorbtX's own number, with or without shared cash (every weights portfolio
+    shares it). vectorbtX ace29e2 counted shared starting cash once per column, which
+    made its figure shallower than the close-to-close one; 16293a2 fixed that
+    (docs/UPSTREAM.md issue 11), so the two now agree everywhere.
     """
     pytest.importorskip("vectorbtx")
     from openstrategy_studio import analysis
@@ -68,7 +69,9 @@ def test_intrabar_drawdown_brackets_the_close_drawdown(ma_spec, ohlcv, momentum_
     series = analysis.extract_results(single)["series"]
     assert -series["intrabar_drawdown"].min() == pytest.approx(single["pf"].x.intrabar_drawdown(), rel=1e-12)
     series = analysis.extract_results(shared)["series"]
-    assert -series["intrabar_drawdown"].min() > shared["pf"].x.intrabar_drawdown()
+    assert -series["intrabar_drawdown"].min() == pytest.approx(shared["pf"].x.intrabar_drawdown(), rel=1e-12)
+    # ...and on shared cash it is deeper than the close-to-close drawdown, as it must be.
+    assert -series["intrabar_drawdown"].min() >= -series["drawdown"].min()
 
 
 def test_intrabar_drawdown_of_a_short_uses_the_high(ma_spec):

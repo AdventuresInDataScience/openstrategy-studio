@@ -12,9 +12,10 @@ the spec ("lit") or a named runtime value ("var": close, entries, rates ...).
 renders the same plan as source code, so the two cannot disagree about
 arguments.
 
-Phase 0 has been run against vectorbt 1.1.0 and vectorbtX ace29e2: every call
-site here was executed, and the findings (with what changed) are in
-docs/VERIFY.md. Anything still marked ⚠️ VERIFY is listed there as open.
+Phase 0 has been run against vectorbt 1.1.0 and vectorbtX ace29e2, and re-run on
+16293a2 (which fixes what it found): every call site here was executed, and the
+findings (with what changed) are in docs/VERIFY.md. Anything still marked
+⚠️ VERIFY is listed there as open.
 """
 
 import importlib.metadata
@@ -34,21 +35,15 @@ from .spec import SIZING_KEYS, apply_params, strategy_kind
 # tests/test_engine.py::test_same_bar_stop_and_target pins it. The Risk tab shows it.
 SAME_BAR_STOP_RULE = "stop"
 
-# ⚠️ Two vectorbt stop defaults that silently give wrong numbers here, overridden
-# on every call with a stop or target (phase 0 findings, docs/VERIFY.md 2.8, 2.9; vectorbtX issues 5 and 6
-# in docs/UPSTREAM.md: delete these two overrides once vectorbtX sets them itself):
+# Stops are measured from the fill and pay the spread: vectorbtX's front door sets
+# stop_entry_price="price" and stop_exit_price="stopmarket" itself (vectorbtX 16293a2,
+# docs/UPSTREAM.md issues 5 and 6). vectorbt's own defaults anchor a stop at the entry
+# bar's close and fill it with no slippage, so nothing here may pass them.
 #
-# * stop_entry_price defaults to "close": vectorbt anchors the stop fraction at
-#   the ENTRY BAR'S CLOSE, while vectorbtX converted the points into a fraction of
-#   the OPEN the order filled at. A 2-point stop on a buy at 100 on a bar that
-#   closed at 103 sat at 100.94, above the entry. "price" anchors it at the order
-#   price (the open, before the spread), so the stop is exactly N points away.
-# * stop_exit_price defaults to "stoplimit", which fills a stop with ZERO slippage.
-#   vectorbtX puts the spread into slippage, so a stopped-out trade paid half the
-#   spread on entry and nothing on exit, while a signal exit paid both halves.
-#   "stopmarket" charges the same cost on every exit.
-STOP_ENTRY_PRICE = "price"
-STOP_EXIT_PRICE = "stopmarket"
+# ⚠️ It also checks a stop on the bar the position is entered, by simulating each bar
+# as its open plus the rest of the bar, EXCEPT when a custom numba callback is given:
+# the extra exits (exit_rules.py) pass adjust_sl_func_nb, so for them the entry bar's
+# range is not checked and vectorbtX warns. docs/UPSTREAM.md, issue 14.
 
 
 def vectorbtx():
@@ -310,14 +305,14 @@ def prepare_data(spec, data, data_dir=None):
     universe = load_universe(spec, data_dir)
     out = dict(data)
     for field in ("open", "high", "low", "close"):
-        # Signature (verified): to_base_currency(data, base, fx_table=None,
-        # quote_currency=None, instruments=None, fx_markup=0.005, fill_policy=
-        # "ffill_with_warning", validate=True, fx=None).
-        # ⚠️ The markup is NOT charged (docs/UPSTREAM.md, issue 9): it rides on the
-        # result's .fx_markup attribute, and PortfolioBacktest's pd.DataFrame(open)
-        # drops it before costs are resolved. A 0.5% and a 5% markup fill at the same
-        # price, and fx_markup= is not a front-door argument. The function default also
-        # ignores vbt.settings["vectorbtx"]["fx_markup"]; passing it would not help.
+        # Signature (vectorbtX 16293a2): to_base_currency(data, base, fx_table=None,
+        # quote_currency=None, instruments=None, fx_markup=None, fill_policy=
+        # "ffill_with_warning", validate=True, fx=None). fx_markup=None reads
+        # vbt.settings["vectorbtx"]["fx_markup"], which the Settings page writes.
+        # The markup rides on the result's .fx_markup and the front door charges it as
+        # slippage on every fill of a converted column (docs/UPSTREAM.md issue 9, fixed).
+        # ⚠️ So these frames must reach the front door as ConvertedFrames: slicing them
+        # with .loc keeps the attribute (tests/test_engine.py checks the fill price).
         out[field] = vectorbtx().x.to_base_currency(data[field], base=account["base_currency"],
                                                     fx=data["fx"], instruments=universe)
     return out
@@ -341,13 +336,12 @@ def call_plan(spec, data_dir=None):
     fields = {} if "from_file" in instruments else instrument_fields(spec)
     # SingleBacktest takes flat instrument keywords and rejects instruments=, so it
     # is used only when every instrument field survives the flat form.
-    # ⚠️ Phase 0 finding (docs/UPSTREAM.md, issue 2): a flat `base_currency=` is NOT the instrument's.
-    # PortfolioBacktest names `base_currency` as the ACCOUNT currency, so the flat form
-    # swallows it: an EURUSD spread bet loses its pair, carry resolves to zero (with a
-    # "no currency pair" warning) and it is charged financing instead, 3x the carry at
-    # EUR 3% / USD 4.5%. An instrument that names its base currency (any FX pair), or a
-    # reporting currency, therefore goes through PortfolioBacktest's instruments= form,
-    # which keeps the field on the instrument. Same implementation, one column.
+    # An instrument that names its base currency (any FX pair), or a reporting
+    # currency, goes through PortfolioBacktest's instruments= form, which keeps every
+    # field on the instrument unambiguously. Same implementation, one column.
+    # (Phase 0, docs/UPSTREAM.md issue 2: vectorbtX ace29e2 read a flat base_currency=
+    # as the ACCOUNT currency and dropped the pair. 16293a2 fixed that; the route stays
+    # because it never depends on how a flat keyword is read.)
     single = (kind != "portfolio" and len(symbols) == 1 and "from_file" not in instruments
               and not account.get("base_currency") and not fields[symbols[0]].get("base_currency"))
     args = {}
@@ -378,7 +372,7 @@ def call_plan(spec, data_dir=None):
         # exits into short entries, so nothing but a stop closes a position).
         args["entries"] = ("var", "entries")
         args["exits"] = ("var", "exits")
-        args["short_entries"] = ("var", "short_entries")      # already shifted by compile
+        args["short_entries"] = ("var", "short_entries")      # shifted by the front door, like entries
         args["short_exits"] = ("var", "short_exits")
     elif kind == "portfolio":
         args["weights"] = ("var", "weights")
@@ -415,16 +409,16 @@ def call_plan(spec, data_dir=None):
                 # A far target is accepted, so adjust_tp_nb is called on every bar
                 # (verified by the phase 3 gate in tests/test_exit_rules.py).
                 args["target_points"] = ("lit", FAR_TARGET_POINTS)
-    if any(key in args for key in ("stop_points", "trail_points", "target_points")):
-        # See STOP_ENTRY_PRICE and STOP_EXIT_PRICE at the top of this file.
-        args["stop_entry_price"] = ("lit", STOP_ENTRY_PRICE)
-        args["stop_exit_price"] = ("lit", STOP_EXIT_PRICE)
+    # No stop_entry_price / stop_exit_price: the front door sets both (see the top of this file).
 
     # Account. ⚠️ Always pass freq=, or annualised metrics are filtered out.
     args["init_cash"] = ("lit", account["init_cash"])
     args["freq"] = ("lit", account["freq"])
     if account.get("base_currency"):
-        args["base_currency"] = ("lit", account["base_currency"])
+        # The spec's "base_currency" is the REPORTING currency. vectorbtX's own
+        # `base_currency=` names a pair's base when the flat terms describe FX, so the
+        # account goes by the name that has only one meaning.
+        args["account_currency"] = ("lit", account["base_currency"])
     if account.get("fx"):
         args["fx"] = ("var", "fx")
     if account.get("rates"):
@@ -543,11 +537,9 @@ def run_vectorised(spec, data, params_list, window=None, data_dir=None, offline=
     is an independent account; tests/test_vectorised.py checks that every trial
     equals the same trial run alone (the phase 3 gate).
 
-    ⚠️ Each trial is selected as pf[[column]], never pf[column]. vectorbtX (ace29e2)
-    slices its margin loan by the same index in Portfolio.indexing_func, and a scalar
-    label leaves a 0-d array that vectorbt's numba init_cash_grouped_nb cannot index,
-    so every metric of pf[column] raises on a leveraged instrument. Selecting by list
-    keeps the loan 1-D. Selection lives here so no caller can get it wrong.
+    Each trial is selected as pf[[column]], a one-column portfolio like the one a
+    single run returns. (vectorbtX ace29e2 also crashed every metric of pf[column] on
+    a leveraged instrument; 16293a2 fixed that, docs/UPSTREAM.md issue 10.)
     """
     from .compile import compile_signals
 

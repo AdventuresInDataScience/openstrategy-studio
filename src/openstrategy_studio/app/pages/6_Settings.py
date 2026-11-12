@@ -45,17 +45,15 @@ rounding = st.selectbox("Size rounding", roundings,
                         index=roundings.index(vectorbtx_values.get("rounding")) if vectorbtx_values.get("rounding") in roundings else 0,
                         format_func=lambda value: "Default" if value is None else value)
 vectorbtx_values["rounding"] = rounding
-numbers = ["financing_markup", "fx_markup", "slippage_max", "slippage_coef", "vol_window", "static_rate",
-           "triangulation_tolerance"]
+numbers = ["financing_markup", "carry_markup", "fx_markup", "slippage_max", "slippage_coef", "vol_window",
+           "static_rate", "triangulation_tolerance"]
 texts = ["triple_day", "end_of_day", "day_count", "fill_policy"]
 frame = pd.DataFrame({"setting": numbers + texts,
                       "value": [None if vectorbtx_values.get(key) is None else str(vectorbtx_values[key])
                                 for key in numbers + texts]})
 edited = st.data_editor(frame, hide_index=True, disabled=["setting"], width="stretch")
-# ⚠️ Phase 0 finding (docs/UPSTREAM.md, issue 9): in vectorbtX ace29e2 the front door drops the
-# converted frames' .fx_markup before costs are resolved, so the markup is never charged.
-st.caption("fx_markup is saved but has no effect yet: the installed vectorbtX does not charge the currency "
-           "conversion markup on backtests in a reporting currency.")
+st.caption("carry_markup is the broker's fee on FX carry and fx_markup its worse-than-market currency "
+           "conversion rate; both are charged on every backtest that uses them.")
 for key, value in zip(edited["setting"], edited["value"]):
     if value is None or str(value).strip() == "":
         vectorbtx_values[key] = None

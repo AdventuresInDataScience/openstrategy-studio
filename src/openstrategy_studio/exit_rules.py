@@ -36,8 +36,13 @@ Verified in phase 0 against vectorbt 1.1.0 (the phase 3 gate passes):
   whenever an adjust function is given (can_use_static is False).
 * Order on each bar: adjust_sl, adjust_tp, then the stop check, then the trailing
   reference is updated from that bar's high (long) or low (short).
-* init_price is the order price, the fill open before the spread, because the engine
-  passes stop_entry_price="price" (engine.STOP_ENTRY_PRICE).
+* init_price is the order price, the fill open before the spread, because vectorbtX's
+  front door sets stop_entry_price="price" (vectorbtX 16293a2).
+
+⚠️ vectorbtX checks a stop on the bar it was entered by simulating each bar as its open
+plus the rest of the bar, but not when a custom callback is given (these templates index
+their arrays by bar, and c.i would be a half-bar step). With an extra exit active the
+entry bar's range is therefore NOT checked, and vectorbtX warns. docs/UPSTREAM.md, issue 14.
 tests/test_exit_rules.py::test_gate_matches_the_reference_simulator pins all of it.
 """
 

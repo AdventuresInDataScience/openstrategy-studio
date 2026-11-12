@@ -227,3 +227,17 @@ def test_gate_matches_the_reference_simulator():
                                  side=side, stop_points=stop_points, settings=exits)
         assert when == data["close"].index[bar], (exits, side, when, bar)
         assert price == pytest.approx(expected), (exits, side, price, expected)
+
+
+def test_extra_exits_say_the_entry_bar_is_not_checked():
+    """docs/UPSTREAM.md issue 14 (open). vectorbtX checks a stop on its entry bar by
+    splitting each bar in two, which it cannot do with a custom callback, so with an
+    extra exit active it falls back to whole bars and warns. This pins the warning, so
+    the gap stays visible; when vectorbtX closes it, this test fails: delete it then."""
+    pytest.importorskip("vectorbtx")
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        engine.run_backtest(gate_spec({"time_bars": 4}, 20), bars([100.0] * 10))
+    assert any("NOT checked on the bar a position is entered" in str(w.message) for w in caught)
