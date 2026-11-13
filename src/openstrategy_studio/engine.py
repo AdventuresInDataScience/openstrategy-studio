@@ -40,10 +40,10 @@ SAME_BAR_STOP_RULE = "stop"
 # docs/UPSTREAM.md issues 5 and 6). vectorbt's own defaults anchor a stop at the entry
 # bar's close and fill it with no slippage, so nothing here may pass them.
 #
-# ⚠️ It also checks a stop on the bar the position is entered, by simulating each bar
-# as its open plus the rest of the bar, EXCEPT when a custom numba callback is given:
-# the extra exits (exit_rules.py) pass adjust_sl_func_nb, so for them the entry bar's
-# range is not checked and vectorbtX warns. docs/UPSTREAM.md, issue 14.
+# It also checks a stop on the bar the position is entered, by simulating each bar as
+# its open plus the rest of the bar. That includes the extra exits (exit_rules.py): since
+# vectorbtX 9f4cf54 each adjust callback is wrapped so it sees bars and is called once per
+# bar at the open, exactly as on whole bars (docs/UPSTREAM.md, issue 14, fixed).
 
 
 def vectorbtx():

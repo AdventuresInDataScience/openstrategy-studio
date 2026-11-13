@@ -12,7 +12,7 @@ Run it in vectorbtX's own environment while patching, or copy the checks into ve
 
 ## Status (12 November 2026)
 
-**All 13 are fixed in vectorbtX `16293a2`**, which `uv.lock` now pins: the script reports 0 of 13 present, and vectorbtX carries the same checks in `tests/test_upstream_fixes.py`. The Studio workarounds below are removed, except where an issue says it can stay:
+**All 13 are fixed in vectorbtX `16293a2`, and issue 14, found with those fixes, in `9f4cf54`**, which `uv.lock` now pins: the script reports 0 of 13 present, and vectorbtX carries the same checks in `tests/test_upstream_fixes.py`. Nothing here is open in vectorbtX. The Studio workarounds below are removed, except where an issue says it can stay:
 
 | Issue | Studio side now |
 |---|---|
@@ -27,7 +27,7 @@ Run it in vectorbtX's own environment while patching, or copy the checks into ve
 | 11 | Removed: `analysis.extract_results` draws `pf.x.intrabar_drawdown_series()`. |
 | 12 | Nothing to remove. |
 | 13 | The API exists (`cash`, `entry_priority`, `when_cash_short`); the Studio side is still to build. |
-| 14 | **New, open.** See below. |
+| 14 | Fixed in `9f4cf54`; nothing to remove. The pinning test became `test_extra_exits_check_the_entry_bar_without_a_warning`, and the exit-rules gate gained entry-bar cases. |
 
 ## Where each phase 0 finding belongs
 
@@ -189,7 +189,13 @@ Severity: **wrong numbers** means a plausible result with no error, which is the
   * for a shared account, a priority picker (symbol order, random with a seed, or by a feature such as the strongest momentum) and a skip-or-shrink choice;
   * results that label the replicated case as N accounts, with a per-symbol table. Today the stats tables silently average the columns.
 
-### 14. Stops on the entry bar are not checked when an adjust callback is given (open)
+### 14. Stops on the entry bar are not checked when an adjust callback is given (fixed in `9f4cf54`)
+
+* **What was done.** Not the opt-in suggested below: vectorbtX wraps each `adjust_sl_func_nb` / `adjust_tp_func_nb` in a bar view, automatically. On the split index the wrapper calls the callback only on a bar's open step, with `c.i`, `c.init_i` and `c.curr_i` divided back to bars and its arguments untouched, and returns the stop unchanged on the rest of the bar. A callback therefore sees exactly the calls it saw on whole bars, so the Studio's templates needed no change, and the rest of the entry bar is checked. Only a custom `signal_func_nb`, or templates (`vbt.Rep`) in a callback's arguments, still fall back to whole bars with the warning; the Studio uses neither.
+* **Found while fixing it.** Handed the split index unwrapped, a callback's `c.i` runs to twice the bar count, and because numba does not bounds-check, the templates would have written past the end of their `state_*` arrays and corrupted memory. The whole-bar fallback in `16293a2` was therefore necessary, not just conservative.
+* **Studio side.** `test_extra_exits_check_the_entry_bar_without_a_warning` replaces the pinning test. The exit-rules gate gained four entry-bar cases (each template, long and short), checked against the reference simulator, which always checked the entry bar: they pass on `9f4cf54` and fail on `16293a2`.
+
+The original report:
 
 * **Where.** vectorbtX `16293a2`, `frontend/split_bars.py` (`can_split`) and the signals branch of `frontend/backtest.py`.
 * **What happens.** vectorbtX now checks a stop on the bar a position is entered, by simulating each bar as its open plus the rest of the bar, and mapping the orders back. A custom `adjust_sl_func_nb`, `adjust_tp_func_nb` or `signal_func_nb` takes opaque arguments that cannot be re-indexed to the two-step index, so with one the front door falls back to whole bars and warns ("stops are NOT checked on the bar a position is entered"). The Studio's extra exits (`exit_rules.py`: time stop, breakeven, step trailing) are exactly such callbacks, so **every strategy with an extra exit keeps the entry-bar bias**: a stop the entry bar trades through is missed. It always flatters the result, most for tight stops on daily bars.

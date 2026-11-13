@@ -4,10 +4,13 @@ Three layers:
 1. The stop arithmetic, as plain functions.
 2. A reference simulator that drives the callbacks bar by bar under the
    semantics the templates assume (adjust before the stop check; a trailing
-   reference that follows completed bars' highs; gaps fill at the open). This
-   checks the templates do what they promise IF vectorbt behaves that way.
+   reference that follows completed bars' highs; gaps fill at the open; the
+   entry bar's own range is checked). This checks the templates do what they
+   promise IF vectorbt behaves that way.
 3. Hand-built bars through vectorbtX (skipped without it): the phase 3 gate,
-   which checks vectorbt really behaves that way.
+   which checks vectorbt really behaves that way. Its entry-bar cases need
+   vectorbtX 9f4cf54 or later: before it, a stop the entry bar traded through was
+   missed whenever an extra exit was active (docs/UPSTREAM.md, issue 14).
 """
 
 import copy
@@ -135,6 +138,36 @@ def test_reference_short_step_trailing():
     assert price == pytest.approx(98.0)                      # lows reach 93.5: 3 steps down from 104
 
 
+# Entry at bar 1's open (100), and bar 1 itself trades through the initial stop. Each
+# template is still on its initial stop on the entry bar (no completed bar since entry,
+# no bars held), so every one is stopped on bar 1 at the initial stop.
+ENTRY_BAR_CASES = [
+    ({"time_bars": 4}, 20, "long", 79.0, 80.0),
+    ({"breakeven_points": 4}, 5, "long", 94.0, 95.0),
+    ({"step_points": 2}, 4, "long", 95.5, 96.0),
+    ({"step_points": 2}, 4, "short", 104.5, 104.0),
+]
+
+
+def entry_bar_extremes(opens, side, extreme, spread=0.5):
+    """Highs and lows `spread` around the opens, with bar 1 reaching `extreme` against the position."""
+    highs = [value + spread for value in opens]
+    lows = [value - spread for value in opens]
+    if side == "long":
+        lows[1] = extreme
+    else:
+        highs[1] = extreme
+    return highs, lows
+
+
+def test_reference_checks_the_entry_bar():
+    opens = [100.0] * 10
+    for exits, stop_points, side, extreme, stop in ENTRY_BAR_CASES:
+        highs, lows = entry_bar_extremes(opens, side, extreme)
+        bar, price = simulate(opens, highs, lows, entry_bar=1, side=side, stop_points=stop_points, settings=exits)
+        assert (bar, price) == (1, pytest.approx(stop)), (exits, side, bar, price)
+
+
 def exits_spec(ma_spec, **exits):
     spec = copy.deepcopy(ma_spec)
     spec["risk"]["exits"] = exits
@@ -228,16 +261,34 @@ def test_gate_matches_the_reference_simulator():
         assert when == data["close"].index[bar], (exits, side, when, bar)
         assert price == pytest.approx(expected), (exits, side, price, expected)
 
+    # The entry bar itself: every template's initial stop is hit on bar 1, as the
+    # reference simulator says (docs/UPSTREAM.md issue 14, fixed in vectorbtX 9f4cf54).
+    opens = [100.0] * 10
+    for exits, stop_points, side, extreme, _ in ENTRY_BAR_CASES:
+        data = bars(opens)
+        highs, lows = entry_bar_extremes(opens, side, extreme)
+        data["high"]["X"], data["low"]["X"] = highs, lows
+        run = engine.run_backtest(gate_spec(exits, stop_points, side), data)
+        when, price = first_exit(run)
+        bar, expected = simulate(opens, highs, lows, entry_bar=1, side=side, stop_points=stop_points, settings=exits)
+        assert when == data["close"].index[bar], ("entry bar", exits, side, when, bar)
+        assert price == pytest.approx(expected), ("entry bar", exits, side, price, expected)
 
-def test_extra_exits_say_the_entry_bar_is_not_checked():
-    """docs/UPSTREAM.md issue 14 (open). vectorbtX checks a stop on its entry bar by
-    splitting each bar in two, which it cannot do with a custom callback, so with an
-    extra exit active it falls back to whole bars and warns. This pins the warning, so
-    the gap stays visible; when vectorbtX closes it, this test fails: delete it then."""
+
+def test_extra_exits_check_the_entry_bar_without_a_warning():
+    """vectorbtX 9f4cf54 runs the extra exits on split bars too (each callback sees bars,
+    called once per bar at the open), so nothing falls back to whole bars. Before it,
+    vectorbtX warned that the entry bar was NOT checked: docs/UPSTREAM.md issue 14."""
     pytest.importorskip("vectorbtx")
     import warnings
 
+    data = bars([100.0] * 10)
+    data["low"]["X"] = entry_bar_extremes([100.0] * 10, "long", 79.0)[1]
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        engine.run_backtest(gate_spec({"time_bars": 4}, 20), bars([100.0] * 10))
-    assert any("NOT checked on the bar a position is entered" in str(w.message) for w in caught)
+        run = engine.run_backtest(gate_spec({"time_bars": 4}, 20), data)
+    assert not [w for w in caught if "NOT checked" in str(w.message)]
+    when, price = first_exit(run)
+    # On whole bars this trade survived the drop to 79 and the time stop closed it flat
+    # at 100 four bars later: a 20-point loss reported as nothing.
+    assert when == data["close"].index[1] and price == pytest.approx(80.0)

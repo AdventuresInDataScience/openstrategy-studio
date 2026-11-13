@@ -39,10 +39,13 @@ Verified in phase 0 against vectorbt 1.1.0 (the phase 3 gate passes):
 * init_price is the order price, the fill open before the spread, because vectorbtX's
   front door sets stop_entry_price="price" (vectorbtX 16293a2).
 
-⚠️ vectorbtX checks a stop on the bar it was entered by simulating each bar as its open
-plus the rest of the bar, but not when a custom callback is given (these templates index
-their arrays by bar, and c.i would be a half-bar step). With an extra exit active the
-entry bar's range is therefore NOT checked, and vectorbtX warns. docs/UPSTREAM.md, issue 14.
+vectorbtX checks a stop on the bar it was entered by simulating each bar as its open plus
+the rest of the bar. Since 9f4cf54 it wraps these callbacks in a bar view: they are called
+once per bar, at the open, with c.i, c.init_i and c.curr_i as BAR indices and their
+arguments untouched, exactly as on whole bars, so they keep indexing their per-bar arrays
+by c.i. ⚠️ Keep them that way: no template may assume it is called on every simulation
+row. Called on the raw split index, c.i would run to twice the bar count and write past
+the end of state_* (numba does not bounds-check). docs/UPSTREAM.md, issue 14.
 tests/test_exit_rules.py::test_gate_matches_the_reference_simulator pins all of it.
 """
 
