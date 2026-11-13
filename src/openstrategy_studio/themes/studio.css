@@ -1,0 +1,194 @@
+/* OpenStrategy Studio's stylesheet: one file, for every page theme.
+ *
+ * It names no colour of its own. Every value is an --os-* variable, which
+ * style.css_variables() writes in front of this file from the page theme
+ * (a .toml file in themes/), so changing a theme never means changing this file.
+ * ⚠️ Never write a less-than sign followed by a letter here, even in a comment:
+ * st.html's sanitiser (DOMPurify) then drops the whole stylesheet without a word.
+ * style.stylesheet() escapes them anyway, and tests/test_style.py checks.
+ * Streamlit's own theme ([theme] in the same file) already colours the widgets,
+ * fonts and corners. This adds what Streamlit has no option for: the page's glow,
+ * gradient titles and buttons, cards for metrics, expanders and charts, the
+ * sidebar's links, and gentle motion.
+ *
+ * Selectors are Streamlit's data-testid attributes, which it keeps stable for its
+ * own tests, never its st-emotion-cache-* classes, which change every release.
+ * ⚠️ VERIFY after a Streamlit upgrade (checked on 1.67): a renamed test id silently
+ * stops styling its element; nothing else breaks.
+ *
+ * Changes show on the next rerun (press R), no restart needed.
+ */
+
+/* --- the page --------------------------------------------------------------- */
+
+/* The glow sits over Streamlit's own background colour, so it never fights it. */
+.stApp {
+  background-image: var(--os-glow);
+  background-attachment: fixed;
+}
+
+/* A frosted header, so the glow shows through as the page scrolls under it. */
+[data-testid="stHeader"] {
+  background: color-mix(in srgb, var(--os-bg) 70%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+/* --- type ------------------------------------------------------------------- */
+
+/* The page title, filled with the theme's title gradient (one colour is a gradient
+   of one colour). The heading's link icon keeps its own colour. */
+[data-testid="stMain"] h1 > span[data-heading-text] {
+  background: var(--os-title-fill);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  letter-spacing: -0.02em;
+}
+
+[data-testid="stMain"] h2,
+[data-testid="stMain"] h3 {
+  letter-spacing: -0.01em;
+}
+
+[data-testid="stCaptionContainer"] {
+  color: var(--os-muted);
+}
+
+/* Numbers line up in columns. */
+[data-testid="stMetricValue"],
+[data-testid="stDataFrame"],
+[data-testid="stTable"] {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A divider that fades at both ends. */
+[data-testid="stMain"] hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--os-border) 15%, var(--os-border) 85%, transparent);
+}
+
+/* --- the sidebar ------------------------------------------------------------ */
+
+[data-testid="stSidebarNavLink"] {
+  border-radius: var(--os-radius);
+}
+
+[data-testid="stSidebarNavLink"]:hover {
+  background: color-mix(in srgb, var(--os-sidebar-primary) 12%, transparent);
+}
+
+/* The page you are on: tinted, with a bar in the theme's gradient on its left. */
+[data-testid="stSidebarNavLink"][aria-current="page"] {
+  background: color-mix(in srgb, var(--os-sidebar-primary) 18%, transparent);
+  box-shadow: inset 3px 0 0 var(--os-sidebar-primary);
+}
+
+[data-testid="stSidebarNavLink"][aria-current="page"] p {
+  color: var(--os-sidebar-primary);
+  font-weight: 600;
+}
+
+[data-testid="stSidebarNavLink"] p {
+  color: var(--os-sidebar-text);
+}
+
+/* --- cards: metrics, expanders, charts ------------------------------------- */
+
+[data-testid="stMetric"] {
+  background: var(--os-surface);
+  border: 1px solid var(--os-border);
+  border-radius: var(--os-radius);
+  padding: 0.6rem 0.7rem;
+  box-shadow: var(--os-shadow);
+}
+
+[data-testid="stExpander"] details {
+  background: var(--os-surface);
+  border-color: var(--os-border);
+  border-radius: var(--os-radius);
+  box-shadow: var(--os-shadow);
+}
+
+/* A chart theme with its own paper colour fills the card; the "page" chart theme is
+   transparent and shows the card's surface. */
+[data-testid="stPlotlyChart"],
+[data-testid="stGraphVizChart"] {
+  background: var(--os-surface);
+  border: 1px solid var(--os-border);
+  border-radius: var(--os-radius);
+  box-shadow: var(--os-shadow);
+  overflow: hidden;
+}
+
+/* --- tabs ------------------------------------------------------------------- */
+
+[data-testid="stTab"][aria-selected="true"] p {
+  font-weight: 600;
+}
+
+[data-testid="stTab"]:hover p {
+  color: var(--os-primary);
+}
+
+/* --- buttons ---------------------------------------------------------------- */
+
+/* Primary buttons wear the gradient. Disabled ones keep Streamlit's own grey. */
+[data-testid="stBaseButton-primary"]:not(:disabled),
+[data-testid="stBaseButton-primaryFormSubmit"]:not(:disabled) {
+  background: var(--os-gradient);
+  border-color: transparent;
+  color: var(--os-on-primary);
+  border-radius: var(--os-button-radius);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--os-primary) 32%, transparent);
+}
+
+[data-testid="stBaseButton-primary"]:not(:disabled) p,
+[data-testid="stBaseButton-primaryFormSubmit"]:not(:disabled) p {
+  color: var(--os-on-primary);
+}
+
+[data-testid="stBaseButton-primary"]:not(:disabled):hover,
+[data-testid="stBaseButton-primaryFormSubmit"]:not(:disabled):hover {
+  filter: brightness(1.07) saturate(1.05);
+  box-shadow: 0 6px 22px color-mix(in srgb, var(--os-primary) 42%, transparent);
+}
+
+[data-testid="stBaseButton-secondary"]:not(:disabled):hover,
+[data-testid="stBaseButton-secondaryFormSubmit"]:not(:disabled):hover {
+  border-color: var(--os-primary);
+  box-shadow: var(--os-shadow-hover);
+}
+
+/* --- motion: only for people who have not asked their system for less ---------- */
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-testid="stSidebarNavLink"],
+  [data-testid="stMetric"],
+  [data-testid="stPlotlyChart"],
+  [data-testid="stBaseButton-primary"],
+  [data-testid="stBaseButton-secondary"] {
+    transition: background-color 0.15s ease, box-shadow 0.2s ease, transform 0.2s ease, filter 0.2s ease;
+  }
+
+  [data-testid="stMetric"]:hover,
+  [data-testid="stPlotlyChart"]:hover {
+    box-shadow: var(--os-shadow-hover);
+  }
+
+  [data-testid="stBaseButton-primary"]:not(:disabled):hover,
+  [data-testid="stBaseButton-secondary"]:not(:disabled):hover {
+    transform: translateY(-1px);
+  }
+}
+
+/* --- scrollbars ------------------------------------------------------------- */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--os-text) 22%, transparent) transparent;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--os-accent) 30%, transparent);
+}

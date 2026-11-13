@@ -1,0 +1,44 @@
+# Midnight: deep navy, violet and cyan light. See daylight.toml for what each key does.
+
+[theme]
+base = "dark"
+primaryColor = "#8B7CFF"
+backgroundColor = "#0A0E1A"
+secondaryBackgroundColor = "#141A2C"
+textColor = "#E6E9F5"
+borderColor = "#252D45"
+linkColor = "#A5B4FC"
+font = "'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif"
+headingFont = "'Segoe UI Variable Display', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif"
+codeFont = "'Cascadia Code', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace"
+baseFontSize = 15
+baseRadius = "0.7rem"
+buttonRadius = "0.7rem"
+paddingTop = "1.5rem"
+headingFontSizes = ["2.4rem", "1.75rem", "1.3rem"]
+headingFontWeights = [750, 650, 600]
+metricValueFontSize = "1.8rem"
+dataframeHeaderBackgroundColor = "#111729"
+chartCategoricalColors = ["#8B7CFF", "#22D3EE", "#FBBF24", "#F472B6", "#34D399", "#A78BFA", "#FB7185", "#94A3B8"]
+
+[theme.sidebar]
+backgroundColor = "#070A14"
+secondaryBackgroundColor = "#111628"
+textColor = "#B9C1DA"
+borderColor = "#1B2238"
+
+[studio]
+label = "Midnight"
+description = "Deep navy with violet and cyan light."
+accent = "#22D3EE"
+gradient = "linear-gradient(120deg, #8B7CFF 0%, #C084FC 45%, #22D3EE 100%)"
+title_fill = "linear-gradient(120deg, #A99DFF 0%, #D6A8FF 45%, #5EE6F5 100%)"
+surface = "#0F1526"
+muted = "#8E97B3"
+on_primary = "#FFFFFF"
+shadow = "0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.30)"
+shadow_hover = "0 0 0 1px rgba(139, 124, 255, 0.28), 0 12px 36px rgba(139, 124, 255, 0.22)"
+glow = "radial-gradient(1000px 560px at 8% -10%, rgba(139, 124, 255, 0.18), transparent 60%), radial-gradient(900px 520px at 100% 0%, rgba(34, 211, 238, 0.12), transparent 55%)"
+positive = "#34D399"
+negative = "#FB7185"
+chart_theme = "page"

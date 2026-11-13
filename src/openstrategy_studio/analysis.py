@@ -22,7 +22,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import plotly_themes      # registers its themes in plotly's template registry on import
 
-from . import engine, store
+from . import engine, store, style
 from .compile import compile_features
 from .optimise import periods_per_year
 from .spec import spec_hash
@@ -31,17 +31,72 @@ from .spec import spec_hash
 # Themes
 # ---------------------------------------------------------------------------
 
+# The chart theme that matches the page theme (style.py): "Match the page theme" in the
+# pickers, and the default. It is a template in plotly's registry like any other, so
+# finish() and the figure caches treat it as just another name.
+PAGE_THEME = "page"
 PLAIN_THEMES = ["plotly_white", "plotly_dark"]
 SOBER_THEMES = ["financial_times", "tableau", "nord", "dracula", "nasa", "blueprint", "powerbi"]
 GLOW_THEMES = ["star_wars", "cyberpunk", "synthwave"]
 
 
 def theme_groups():
-    """The selector's three groups, read from the registry at runtime."""
+    """The selector's groups, read from the registry at runtime."""
     registered = list(plotly_themes.registered_themes())
-    return {"Plain": PLAIN_THEMES,
+    return {"Page": [PAGE_THEME],
+            "Plain": PLAIN_THEMES,
             "Sober": [name for name in SOBER_THEMES if name in registered],
             "Playful": [name for name in registered if name not in SOBER_THEMES]}
+
+
+def page_template(look):
+    """The "page" chart theme for a page theme (style.load_theme).
+
+    The page theme's own chart theme when it names one (paper uses financial_times,
+    whose paper colour is the page's). Otherwise one drawn from its colours and fonts on
+    plotly's plain light or dark template, with a transparent background so the chart
+    shows the card the stylesheet draws round it.
+    """
+    table, studio = look["theme"], look["studio"]
+    if studio["chart_theme"] != PAGE_THEME:
+        return pio.templates[studio["chart_theme"]]
+    template = go.layout.Template(pio.templates["plotly_dark" if table["base"] == "dark" else "plotly_white"])
+    axis = {"gridcolor": table["borderColor"], "linecolor": table["borderColor"], "zerolinecolor": table["borderColor"],
+            "tickfont": {"color": studio["muted"]}}
+    template.layout.update(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": table.get("font", "sans-serif"), "color": table["textColor"]},
+        title={"font": {"family": table.get("headingFont", table.get("font", "sans-serif"))}},
+        xaxis=axis, yaxis=axis,
+        legend={"bgcolor": "rgba(0,0,0,0)"},
+        hoverlabel={"bgcolor": studio["surface"], "bordercolor": table["borderColor"],
+                    "font": {"color": table["textColor"]}},
+        # Losses in the negative colour, gains in the positive one (the monthly heatmap).
+        colorscale={"diverging": [[0, studio["negative"]], [0.5, table["backgroundColor"]], [1, studio["positive"]]]},
+    )
+    if table.get("chartCategoricalColors"):
+        template.layout.colorway = table["chartCategoricalColors"]
+    return template
+
+
+# The page theme the "page" chart theme was last built from.
+_PAGE_LOOK = {"look": None}
+
+
+def use_page_theme(look):
+    """Point the "page" chart theme at a page theme. ui.boot calls it on every run with the page's own.
+
+    Rebuilt only when the page theme changes: building a template takes about 40 ms, which
+    every widget interaction would otherwise pay.
+    """
+    if look != _PAGE_LOOK["look"]:
+        pio.templates[PAGE_THEME] = page_template(look)
+        _PAGE_LOOK["look"] = look
+
+
+# Registered at import from the packaged default, so a caller outside the app (selfcheck,
+# tests, a script) can draw with "page" too. In the app ui.boot replaces it.
+use_page_theme(style.load_theme(style.default_file()))
 
 
 def font_css():
@@ -787,7 +842,13 @@ def _rule_references(node, found):
     return found
 
 
-def pipeline_dot(spec):
+# The pipeline diagram's colours when no page theme is given; the Build page passes
+# style.pipeline_palette(the page theme) instead.
+PIPELINE_PALETTE = {"font": "Helvetica", "background": "white", "node": "white", "border": "black", "text": "black",
+                    "edge": "#666666", "rule": "#eef3ff", "risk": "#fff6e8", "account": "#f2f2f2"}
+
+
+def pipeline_dot(spec, palette=None):
     """The strategy as a Graphviz diagram: data, features, rules or portfolio, risk, the front door.
 
     Alternatives (structure search) are drawn as they are currently chosen.
@@ -796,12 +857,15 @@ def pipeline_dot(spec):
     from .engine import call_plan
     from .spec import apply_params, collect_choices, strategy_kind
 
+    colours = palette or PIPELINE_PALETTE
     choices = collect_choices(spec)
     resolved = apply_params(spec)
     kind = strategy_kind(resolved)
     data = resolved["data"]
-    lines = ["digraph pipeline {", "  rankdir=LR;", '  node [shape=box, style="rounded,filled", fillcolor="white", '
-             'fontname="Helvetica", fontsize=11];', '  edge [color="#666666"];']
+    lines = ["digraph pipeline {", "  rankdir=LR;", f'  bgcolor="{colours["background"]}";',
+             f'  node [shape=box, style="rounded,filled", fillcolor="{colours["node"]}", color="{colours["border"]}", '
+             f'fontcolor="{colours["text"]}", fontname="{colours["font"]}", fontsize=11];',
+             f'  edge [color="{colours["edge"]}", fontcolor="{colours["text"]}"];']
     lines.append(f"  data [label={_dot('Data' + chr(10) + ', '.join(data['symbols']) + chr(10) + data['timeframe'] + ' bars')}, "
                  "shape=cylinder];")
     for name, feature in (resolved.get("features") or {}).items():
@@ -834,7 +898,7 @@ def pipeline_dot(spec):
             if not rule:
                 continue
             searched = " (alternatives searched)" if f"rules.{slot}" in choices else ""
-            lines.append(f"  rule_{slot} [label={_dot(label + searched)}, fillcolor=\"#eef3ff\"];")
+            lines.append(f"  rule_{slot} [label={_dot(label + searched)}, fillcolor=\"{colours['rule']}\"];")
             for kind_name, name in sorted(_rule_references(rule, set())):
                 if kind_name == "feature":
                     lines.append(f"  feature_{name} -> rule_{slot};")
@@ -881,7 +945,7 @@ def pipeline_dot(spec):
         if value is not None:
             risk_lines.append(f"{key.replace('_', ' ')} {value}")
     if risk_lines:
-        lines.append(f"  risk [label={_dot('Risk' + chr(10) + chr(10).join(risk_lines))}, fillcolor=\"#fff6e8\"];")
+        lines.append(f"  risk [label={_dot('Risk' + chr(10) + chr(10).join(risk_lines))}, fillcolor=\"{colours['risk']}\"];")
         lines.append("  risk -> door;")
     account = resolved.get("account") or {}
     account_lines = [f"cash {account.get('init_cash')}", f"freq {account.get('freq')}"]
@@ -889,7 +953,8 @@ def pipeline_dot(spec):
         account_lines.append(f"report in {account['base_currency']}")
     if account.get("rates"):
         account_lines.append(f"rates: {account['rates']['source']}")
-    lines.append(f"  account [label={_dot('Account' + chr(10) + chr(10).join(account_lines))}, fillcolor=\"#f2f2f2\"];")
+    lines.append(f"  account [label={_dot('Account' + chr(10) + chr(10).join(account_lines))}, "
+                 f"fillcolor=\"{colours['account']}\"];")
     lines.append("  account -> door;")
     lines += sorted(set(extras))
     lines.append("}")

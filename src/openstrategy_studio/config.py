@@ -20,7 +20,8 @@ VECTORBTX_KEYS = ["rounding", "financing_markup", "carry_markup", "fx_markup", "
 
 DEFAULTS = {
     "data_dir": "",                 # blank: platformdirs.user_data_dir("openstrategy-studio")
-    "default_theme": "plotly_white",
+    "page_theme": "daylight",       # a file in themes/ or the user's themes folder (style.py); applies at start
+    "default_theme": "page",        # the charts' theme; "page" follows the page theme (analysis.PAGE_THEME)
     "workers": max(1, (os.cpu_count() or 2) - 1),
     "offline": False,
     "spike_multiple": 10.0,         # import check: bars this many median ranges wide are flagged

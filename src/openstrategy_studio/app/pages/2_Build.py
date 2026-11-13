@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from openstrategy_studio import analysis, engine, expressions, ui
+from openstrategy_studio import analysis, engine, expressions, style, ui
 from openstrategy_studio.blocks import BLOCKS, block_defaults
 from openstrategy_studio.compile import compile_features, compile_signals, compile_weights, export_script
 from openstrategy_studio.spec import (FREQ, PRICE_FIELDS, SELECTION_MODES, SIZING_KEYS, TIMEFRAMES, WEIGHT_SCHEMES,
@@ -637,7 +637,8 @@ with form:
         if validate_spec(spec):
             st.write("Fix the problems listed beside the form to draw the pipeline.")
         else:
-            dot = ui.run_guarded("Drawing the pipeline", lambda: analysis.pipeline_dot(spec))
+            palette = style.pipeline_palette(style.active_theme(settings)[0])
+            dot = ui.run_guarded("Drawing the pipeline", lambda: analysis.pipeline_dot(spec, palette))
             if dot:
                 st.graphviz_chart(dot)
 
@@ -696,7 +697,7 @@ with preview:
             json.dumps(section, sort_keys=True), str(data_dir), ui.data_mtimes(spec, data_dir)))
         if result is not None:
             frames, computed, compiled = result
-            theme = settings.get("default_theme", "plotly_white")
+            theme = settings.get("default_theme", analysis.PAGE_THEME)
             if picked == "signals":
                 counts = {name: int(compiled[name].to_numpy().sum()) for name in ("entries", "exits", "short_entries", "short_exits")}
                 labels = {"entries": "Long entries", "exits": "Long exits", "short_entries": "Short entries",

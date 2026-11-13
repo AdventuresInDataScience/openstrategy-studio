@@ -1,0 +1,46 @@
+# Terminal: amber on black, monospace throughout, square corners and faint scan
+# lines. Its charts use the amber_terminal chart theme, whose background is this
+# page's. See daylight.toml for what each key does.
+
+[theme]
+base = "dark"
+primaryColor = "#FFB000"
+backgroundColor = "#1A0F00"
+secondaryBackgroundColor = "#241600"
+textColor = "#FFD27A"
+borderColor = "#4A3300"
+linkColor = "#FFCB47"
+font = "'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace"
+headingFont = "'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace"
+codeFont = "'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace"
+baseFontSize = 14
+baseRadius = "none"
+buttonRadius = "none"
+paddingTop = "1.5rem"
+headingFontSizes = ["2.1rem", "1.6rem", "1.2rem"]
+headingFontWeights = [700, 600, 600]
+metricValueFontSize = "1.7rem"
+dataframeHeaderBackgroundColor = "#2A1A00"
+chartCategoricalColors = ["#FFB000", "#FFCB47", "#CC8E00", "#FFD980", "#AA7400", "#FFA200", "#E69500", "#FFE0A3"]
+
+[theme.sidebar]
+backgroundColor = "#140B00"
+secondaryBackgroundColor = "#1F1300"
+textColor = "#FFB000"
+borderColor = "#3D2A00"
+
+[studio]
+label = "Terminal"
+description = "Amber on black, monospace throughout; charts in the amber terminal theme."
+accent = "#FF7A00"
+gradient = "linear-gradient(90deg, #FFB000, #FF7A00)"
+title_fill = "linear-gradient(#FFB000, #FFB000)"
+surface = "#1F1300"
+muted = "#B98A2E"
+on_primary = "#1A0F00"
+shadow = "none"
+shadow_hover = "0 0 0 1px #FFB000, 0 0 18px rgba(255, 176, 0, 0.25)"
+glow = "repeating-linear-gradient(0deg, rgba(255, 176, 0, 0.03) 0px, rgba(255, 176, 0, 0.03) 1px, transparent 1px, transparent 3px)"
+positive = "#FFCB47"
+negative = "#FF5F3D"
+chart_theme = "amber_terminal"

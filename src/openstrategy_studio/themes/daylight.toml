@@ -1,0 +1,61 @@
+# Daylight: the Studio's default page theme.
+#
+# A page theme is this one file. To make your own, open the Settings page, pick a
+# theme and press "Make an editable copy": the copy lands in your themes folder
+# (the Settings page shows where). Edit it, pick it, save, and restart the Studio.
+#
+# [theme] is Streamlit's own theme table, and Streamlit reads it itself, so every
+# option that `streamlit config show` lists under [theme] works here. One it does
+# not know is dropped with a warning in the terminal. Colours are hex. Fonts are
+# CSS font lists of fonts already on the machine, so nothing is downloaded and the
+# Studio works offline. [theme.sidebar] colours the sidebar on its own.
+#
+# [studio] is the Studio's own, and Streamlit ignores it. It feeds the stylesheet
+# (themes/studio.css), the sidebar's logo, the pipeline diagram and the chart
+# theme that matches the page. Leave a key out and it follows from [theme].
+# Edits to [studio] show on the next rerun; edits to [theme] need a restart.
+
+[theme]
+base = "light"
+primaryColor = "#4F46E5"
+backgroundColor = "#F5F7FB"
+secondaryBackgroundColor = "#FFFFFF"        # inputs, select boxes, code
+textColor = "#141A2E"
+borderColor = "#DFE3EE"
+linkColor = "#4F46E5"
+font = "'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif"
+headingFont = "'Segoe UI Variable Display', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif"
+codeFont = "'Cascadia Code', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace"
+baseFontSize = 15
+baseRadius = "0.6rem"
+buttonRadius = "0.6rem"
+paddingTop = "1.5rem"
+headingFontSizes = ["2.4rem", "1.75rem", "1.3rem"]     # h1 st.title, h2 st.header, h3 st.subheader
+headingFontWeights = [750, 650, 600]
+metricValueFontSize = "1.8rem"
+dataframeHeaderBackgroundColor = "#F0F3FA"
+chartCategoricalColors = ["#4F46E5", "#06B6D4", "#F59E0B", "#EC4899", "#10B981", "#8B5CF6", "#EF4444", "#64748B"]
+
+[theme.sidebar]
+backgroundColor = "#0E1324"
+secondaryBackgroundColor = "#182039"
+textColor = "#C8D0E6"
+primaryColor = "#A5A8FF"
+borderColor = "#232B45"
+
+[studio]
+label = "Daylight"
+description = "Light and airy, indigo and cyan accents, a dark sidebar."
+accent = "#06B6D4"                          # the gradient's second colour, and the logo's
+gradient = "linear-gradient(120deg, #4F46E5 0%, #7C3AED 45%, #06B6D4 100%)"   # primary buttons, tab underline
+title_fill = "linear-gradient(120deg, #4F46E5 0%, #7C3AED 45%, #06B6D4 100%)" # page titles; one colour: linear-gradient(#000, #000)
+surface = "#FFFFFF"                         # cards: metrics, expanders, charts
+muted = "#5B6478"                           # secondary text and diagram arrows
+on_primary = "#FFFFFF"                      # text on the gradient
+shadow = "0 1px 2px rgba(20, 26, 46, 0.05), 0 4px 16px rgba(20, 26, 46, 0.06)"
+shadow_hover = "0 2px 6px rgba(20, 26, 46, 0.06), 0 12px 32px rgba(79, 70, 229, 0.16)"
+glow = "radial-gradient(1100px 520px at 12% -8%, rgba(79, 70, 229, 0.10), transparent 60%), radial-gradient(900px 480px at 100% 0%, rgba(6, 182, 212, 0.10), transparent 55%)"
+positive = "#059669"                        # gains in the chart theme's heatmaps
+negative = "#E11D48"                        # losses, and the diagram's risk node
+chart_theme = "page"                        # "page": charts drawn from these colours; or a chart theme, like "nord"
+# css = """ extra rules, added after the stylesheet """

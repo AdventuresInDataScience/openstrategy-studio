@@ -21,7 +21,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from . import config, data as data_module
+from . import config, data as data_module, style
 from .blocks import BLOCKS
 from .spec import (COMPARISON_OPS, PRICE_FIELDS, TIMEFRAME_MINUTES, default_spec, get_path, is_choice, is_opt,
                    set_path, value_of)
@@ -46,12 +46,25 @@ def _apply_settings_once(settings_json):
 
 
 def boot(title):
-    """Call first on every page. Returns (settings, data_dir)."""
-    st.set_page_config(page_title=f"{title} · OpenStrategy Studio", layout="wide")
+    """Call first on every page. Returns (settings, data_dir).
+
+    Also dresses the page in its theme (style.py): the stylesheet, the sidebar's logo,
+    and the "page" chart theme, all from the theme file Streamlit itself started with.
+    """
+    st.set_page_config(page_title=f"{title} · OpenStrategy Studio", page_icon=":material/candlestick_chart:",
+                       layout="wide")
     if "settings" not in st.session_state:
         st.session_state["settings"] = config.load_settings()
     settings = st.session_state["settings"]
     _apply_settings_once(json.dumps(settings, sort_keys=True))
+    look, problems = style.active_theme(settings)
+    # Style tags alone: Streamlit puts them where they take no space on the page.
+    st.html(f"<style>{style.stylesheet(look)}</style>")
+    st.logo(style.logo_svg(look), icon_image=style.logo_svg(look, mark_only=True), size="large")
+    from . import analysis
+    analysis.use_page_theme(look)
+    if problems:
+        st.warning("Page theme: " + " ".join(problems))
     data_dir = config.data_dir(settings)
     if "spec" not in st.session_state:
         st.session_state["spec"] = default_spec()
@@ -147,14 +160,23 @@ def run_guarded(label, fn):
             return None
 
 
-def theme_picker(settings, prefix):
-    """Theme selector in three groups, plus the glow checkbox for line figures."""
+def chart_theme_options():
+    """(chart theme names, {name: label}) in the selector's groups, for the pickers and Settings."""
     from . import analysis
 
     groups = analysis.theme_groups()
     options = [theme for names in groups.values() for theme in names]
     labels = {theme: f"{group}: {theme.replace('_', ' ')}" for group, names in groups.items() for theme in names}
-    default = settings.get("default_theme", "plotly_white")
+    labels[analysis.PAGE_THEME] = "Match the page theme"
+    return options, labels
+
+
+def theme_picker(settings, prefix):
+    """Chart theme selector in its groups, plus the glow checkbox for line figures."""
+    from . import analysis
+
+    options, labels = chart_theme_options()
+    default = settings.get("default_theme", analysis.PAGE_THEME)
     left, right = st.columns([3, 1])
     theme = left.selectbox("Chart theme", options, index=options.index(default) if default in options else 0,
                            format_func=labels.get, key=f"{prefix}:theme")

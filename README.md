@@ -37,6 +37,15 @@ Notes:
 
 The **Spec and code** tab shows the strategy as JSON, and as a standalone script of plain vectorbtX calls that reproduces the backtest.
 
+## Changing the look
+
+Pick a page theme on the **Settings** page (Daylight, Midnight, Paper, Nord or Terminal), save, and restart the Studio. Charts set to **Match the page theme** follow it. To make your own theme, press **Make an editable copy** and edit the `.toml` file it creates. The Settings page shows where it is, and the comments in a copy of Daylight explain every setting.
+
+A theme is one file in `src/openstrategy_studio/themes/`:
+
+* `[theme]` is Streamlit's own theme table (colours, fonts, corners, heading sizes, sidebar colours, chart colours). Any option `streamlit config show` lists under `[theme]` works. Changes need a restart.
+* `[studio]` holds the Studio's extras, which Streamlit ignores: a second accent, the gradient, card surfaces and shadows, the page glow, and the matching chart theme. They feed the one stylesheet, `themes/studio.css`. Changes to either show on the next rerun.
+
 ## Layout
 
 ```
@@ -51,7 +60,8 @@ src/openstrategy_studio/
   data.py         normalise, validate, import, store and load bar data
   store.py        the SQLite index: catalogue, runs, jobs
   config.py       settings.toml and environment
-  analysis.py     results, saved runs, stats tables, figures, themes
+  analysis.py     results, saved runs, stats tables, figures, chart themes
+  style.py        the look: page themes (themes/*.toml), the stylesheet (themes/studio.css), the logo
   optimise.py     search space, metrics, six backends, walk-forward, stability, deflated Sharpe
   jobs.py         start, read and cancel background jobs
   worker.py       python -m openstrategy_studio.worker <job_dir>
@@ -61,6 +71,7 @@ src/openstrategy_studio/
   selfcheck.py    the phase 4 gate, runnable on any machine
   app/Home.py, app/pages/1_Data.py ... 7_Patterns.py
   templates/*.json
+  themes/*.toml, themes/studio.css
 tests/            plan section 12, tests 1 to 14, plus fixtures
 docs/VERIFY.md    the phase 0 record: answers and findings
 docs/UPSTREAM.md  issues to fix in vectorbtX, with docs/upstream/vectorbtx_issues.py reproducing each

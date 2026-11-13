@@ -13,6 +13,7 @@ window re-run this same executable with a subcommand instead.
 """
 
 import argparse
+import os
 import sys
 from importlib import resources
 
@@ -32,8 +33,20 @@ def self_command(*arguments):
 
 def run_app(port=None, headless=False, address=None, extra=()):
     # Environment first (numba cache folder, FRED key), before anything imports vectorbt.
-    config.apply_environment(config.load_settings())
+    settings = config.load_settings()
+    config.apply_environment(settings)
     from streamlit.web import cli as streamlit_cli
+
+    from . import style
+
+    # The page theme. Streamlit reads the file's [theme] table itself (theme.base may name
+    # a TOML file since 1.67), and the pages read the same file, through ACTIVE_ENV, for
+    # the stylesheet, the logo and the chart theme that matches the page. A missing or
+    # broken choice falls back to the default here, so the Studio always starts.
+    theme_file, problems = style.choose_theme_file(settings)
+    for problem in problems:
+        print(f"Page theme: {problem}")
+    os.environ[style.ACTIVE_ENV] = str(theme_file)
 
     with resources.as_file(resources.files("openstrategy_studio") / "app" / "Home.py") as home:
         command = ["streamlit", "run", str(home),
@@ -41,7 +54,12 @@ def run_app(port=None, headless=False, address=None, extra=()):
                    # Large CSV imports: the default upload limit is 200 MB.
                    "--server.maxUploadSize", "1000",
                    # A frozen build looks like a source checkout to Streamlit; this keeps it in normal mode.
-                   "--global.developmentMode", "false"]
+                   "--global.developmentMode", "false",
+                   "--theme.base", str(theme_file),
+                   # An app, not a development server: no Deploy button, and no rerun or clear-cache
+                   # items in the menu. `openstrategy-studio run --client.toolbarMode developer`
+                   # brings them back (flags after ours win).
+                   "--client.toolbarMode", "viewer"]
         if port:
             command += ["--server.port", str(port)]
         if headless:
