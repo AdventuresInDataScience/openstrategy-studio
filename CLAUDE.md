@@ -15,9 +15,11 @@ uv run openstrategy-studio selfcheck --quick
 
 Never `pip install`. Add dependencies with `uv add`.
 
-## Status and next steps (as of 12 November 2026)
+## Status and next steps (as of 13 November 2026)
 
-**Where we are.** Phase 0 is done and recorded in `docs/VERIFY.md`. It found 13 items that belong in vectorbtX (twelve bugs and one required feature, shared cash with an entry priority), listed in `docs/UPSTREAM.md`. **All 13 are fixed in vectorbtX `16293a2`**, and the Studio's workarounds for them are removed. One limitation that came with those fixes, issue 14 (with an extra exit active, a stop was not checked on its entry bar), is **fixed in `9f4cf54`, which `uv.lock` pins**. Against it, `uv run pytest -rs` gives 134 passed and 1 skipped (the bash installer check on Windows), both phase 3 gates pass (the exit-rules gate now also covers the entry bar), and `selfcheck` passes. Nothing found in phase 0 is open in vectorbtX.
+**Where we are.** Phase 0 is done and recorded in `docs/VERIFY.md`. It found 13 items that belong in vectorbtX (twelve bugs and one required feature, shared cash with an entry priority), listed in `docs/UPSTREAM.md`. **All 13 are fixed in vectorbtX `16293a2`**, and the Studio's workarounds for them are removed. Issue 14 (with an extra exit active, a stop was not checked on its entry bar) is **fixed in `9f4cf54`, which `uv.lock` pins**.
+
+**Done on 13 November 2026:** the Studio side of shared cash (issue 13: spec fields, `call_plan`, the Account tab's picker, per-account results, `vectorisable`), both currencies required on an FX instrument (issue 3), and the golden numbers from vectorbtX's `01_ma_cross_spreadbet_fx.py` (`tests/fixtures/golden/`, which the Studio's template matches exactly on real Yahoo data). The shared-cash work found **issue 15, open in vectorbtX**: holding costs reach `value()` and `returns()` but not `total_profit()`, `final_value()`, `total_return()` or stats' End Value and Total Return, so the tear sheet and the optimiser's `total_return` leave carry out. `docs/upstream/vectorbtx_issues.py` reports 1 of 14 present. `uv run pytest -rs` gives 147 passed and 1 skipped (the bash installer check on Windows), both phase 3 gates pass, and `selfcheck` passes.
 
 The owner's rule: behaviour that is wrong in vectorbtX gets fixed in vectorbtX and flagged in `docs/UPSTREAM.md` (with a check in `docs/upstream/vectorbtx_issues.py`), not hidden behind a Studio workaround. UX and app logic are fixed here. Ask before editing the vectorbtX checkout (`../vectorbtx`) or opening issues on its repo.
 
@@ -25,15 +27,10 @@ The owner's rule: behaviour that is wrong in vectorbtX gets fixed in vectorbtX a
 
 **Next, in this order:**
 
-1. **Build the Studio side of shared cash** (UPSTREAM.md issue 13, "Studio side"; vectorbtX's API is `cash=`, `entry_priority=`, `when_cash_short=`):
-   * spec fields for the account (replicated or shared, the entry priority, and skip or shrink), checked in `validate_spec`;
-   * mapped by `engine.call_plan`, so the export follows automatically;
-   * a priority picker on the Build page's Account tab (symbol order, random with a seed, or by a feature, which compiles to a per-bar score frame);
-   * results that show the replicated case as N accounts with a per-symbol table. `analysis.stats_tables` currently averages the columns silently.
-   * `engine.vectorisable` must reject shared cash, because the vectorised grid gives each trial its own column and cash.
-2. **Other Studio to-dos from phase 0:**
-   * require both currencies on an FX instrument (UPSTREAM.md issue 3);
-   * save golden numbers from vectorbtX's `examples/strategies/01_ma_cross_spreadbet_fx.py`, now that its `base_currency` line reads as the pair (`docs/VERIFY.md` section 4).
+1. **The redesign** (the owner's call, 13 November 2026). The owner's original vision for the Build page was an fxDreema-style canvas of blocks and links; the implementation plan (section 6) swapped it for stage-by-stage forms, which is what was built. Two parts:
+   * **Styling that is easy to adjust and can be made exciting.** There is no theme and no CSS today. Put the look in one place: a packaged theme file and a packaged stylesheet (design tokens for colour, type, spacing, radius), applied by `ui.boot`. ⚠️ Streamlit reads `.streamlit/config.toml` from the working directory, which the Studio must not rely on (it also breaks the frozen bundle), so pass the theme from `cli.py` as `--theme.*` flags, the way it already passes `--server.*`. ⚠️ VERIFY which `--theme.*` options the installed Streamlit (1.67) accepts. Keep chart themes (plotly-themes, `analysis.finish`) in step with the page theme.
+   * **A blocks-and-links canvas** for features and rules, as another view of the same spec (like the Expression view): the spec is already a graph (feature `source` refs, rule trees, the four signal slots). Typed ports (number series vs true/false), so only compilable links can be drawn. Start with a spike: a Streamlit custom component (`streamlit-flow-component` on React Flow, or `barfi` on Rete.js; ⚠️ VERIFY both against Streamlit 1.67) and a round-trip test that a spec goes onto the canvas and back unchanged.
+2. **Issue 15 in vectorbtX** (`docs/UPSTREAM.md`; ask before editing `../vectorbtx`). When it is fixed, `test_golden_numbers_from_the_vectorbtx_example` fails by design: re-run `tests/fixtures/golden/make_golden.py`.
 3. **Still open from phase 0:** `data.apply_mapping` against a real MT4/MT5 export, and the installers on a clean machine (`docs/PACKAGING.md`).
 
 ## Layout (one module per concept)
@@ -79,6 +76,8 @@ UI text: sentence case, plain verbs, and errors that say what to do. No ALL-CAPS
 * **The benchmark is `pf.benchmark_value()`.** Never a second front-door call with no signals: that hold is funded at buying power (30x on an FX spread bet). Never pass `benchmark_rets=` to `returns_stats`.
 * **Select one column as `pf[[column]]`.** It returns the same one-column shape a single run does. (The scalar form crashed every metric on a leveraged portfolio until vectorbtX `16293a2`.)
 * **Never filter exits.** Filters are allowed in entry rules only; `validate_spec` enforces it.
+* **Cash across symbols is always named.** For a rule strategy on two or more symbols (`spec.cash_model`), `call_plan` passes `cash=` (default `per_instrument`), plus `entry_priority=` and `when_cash_short=` when shared. Never pass `cash_sharing`, `group_by` or `call_seq` through `engine_extra`; `validate_spec` rejects them. A feature priority is a score frame from `compile_signals`, unshifted like the signals.
+* **Separate accounts are reported as accounts.** `analysis.stats_tables` regroups ungrouped columns into one book of N x `init_cash` (vectorbt's `stats()` would average them silently); `per_symbol_table` shows each account. Never show the average.
 * **No higher-timeframe leakage.** The filter needs `label="left", closed="left"` and then `.shift(1)`. `tests/test_lookahead.py` uses dense truncation cut points; keep them dense.
 * **Portfolio weights stay full-shape.** Never forward-fill them. Always pass `schedule=` to `drifted_weights`.
 * **One cost path.** Costs come only from instrument fields, never a raw `fees=` (it collides with commission and raises).

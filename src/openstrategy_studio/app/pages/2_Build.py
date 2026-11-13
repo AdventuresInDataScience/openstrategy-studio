@@ -16,7 +16,7 @@ from openstrategy_studio.blocks import BLOCKS, block_defaults
 from openstrategy_studio.compile import compile_features, compile_signals, compile_weights, export_script
 from openstrategy_studio.spec import (FREQ, PRICE_FIELDS, SELECTION_MODES, SIZING_KEYS, TIMEFRAMES, WEIGHT_SCHEMES,
                                       apply_params, is_choice, list_templates, load_template, spec_hash,
-                                      strategy_kind, validate_spec)
+                                      strategy_kind, validate_spec, value_of)
 
 settings, data_dir = ui.boot("Build")
 spec = ui.current()
@@ -74,6 +74,12 @@ if symbols != spec["data"]["symbols"]:
         for symbol in list(instruments):
             if symbol not in symbols:
                 del instruments[symbol]
+    # A removed symbol leaves the shared account's priority order too.
+    priority = (spec.get("account") or {}).get("entry_priority") or {}
+    if priority.get("order"):
+        priority["order"] = [symbol for symbol in priority["order"] if symbol in symbols]
+        if not priority["order"]:
+            del priority["order"]
     ui.set_value("data.symbols", symbols)
     st.rerun()
 if timeframe != spec["data"]["timeframe"]:
@@ -180,6 +186,10 @@ with form:
                         st.warning(f"{symbol}: {field} is not used in {mode} mode ({rejected[field]}).")
                     for field in sorted(rules["required"] - set(fields)):
                         st.warning(f"{symbol}: {mode} mode needs {field}.")
+                    if (fields.get("asset_class") == "fx" or mode == "fx_spot") and \
+                            not (fields.get("base_currency") and fields.get("quote_currency")):
+                        st.warning(f"{symbol}: an FX instrument needs both base_currency and quote_currency "
+                                   "(EUR and USD for EURUSD), or its carry cannot be priced.")
                     if mode == "spreadbet":
                         st.caption(f"{symbol}: spread bets force commission to zero; the cost is in spread_points, "
                                    "and the stake is the size, so there is no contract size.")
@@ -470,6 +480,94 @@ with form:
         freqs = sorted(set(FREQ.values()) | {account.get("freq", "D")})
         ui.param_input("account.freq", {"type": "choice", "options": freqs, "default": FREQ[timeframe]},
                        label="Bar frequency", optimisable=False, help="Annualised metrics need this.")
+        extra = spec.setdefault("engine_extra", {})
+
+        # --- cash across symbols: one account per symbol, or one shared account ---
+        random_priority = False
+        symbol_list = spec["data"]["symbols"]
+        if picked == "signals" and len(symbol_list) > 1:
+            st.markdown("**Cash across symbols**")
+            cash_each = float(value_of(account.get("init_cash", 10000.0)) or 0.0)
+            models = {"per_instrument": f"Each symbol trades its own copy of the account ({len(symbol_list)} × "
+                                        f"{cash_each:,.0f} = {len(symbol_list) * cash_each:,.0f} in all)",
+                      "shared": f"One account of {cash_each:,.0f}, shared by every symbol"}
+            current_cash = account.get("cash") or "per_instrument"
+            chosen_cash = st.radio("Cash across symbols", list(models), index=list(models).index(current_cash)
+                                   if current_cash in models else 0, format_func=models.get,
+                                   key=ui.key("account.cash"), label_visibility="collapsed")
+            if chosen_cash != current_cash:
+                def switch_cash():
+                    account["cash"] = chosen_cash
+                    if chosen_cash == "shared":
+                        account["when_cash_short"] = "skip"
+                    else:
+                        # Both only mean something in a shared account (validate_spec says so).
+                        account.pop("entry_priority", None)
+                        account.pop("when_cash_short", None)
+                rerun_after(switch_cash)
+            if chosen_cash == "shared":
+                orders = {"symbols": "In symbol order", "random": "In a random order (seeded, so runs repeat)",
+                          "feature": "By a feature's value on the signal bar"}
+                priority = account.get("entry_priority") or {"by": "symbols"}
+                chosen_by = st.radio("When entries compete for the cash, fill them", list(orders),
+                                     index=list(orders).index(priority.get("by")) if priority.get("by") in orders else 0,
+                                     format_func=orders.get, key=ui.key("account.entry_priority", ":by"),
+                                     help="Exits always go first on a bar, so the cash they free is there for entries.")
+                if chosen_by != priority.get("by", "symbols"):
+                    def switch_priority():
+                        if chosen_by == "feature":
+                            first = next(iter(features), None)
+                            account["entry_priority"] = {"by": "feature", "highest_first": True,
+                                                         "score": {"feature": first} if first else {"price": "close"}}
+                        else:
+                            account["entry_priority"] = {"by": chosen_by}
+                    rerun_after(switch_priority)
+                if chosen_by == "symbols":
+                    order = priority.get("order") or []
+                    picked_order = st.multiselect("Fill first, in this order (optional)", symbol_list,
+                                                  default=[symbol for symbol in order if symbol in symbol_list],
+                                                  key=ui.key("account.entry_priority.order"),
+                                                  help="Symbols left out follow, in the order of the symbol list.")
+                    if picked_order != order:
+                        if picked_order:
+                            ui.set_value("account.entry_priority", {"by": "symbols", "order": picked_order})
+                        else:
+                            ui.set_value("account.entry_priority", {"by": "symbols"})
+                elif chosen_by == "random":
+                    random_priority = True
+                    st.caption("Each bar's competing entries are shuffled with the random seed just below.")
+                else:
+                    ui.ref_input("account.entry_priority.score", features, "Rank by")
+                    highest = st.radio("Which goes first", [True, False],
+                                       index=0 if priority.get("highest_first", True) else 1,
+                                       format_func={True: "The highest value", False: "The lowest value"}.get,
+                                       horizontal=True, key=ui.key("account.entry_priority.highest_first"))
+                    if highest != priority.get("highest_first", True):
+                        ui.set_value("account.entry_priority.highest_first", highest)
+                    st.caption("The value on the bar the entry signal fires, before the fill at the next open.")
+                shorts = {"skip": "Skip it", "partial": "Fill as much as the cash allows"}
+                current_short = account.get("when_cash_short") or "skip"
+                chosen_short = st.radio("When an entry needs more cash than is left", list(shorts),
+                                        index=list(shorts).index(current_short) if current_short in shorts else 0,
+                                        format_func=shorts.get, horizontal=True, key=ui.key("account.when_cash_short"),
+                                        help="Skipping keeps every position at the size the sizing rule chose. "
+                                             "Filling part of it makes a risk-sized trade risk less than intended.")
+                if chosen_short != current_short:
+                    ui.set_value("account.when_cash_short", chosen_short)
+            st.caption("The optimiser's vectorised grid needs separate accounts; a shared account uses the ordinary grid.")
+        elif account.get("cash") == "shared" and len(symbol_list) == 1:
+            st.caption("With one symbol there is one account either way, so the shared cash setting is not used.")
+        # The one random seed (vectorbt's seed=), right under the priority that may need it.
+        seed_text = st.text_input("Random seed (needed for a random entry order)" if random_priority else
+                                  "Random seed (optional)",
+                                  value="" if extra.get("seed") is None else str(extra["seed"]),
+                                  key=ui.key("engine_extra.seed"))
+        seed = int(seed_text) if seed_text.strip().lstrip("-").isdigit() else None
+        if seed != extra.get("seed"):
+            if seed is None:
+                ui.delete_key("engine_extra.seed")
+            else:
+                ui.set_value("engine_extra.seed", seed)
         base = st.text_input("Report in currency (optional)", value=account.get("base_currency") or "",
                              key=ui.key("account.base_currency"), help="Leave blank to report in each instrument's currency.")
         if (base or None) != account.get("base_currency"):
@@ -510,7 +608,6 @@ with form:
                        "No FRED key yet: set FRED_API_KEY or add it on the Settings page.")
         st.caption("Carry on an FX instrument needs rates for both of its currencies, and the instrument must name both.")
         # Nothing is written here unless changed: a blank choice keeps vectorbt's default.
-        extra = spec.setdefault("engine_extra", {})
         modes = [None, "ignore", "close", "closereduce", "reverse", "reversereduce"]
         current_mode = extra.get("upon_opposite_entry")
         opposite = st.selectbox("When an opposite entry arrives", modes,
@@ -522,14 +619,6 @@ with form:
                 ui.delete_key("engine_extra.upon_opposite_entry")
             else:
                 ui.set_value("engine_extra.upon_opposite_entry", opposite)
-        seed_text = st.text_input("Random seed (optional)", value="" if extra.get("seed") is None else str(extra["seed"]),
-                                  key=ui.key("engine_extra.seed"))
-        seed = int(seed_text) if seed_text.strip().lstrip("-").isdigit() else None
-        if seed != extra.get("seed"):
-            if seed is None:
-                ui.delete_key("engine_extra.seed")
-            else:
-                ui.set_value("engine_extra.seed", seed)
 
     # --- pipeline ------------------------------------------------------------------
     with tabs["Pipeline"]:

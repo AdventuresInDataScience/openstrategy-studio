@@ -19,8 +19,8 @@ import pandas as pd
 from . import engine
 from .blocks import BLOCKS
 from .data import resample_frames
-from .spec import (PRICE_FIELDS, RESAMPLE_RULE, RULE_SLOTS, apply_params, canonical_json, feature_order,
-                   strategy_kind)
+from .spec import (PRICE_FIELDS, RESAMPLE_RULE, RULE_SLOTS, apply_params, canonical_json, cash_model,
+                   feature_order, strategy_kind)
 
 # ---------------------------------------------------------------------------
 # Feature cache
@@ -240,7 +240,10 @@ def evaluate_rule(node, data, features, spec_features, fingerprint):
 def compile_signals(spec, data):
     """{"entries", "exits", "short_entries", "short_exits"}: boolean frames like close.
 
-    `spec` must already have its parameters applied (no "opt" nodes). All four are
+    Plus "entry_priority", a float frame like close, when a shared account ranks
+    competing entries by a feature.
+
+    `spec` must already have its parameters applied (no "opt" nodes). All of them are
     on the bar the signal is computed on: the front door shifts every one of them to
     the next bar's open itself, so none is shifted here.
     """
@@ -266,10 +269,18 @@ def compile_signals(spec, data):
         else:
             out[names[slot]] = pd.DataFrame(False, index=close.index, columns=close.columns)
 
-    # ⚠️ No shift here, for any of the four. The front door shifts entries, exits,
-    # short entries and short exits to the next bar's open itself (vectorbtX 16293a2,
-    # docs/UPSTREAM.md issue 1, which used to leave the shorts unshifted). Shifting
-    # here as well would delay every signal two bars.
+    # 4. The entry priority of a shared account, when it ranks competing entries by a
+    #    feature: higher goes first, so "lowest first" is the negated score. A missing
+    #    score (warm-up) goes last. Ties keep symbol order (vectorbtX's rule).
+    priority = (spec.get("account") or {}).get("entry_priority") or {}
+    if cash_model(spec) == "shared" and priority.get("by") == "feature":
+        score = _full(resolve_ref(priority["score"], data, features, spec_features), close)
+        out["entry_priority"] = score if priority.get("highest_first", True) else -score
+
+    # ⚠️ No shift here, for any of them. The front door shifts entries, exits, short
+    # entries and short exits to the next bar's open itself (vectorbtX 16293a2,
+    # docs/UPSTREAM.md issue 1, which used to leave the shorts unshifted), and shifts a
+    # priority score with them. Shifting here as well would delay every signal two bars.
     # test_engine.py::test_short_signal_fills_next_open checks the outcome.
     return out
 
@@ -633,7 +644,12 @@ def export_script(spec, data_dir=None):
                 body.append(f"{names[slot]} = {_rule_code(rules[slot], spec_features)}")
             else:
                 body.append(f"{names[slot]} = pd.DataFrame(False, index=close.index, columns=close.columns)")
-        body.append("# The front door shifts all four signal arrays to the next bar's open itself.")
+        if plan["args"].get("entry_priority") == ("var", "entry_priority"):
+            priority = account["entry_priority"]
+            sign = "" if priority.get("highest_first", True) else "-"
+            body.append("# One shared account: competing entries are filled highest score first.")
+            body.append(f"entry_priority = {sign}full({_ref_code(priority['score'], spec_features)}, close)")
+        body.append("# The front door shifts all four signal arrays (and a priority score) to the next bar's open itself.")
     elif kind == "portfolio":
         body += _portfolio_code(spec)
         body.append(f"min_trade = {float(spec['schedule'].get('min_trade', 0.0))!r}")

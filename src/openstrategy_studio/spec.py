@@ -52,6 +52,17 @@ RULE_SLOTS = ["long_entry", "long_exit", "short_entry", "short_exit"]
 WEIGHT_SCHEMES = ["equal", "inverse_vol", "price", "fixed"]
 SELECTION_MODES = ["top", "bottom", "threshold"]
 CALENDAR_FREQS = ["W", "M", "Q", "Y"]
+# The account, for a rule strategy on several symbols (vectorbtX's cash=, entry_priority=,
+# when_cash_short=; docs/UPSTREAM.md issue 13). "per_instrument" gives each symbol its own
+# copy of init_cash (three symbols on 10,000 trade 30,000); "shared" is one account.
+CASH_MODELS = ["per_instrument", "shared"]
+# Who is filled first when entries compete for a shared account's cash.
+PRIORITY_KINDS = ["symbols", "random", "feature"]
+# What an entry the cash cannot cover does: not placed at all, or filled as far as the cash goes.
+WHEN_CASH_SHORT = ["skip", "partial"]
+# vectorbt passthroughs that would fight the account's cash model if set in engine_extra.
+CASH_ENGINE_KEYS = ["cash", "cash_sharing", "group_by", "call_seq", "allow_partial", "entry_priority",
+                    "when_cash_short"]
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +260,19 @@ def strategy_kind(spec):
     if has_portfolio:
         return "portfolio"
     return "hold"
+
+
+def cash_model(spec):
+    """How a rule strategy on several symbols is funded: "per_instrument" or "shared".
+
+    None when the question does not arise, and then nothing about cash is passed to
+    vectorbtX: one symbol is one account either way, a portfolio's weights are shares of
+    one account by construction, and buy and hold keeps vectorbt's own funding (one copy
+    of init_cash per symbol).
+    """
+    if strategy_kind(spec) != "signals" or len(spec["data"]["symbols"]) < 2:
+        return None
+    return (spec.get("account") or {}).get("cash") or "per_instrument"
 
 
 def feature_dependencies(features):
@@ -549,6 +573,63 @@ def _check_portfolio(problems, spec, features, blocks):
     _check_number(problems, "Minimum trade", schedule.get("min_trade", 0.0), minimum=0)
 
 
+def _check_cash(problems, spec, kind, features, blocks):
+    """The account's cash model: an account per symbol, or one shared account with an entry priority."""
+    account = spec.get("account") or {}
+    cash = account.get("cash")
+    priority = account.get("entry_priority")
+    short = account.get("when_cash_short")
+    if cash is not None and cash not in CASH_MODELS:
+        problems.append("Cash must be per_instrument (each symbol trades its own copy of the account) or shared "
+                        "(one account for every symbol).")
+    if short is not None and short not in WHEN_CASH_SHORT:
+        problems.append("When cash runs short, choose skip (the entry is not placed) or partial (it is filled as far "
+                        "as the cash goes).")
+    if kind == "portfolio" and cash == "per_instrument":
+        problems.append("A portfolio's weights are shares of one account, so each symbol cannot have its own cash. "
+                        "Make the account shared, or remove the cash setting.")
+    if kind == "hold" and cash == "shared":
+        problems.append("Buy and hold in one shared account would put all the cash into the first symbol. "
+                        "Use a portfolio with equal weights instead.")
+    if kind in ("portfolio", "hold") and (priority or short):
+        problems.append("The entry priority and the cash-short rule choose between competing entry signals, so only "
+                        "entry and exit rule strategies have them. Remove them.")
+    elif kind == "signals" and cash != "shared" and (priority or short):
+        problems.append("The entry priority and the cash-short rule only apply to a shared account. Make the account "
+                        "shared, or remove them.")
+    if priority:
+        by = priority.get("by")
+        symbols = (spec.get("data") or {}).get("symbols") or []
+        if by not in PRIORITY_KINDS:
+            problems.append(f"The entry priority must be by {', '.join(PRIORITY_KINDS)}.")
+        elif by == "symbols":
+            order = priority.get("order") or []
+            unknown = [symbol for symbol in order if symbol not in symbols]
+            if unknown:
+                problems.append(f"The entry priority names symbols that are not in the list: {', '.join(unknown)}.")
+            if len(set(order)) != len(order):
+                problems.append("The entry priority lists a symbol twice.")
+        elif by == "random":
+            # ⚠️ Unseeded, every run (and every optimisation trial) would draw a different
+            # order, so two runs of the same spec would disagree and trials would not compare.
+            if (spec.get("engine_extra") or {}).get("seed") is None:
+                problems.append("A random entry priority needs a random seed, so every run draws the same order. "
+                                "Set one on the Account tab.")
+        else:
+            score = priority.get("score")
+            if isinstance(score, dict) and "const" in score:
+                problems.append("Rank competing entries by a feature or a price: a constant ranks them all the same.")
+            else:
+                _check_ref(problems, "Entry priority score", score, features, blocks)
+            if not isinstance(priority.get("highest_first", True), bool):
+                problems.append("The entry priority must say whether the highest or the lowest score goes first.")
+    if kind == "signals":
+        clashing = sorted(set(spec.get("engine_extra") or {}) & set(CASH_ENGINE_KEYS))
+        if clashing:
+            problems.append("Set how the account shares cash on the Account tab, not as engine settings: remove "
+                            f"{', '.join(clashing)} from engine_extra.")
+
+
 def _check_choices(problems, spec):
     for path, node in collect_choices(spec).items():
         options = node["options"]
@@ -626,6 +707,13 @@ def _validate_resolved(spec):
                 problems.append(f"'{symbol}' has no instrument settings.")
             elif not instruments[symbol].get("mode"):
                 problems.append(f"'{symbol}' needs a mode (equity, cfd, spreadbet ...).")
+            elif (instruments[symbol].get("asset_class") == "fx" or instruments[symbol].get("mode") == "fx_spot") \
+                    and not (instruments[symbol].get("base_currency") and instruments[symbol].get("quote_currency")):
+                # ⚠️ An FX position is long one currency and short the other. With a leg
+                # missing, vectorbtX skips the carry with only a warning (docs/UPSTREAM.md
+                # issue 3), so the run quietly shows no holding costs at all.
+                problems.append(f"'{symbol}' is an FX instrument, so name both of its currencies: base_currency and "
+                                "quote_currency (EUR and USD for EURUSD). Carry needs both.")
         for symbol in instruments:
             if symbol not in symbols:
                 problems.append(f"Instrument settings for '{symbol}', which is not in the symbol list.")
@@ -666,4 +754,5 @@ def _validate_resolved(spec):
         problems.append("Rates come from FRED or a static table.")
     if rates and rates.get("source") == "static" and not rates.get("values"):
         problems.append("A static rate table needs at least one currency and rate.")
+    _check_cash(problems, spec, kind, features, BLOCKS)
     return problems

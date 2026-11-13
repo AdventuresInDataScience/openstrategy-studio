@@ -79,3 +79,5 @@ def test_pipeline_diagram_for_every_template():
     dot = analysis.pipeline_dot(load_template("momentum_top_n"))
     assert "feature_mom -> selection;" in dot and "schedule -> door;" in dot
     assert "alternatives searched" in analysis.pipeline_dot(load_template("structure_search"))
+    dot = analysis.pipeline_dot(load_template("shared_account_ma_cross"))
+    assert "one shared account" in dot and "feature_strength -> door" in dot

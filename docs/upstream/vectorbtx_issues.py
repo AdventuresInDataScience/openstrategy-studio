@@ -345,6 +345,30 @@ def check_shared_cash_priority():
 
 
 
+# ---------------------------------------------------------------------------
+# 15. Holding costs reach value() but not total_profit(), final_value(), total_return() or stats()
+# ---------------------------------------------------------------------------
+
+def check_holding_costs_in_totals():
+    # A flat market, so the carry is the only thing that moves the account.
+    opens = [1.10] * 12
+    o, h, l, c = frames(opens, [1.1005] * 12, [1.0995] * 12, opens, columns=("EURUSD",))
+    rates = vbt.x.static_rate_table(["EUR", "USD"], c.index, {"EUR": 0.03, "USD": 0.045})
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"EURUSD": FX_SPREADBET},
+                                 entries=mask(c.index, ["EURUSD"], [("EURUSD", 0)]),
+                                 exits=mask(c.index, ["EURUSD"], []), size=10_000, rates=rates,
+                                 init_cash=10_000, freq="D")
+    charged = float(pd.DataFrame(pf.holding_costs).to_numpy().sum())
+    last = float(pd.DataFrame(pf.value()).iloc[-1, 0])
+    final = float(np.asarray(pf.final_value()).ravel()[0])
+    end = float(pf.stats()["End Value"])
+    total_return = float(np.asarray(pf.total_return()).ravel()[0])
+    from_value = last / 10_000 - 1
+    present = abs(final - last) > 1e-6 or abs(end - last) > 1e-6 or abs(total_return - from_value) > 1e-9
+    return present, f"carry charged {charged:,.2f}: value()[-1] = {last:,.2f}, but final_value() = {final:,.2f} " \
+                    f"and stats End Value = {end:,.2f}; total_return() = {total_return:.4%}, value() gives {from_value:.4%}"
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -359,6 +383,7 @@ CHECKS = [
     (11, "intrabar_drawdown: shared cash counted per column; shorts", check_intrabar_drawdown),
     (12, "pandas 4: DatetimeIndex.weekday", check_weekday_deprecation),
     (13, "Shared cash with an entry priority (required feature)", check_shared_cash_priority),
+    (15, "Holding costs missing from total_profit, final_value, total_return and stats()", check_holding_costs_in_totals),
 ]
 
 

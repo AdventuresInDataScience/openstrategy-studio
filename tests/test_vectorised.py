@@ -9,11 +9,14 @@ from openstrategy_studio import engine, optimise as O
 from openstrategy_studio.spec import load_template
 
 
-def test_eligibility(ma_spec, momentum_spec):
+def test_eligibility(ma_spec, momentum_spec, shared_spec):
     space = O.build_space(ma_spec)
     assert engine.vectorisable(ma_spec, space) == (True, "")
     ok, reason = engine.vectorisable(momentum_spec, O.build_space(momentum_spec))
     assert not ok and "entry and exit rule" in reason
+    # The grid gives each trial its own column and cash, which a shared account cannot be.
+    ok, reason = engine.vectorisable(shared_spec, O.build_space(shared_spec))
+    assert not ok and "shared account" in reason
     risky = copy.deepcopy(ma_spec)
     risky["risk"]["stop"]["points"] = {"value": 60, "opt": {"min": 20, "max": 100, "int": True}}
     ok, reason = engine.vectorisable(risky, O.build_space(risky))

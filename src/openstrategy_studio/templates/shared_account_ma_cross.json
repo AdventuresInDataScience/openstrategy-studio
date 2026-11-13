@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "name": "Three stocks, one account: MA cross, strongest first",
+  "data": {
+    "symbols": [
+      "AAPL",
+      "MSFT",
+      "NVDA"
+    ],
+    "timeframe": "1d",
+    "start": "2015-01-01",
+    "end": "2024-12-31"
+  },
+  "instruments": {
+    "AAPL": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005,
+      "leverage": 1.0
+    },
+    "MSFT": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005,
+      "leverage": 1.0
+    },
+    "NVDA": {
+      "mode": "equity",
+      "point_size": 0.01,
+      "quote_currency": "USD",
+      "cost_currency": "USD",
+      "commission_pct": 0.0005,
+      "leverage": 1.0
+    }
+  },
+  "features": {
+    "fast": {
+      "block": "ma",
+      "source": "close",
+      "window": {
+        "value": 20,
+        "opt": {
+          "min": 5,
+          "max": 50,
+          "int": true
+        }
+      }
+    },
+    "slow": {
+      "block": "ma",
+      "source": "close",
+      "window": {
+        "value": 100,
+        "opt": {
+          "min": 60,
+          "max": 200,
+          "int": true
+        }
+      }
+    },
+    "strength": {
+      "block": "momentum",
+      "source": "close",
+      "window": 63
+    }
+  },
+  "rules": {
+    "long_entry": {
+      "all": [
+        {
+          "left": {
+            "feature": "fast"
+          },
+          "op": "crosses_above",
+          "right": {
+            "feature": "slow"
+          }
+        }
+      ]
+    },
+    "long_exit": {
+      "all": [
+        {
+          "left": {
+            "feature": "fast"
+          },
+          "op": "crosses_below",
+          "right": {
+            "feature": "slow"
+          }
+        }
+      ]
+    },
+    "short_entry": null,
+    "short_exit": null
+  },
+  "risk": {
+    "sizing": {
+      "notional": 4500
+    },
+    "stop": {
+      "kind": "none"
+    },
+    "target": null
+  },
+  "account": {
+    "init_cash": 10000,
+    "freq": "D",
+    "cash": "shared",
+    "entry_priority": {
+      "by": "feature",
+      "score": {
+        "feature": "strength"
+      },
+      "highest_first": true
+    },
+    "when_cash_short": "skip"
+  },
+  "engine_extra": {}
+}

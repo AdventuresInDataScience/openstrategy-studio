@@ -52,6 +52,17 @@ def ma_spec():
 
 
 @pytest.fixture
+def shared_spec():
+    """Three stocks trading from one shared account; competing entries go strongest momentum first."""
+    return copy.deepcopy(spec_module.load_template("shared_account_ma_cross"))
+
+
+@pytest.fixture
+def ohlcv_stocks():
+    return make_ohlcv(400, ("AAPL", "MSFT", "NVDA"), seed=3, base=100.0)
+
+
+@pytest.fixture
 def momentum_spec():
     spec = copy.deepcopy(spec_module.load_template("momentum_top_n"))
     spec["data"]["symbols"] = ["AAA", "BBB", "CCC", "DDD"]

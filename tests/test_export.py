@@ -47,6 +47,23 @@ def test_export_equivalence_portfolio(momentum_spec, ohlcv_multi):
     pd.testing.assert_series_equal(in_app.stats(), exported.stats())
 
 
+def test_export_equivalence_shared_account(shared_spec, ohlcv_stocks):
+    """One account across three symbols, competing entries ranked by a feature's score frame."""
+    pytest.importorskip("vectorbtx")
+    source = export_script(shared_spec)
+    assert "cash='shared'" in source and "entry_priority=entry_priority" in source
+    assert "entry_priority = full(F['strength__momentum'], close)" in source
+    in_app = engine.run_backtest(shared_spec, ohlcv_stocks)["pf"]
+    exported = run_exported(shared_spec, ohlcv_stocks)
+    pd.testing.assert_series_equal(in_app.stats(), exported.stats())
+    lowest = dict(shared_spec, account=dict(shared_spec["account"],
+                                            entry_priority=dict(shared_spec["account"]["entry_priority"],
+                                                                highest_first=False)))
+    assert "entry_priority = -full(" in export_script(lowest)
+    pd.testing.assert_series_equal(engine.run_backtest(lowest, ohlcv_stocks)["pf"].stats(),
+                                   run_exported(lowest, ohlcv_stocks).stats())
+
+
 def test_export_equivalence_every_template_shape(ohlcv):
     """Rules with patterns, filters, shifts and channels export the same signals."""
     pytest.importorskip("vectorbtx")

@@ -111,6 +111,141 @@ def test_price_field_is_not_sent(ma_spec):
         assert "price_field" not in args.get("instruments", ("lit", {}))[1].get("EURUSD=X", {})
 
 
+def test_cash_plan(shared_spec):
+    """Several symbols: the plan always names the cash model, so the export says it too."""
+    spec = apply_params(shared_spec)
+    args = engine.call_plan(spec)["args"]
+    assert args["cash"] == ("lit", "shared") and args["when_cash_short"] == ("lit", "skip")
+    assert args["entry_priority"] == ("var", "entry_priority")          # a score frame from compile_signals
+    assert "cash_sharing" not in args and "group_by" not in args and "call_seq" not in args
+    spec["account"]["entry_priority"] = {"by": "symbols", "order": ["NVDA"]}
+    assert engine.call_plan(spec)["args"]["entry_priority"] == ("lit", ["NVDA"])
+    spec["account"]["entry_priority"] = {"by": "symbols"}
+    assert engine.call_plan(spec)["args"]["entry_priority"] == ("lit", ["AAPL", "MSFT", "NVDA"])
+    spec["account"]["entry_priority"] = {"by": "random"}
+    assert engine.call_plan(spec)["args"]["entry_priority"] == ("lit", "random")
+    spec["account"] = {"init_cash": 10_000, "freq": "D"}
+    args = engine.call_plan(spec)["args"]
+    assert args["cash"] == ("lit", "per_instrument")
+    assert "entry_priority" not in args and "when_cash_short" not in args
+    # One symbol is one account either way, and SingleBacktest rejects cash= outright.
+    spec["data"]["symbols"] = ["AAPL"]
+    spec["instruments"] = {"AAPL": spec["instruments"]["AAPL"]}
+    spec["account"]["cash"] = "shared"
+    plan = engine.call_plan(spec)
+    assert plan["single"] and "cash" not in plan["args"]
+
+
+def competing_spec(account, score=None, symbols=("AAA", "BBB", "CCC")):
+    """Every symbol enters on bar 1 (filling at bar 2's open) and exits on bar 4, each wanting 4,000."""
+    pulse = "out = close * 0.0\nout.iloc[1] = 1.0\nout.iloc[4] = 2.0\nreturn out"
+    features = {"pulse": {"block": "python", "code": pulse}}
+    if score is not None:
+        features["score"] = {"block": "python", "code": score}
+    instrument = {"mode": "equity", "point_size": 1.0, "quote_currency": "USD", "cost_currency": "USD",
+                  "spread_points": 0.0, "leverage": 1.0}
+    rules = {"long_entry": {"left": {"feature": "pulse"}, "op": "between", "lower": {"const": 0.5},
+                            "upper": {"const": 1.5}},
+             "long_exit": {"left": {"feature": "pulse"}, "op": ">", "right": {"const": 1.5}},
+             "short_entry": None, "short_exit": None}
+    return {"version": 1, "name": "competing", "data": {"symbols": list(symbols), "timeframe": "1d",
+                                                         "start": "2000-01-01", "end": "2100-01-01"},
+            "instruments": {symbol: dict(instrument) for symbol in symbols}, "features": features, "rules": rules,
+            "risk": {"sizing": {"notional": 4000.0}, "stop": {"kind": "none"}},
+            "account": dict({"init_cash": 10_000, "freq": "D"}, **account), "engine_extra": {"seed": 7}}
+
+
+def flat_bars(symbols, n=8, price=100.0):
+    index = pd.bdate_range("2024-01-01", periods=n)
+    frame = lambda value: pd.DataFrame({symbol: np.full(n, float(value)) for symbol in symbols}, index=index)
+    return {"open": frame(price), "high": frame(price + 1), "low": frame(price - 1), "close": frame(price),
+            "volume": frame(1000.0)}
+
+
+def bought(spec, data):
+    """Units bought per symbol, from the order records."""
+    from openstrategy_studio.spec import validate_spec
+
+    assert validate_spec(spec) == []
+    orders = engine.run_backtest(spec, data)["pf"].orders.records_readable
+    buys = orders[orders["Side"] == "Buy"]
+    return {str(symbol): float(size) for symbol, size in buys.groupby("Column")["Size"].sum().items()}
+
+
+def test_shared_cash_fills_competing_entries_by_priority():
+    """Three same-bar entries each want 4,000. Separate accounts fill all three; one shared 10,000 fits two."""
+    pytest.importorskip("vectorbtx")
+    data = flat_bars(["AAA", "BBB", "CCC"])
+    assert bought(competing_spec({}), data) == {"AAA": 40, "BBB": 40, "CCC": 40}
+    shared = {"cash": "shared", "when_cash_short": "skip"}
+    assert bought(competing_spec(shared), data) == {"AAA": 40, "BBB": 40}                # symbol order
+    order = dict(shared, entry_priority={"by": "symbols", "order": ["CCC", "AAA"]})
+    assert bought(competing_spec(order), data) == {"CCC": 40, "AAA": 40}
+    # Filling part of it: CCC gets what is left, 2,000 at 100.
+    assert bought(competing_spec(dict(shared, when_cash_short="partial")), data) == {"AAA": 40, "BBB": 40, "CCC": 20}
+    score = "out = close * 0.0\nout['BBB'] = 3.0\nout['CCC'] = 2.0\nout['AAA'] = 1.0\nreturn out"
+    by_score = {"by": "feature", "score": {"feature": "score"}}
+    assert bought(competing_spec(dict(shared, entry_priority=by_score), score), data) == {"BBB": 40, "CCC": 40}
+    lowest = dict(shared, entry_priority=dict(by_score, highest_first=False))
+    assert bought(competing_spec(lowest, score), data) == {"AAA": 40, "CCC": 40}
+    random = competing_spec(dict(shared, entry_priority={"by": "random"}))
+    first = bought(random, data)
+    assert len(first) == 2 and bought(random, data) == first                            # seeded: it repeats
+
+
+def test_separate_accounts_are_reported_as_accounts(ma_spec):
+    """Each symbol with its own cash: every account equals that symbol run alone, and the tables are
+    the accounts taken together, not their average (vectorbt's stats() on ungrouped columns).
+
+    FX spread bets at 30x with carry, so the margin loan and the holding costs are both in play."""
+    pytest.importorskip("vectorbtx")
+    import warnings
+
+    from openstrategy_studio import analysis
+
+    symbols = ["EURUSD=X", "GBPUSD=X", "AUDUSD=X"]
+    data = make_ohlcv(400, symbols, seed=5)
+    spec = apply_params(ma_spec, {"features.fast.window": 5, "features.slow.window": 20})   # enough trades
+    pair = spec["instruments"]["EURUSD=X"]
+    spec["data"]["symbols"] = symbols
+    spec["instruments"] = {symbol: dict(pair, base_currency=symbol[:3]) for symbol in symbols}
+    spec["account"]["rates"]["values"] = {"EUR": 0.03, "USD": 0.045, "GBP": 0.04, "AUD": 0.035}
+    run = engine.run_backtest(spec, data)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        results = analysis.extract_results(run)
+    assert not [w for w in caught if "Aggregating" in str(w.message)], "no silent averaging of accounts"
+    assert results["meta"]["accounts"] == {"model": "separate", "count": 3, "each": 10_000.0}
+    table = results["per_symbol"]
+    portfolio = results["stats"]["portfolio"]["all"]
+    assert portfolio["Start Value"] == pytest.approx(30_000)
+    assert portfolio["End Value"] == pytest.approx(table["End value"].sum(), rel=1e-12)
+    for symbol in symbols:
+        alone = dict(spec, data=dict(spec["data"], symbols=[symbol]), instruments={symbol: spec["instruments"][symbol]})
+        pf = engine.run_backtest(alone, {field: frame[[symbol]] for field, frame in data.items()})["pf"]
+        first = lambda value: float(np.asarray(value, dtype=float).ravel()[0])
+        assert table.loc[symbol, "End value"] == pytest.approx(first(pf.final_value()), rel=1e-12)
+        assert table.loc[symbol, "Sharpe ratio"] == pytest.approx(first(pf.sharpe_ratio()), rel=1e-12)
+        assert table.loc[symbol, "Trades"] == first(pf.trades.count())
+        assert table.loc[symbol, "Holding costs"] == pytest.approx(pd.DataFrame(pf.holding_costs).to_numpy().sum())
+
+
+def test_shared_account_is_reported_as_one(shared_spec, ohlcv_stocks):
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import analysis
+
+    run = engine.run_backtest(shared_spec, ohlcv_stocks)
+    results = analysis.extract_results(run)
+    assert results["meta"]["accounts"] == {"model": "shared", "count": 1, "each": 10_000.0}
+    assert results["stats"]["portfolio"]["all"]["Start Value"] == pytest.approx(10_000)
+    table = results["per_symbol"]
+    assert list(table.index) == ["AAPL", "MSFT", "NVDA"] and "End value" not in table
+    assert table["Trades"].sum() > 0
+    # 4,500 a position from one 10,000 account: never more than two open at once.
+    held = pd.DataFrame(run["pf"].assets())                     # one column per symbol, grouped or not
+    assert int((held > 0).sum(axis=1).max()) <= 2
+
+
 def test_benchmark_is_the_market_unlevered(ma_spec, ohlcv, momentum_spec, ohlcv_multi):
     """Phase 0 finding (VERIFY 2.7): the buy-and-hold line is the market, not a hold at buying power.
 
@@ -176,6 +311,42 @@ def test_golden_ma_cross(ma_spec, ohlcv):
     assert_stats_equal(run["pf"].stats(), hand.stats())
     assert_stats_equal(run["pf"].trades.stats(), hand.trades.stats())
     assert_stats_equal(run["pf"].returns_stats(), hand.returns_stats())
+
+
+def test_golden_numbers_from_the_vectorbtx_example(ma_spec):
+    """The Studio's MA-cross template against vectorbtX's own example, on the same Yahoo prices.
+
+    tests/fixtures/golden/make_golden.py ran examples/strategies/01_ma_cross_spreadbet_fx.py
+    (SingleBacktest with flat FX terms) and saved its prices and its three stats tables.
+    The Studio routes the pair through PortfolioBacktest(instruments=...): the numbers must
+    agree. The example's static rates (its no-FRED line) replace the template's.
+
+    ⚠️ The saved stats() leave carry out of Total Return and End Value (docs/UPSTREAM.md
+    issue 15). When vectorbtX fixes that, this test fails: re-run make_golden.py and check
+    that only the carry-dependent numbers moved.
+    """
+    pytest.importorskip("vectorbtx")
+    import json
+    from pathlib import Path
+
+    folder = Path(__file__).parent / "fixtures" / "golden"
+    golden = json.loads((folder / "ma_cross_01.json").read_text(encoding="utf-8"))
+    prices = pd.read_csv(folder / "eurusd_2019_2024_yahoo.csv", index_col="date", parse_dates=["date"])
+    symbol = "EURUSD=X"
+    data = {field: prices[[field]].rename(columns={field: symbol}) for field in ("open", "high", "low", "close")}
+    data["volume"] = pd.DataFrame(0.0, index=prices.index, columns=[symbol])
+    ma_spec["account"]["rates"]["values"] = dict(golden["rates"])
+    pf = engine.run_backtest(ma_spec, data)["pf"]
+    for name, table in (("stats", pf.stats()), ("trades", pf.trades.stats()), ("returns", pf.returns_stats())):
+        assert sorted(map(str, table.index)) == sorted(golden[name]), name
+        for label, value in table.items():
+            expected = golden[name][str(label)]
+            if isinstance(expected, float):
+                assert float(value) == pytest.approx(expected, rel=1e-9, abs=1e-12), (name, label)
+            elif expected is None:
+                assert not np.isfinite(float(value)), (name, label)
+            else:
+                assert str(value) == expected, (name, label)
 
 
 # ---------------------------------------------------------------------------

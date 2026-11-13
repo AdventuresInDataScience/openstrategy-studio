@@ -69,6 +69,51 @@ def test_threshold_needs_calendar(momentum_spec):
     assert any("needs a calendar" in p for p in problems)
 
 
+def test_fx_instrument_needs_both_currencies(ma_spec):
+    """docs/UPSTREAM.md issue 3: with a leg missing, vectorbtX skips the carry with only a warning."""
+    for missing in ("base_currency", "quote_currency"):
+        spec = copy.deepcopy(ma_spec)
+        del spec["instruments"]["EURUSD=X"][missing]
+        assert any("name both of its currencies" in p for p in S.validate_spec(spec)), missing
+    # Not FX: an instrument without a pair is fine.
+    spec = copy.deepcopy(ma_spec)
+    spec["instruments"]["EURUSD=X"]["asset_class"] = "stocks"
+    del spec["instruments"]["EURUSD=X"]["base_currency"]
+    assert not any("currencies" in p for p in S.validate_spec(spec))
+
+
+def test_cash_model(shared_spec, ma_spec, momentum_spec):
+    assert S.cash_model(shared_spec) == "shared"
+    separate = copy.deepcopy(shared_spec)
+    separate["account"] = {"init_cash": 10_000, "freq": "D"}
+    assert S.cash_model(separate) == "per_instrument"          # vectorbt's own default, named
+    assert S.cash_model(ma_spec) is None                       # one symbol is one account either way
+    assert S.cash_model(momentum_spec) is None                 # weights are shares of one account
+
+
+def test_cash_settings_are_checked(shared_spec, momentum_spec):
+    def says(problems, text):
+        assert any(text in p for p in problems), (text, problems)
+
+    says(problems_for(shared_spec, account__cash="joint"), "Cash must be per_instrument")
+    says(problems_for(shared_spec, account__when_cash_short="halve"), "When cash runs short")
+    says(problems_for(shared_spec, account__cash="per_instrument"), "only apply to a shared account")
+    says(problems_for(shared_spec, account__entry_priority={"by": "volume"}), "must be by")
+    says(problems_for(shared_spec, account__entry_priority={"by": "symbols", "order": ["AAPL", "TSLA"]}),
+         "not in the list: TSLA")
+    says(problems_for(shared_spec, account__entry_priority={"by": "symbols", "order": ["AAPL", "AAPL"]}), "twice")
+    says(problems_for(shared_spec, account__entry_priority={"by": "random"}), "needs a random seed")
+    assert problems_for(shared_spec, account__entry_priority={"by": "random"}, engine_extra__seed=1) == []
+    says(problems_for(shared_spec, account__entry_priority__score={"const": 1}), "a constant ranks them all the same")
+    says(problems_for(shared_spec, account__entry_priority__score={"feature": "missing"}), "does not exist")
+    says(problems_for(shared_spec, engine_extra__cash_sharing=True), "not as engine settings")
+    says(problems_for(momentum_spec, account__cash="per_instrument"), "shares of one account")
+    says(problems_for(momentum_spec, account__entry_priority={"by": "random"}), "only entry and exit rule")
+    hold = copy.deepcopy(shared_spec)
+    hold["rules"] = {}
+    says(S.validate_spec(hold), "Buy and hold in one shared account")
+
+
 def test_good_spec_has_no_problems(ma_spec):
     assert S.validate_spec(ma_spec) == []
 

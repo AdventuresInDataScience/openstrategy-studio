@@ -2,7 +2,7 @@
 
 Define a trading strategy through forms, a rule builder and expressions, then backtest it, optimise it and read a tear sheet, all without writing code. Everything runs locally on [vectorbtX](https://github.com/AdventuresInDataScience/vectorbtx) (`vbt.x.SingleBacktest` and `vbt.x.PortfolioBacktest`), vectorbt 1.1.0, ta_patterns, BUTChC, Optuna, marsopt and plotly-themes.
 
-**Status: all five phases of the implementation plan are written, and phase 0 (confirming the code against the real libraries) has been run.** The test suite and `openstrategy-studio selfcheck` pass on vectorbt 1.1.0 and vectorbtX `9f4cf54`, which fixes every issue phase 0 found in it. [`docs/VERIFY.md`](docs/VERIFY.md) records every answer, what changed, and the two items still open (a real MT4/MT5 export and a clean-machine install). The issues found in vectorbtX itself are in [`docs/UPSTREAM.md`](docs/UPSTREAM.md), each with a standalone reproduction. Working on this with Claude Code? [`CLAUDE.md`](CLAUDE.md) is its orientation file.
+**Status: all five phases of the implementation plan are written, and phase 0 (confirming the code against the real libraries) has been run.** The test suite and `openstrategy-studio selfcheck` pass on vectorbt 1.1.0 and vectorbtX `9f4cf54`, which fixes every issue phase 0 found in it. [`docs/VERIFY.md`](docs/VERIFY.md) records every answer, what changed, and the two items still open (a real MT4/MT5 export and a clean-machine install). The issues found in vectorbtX itself are in [`docs/UPSTREAM.md`](docs/UPSTREAM.md), each with a standalone reproduction; one found since phase 0 (issue 15: holding costs left out of the total return) is open. Working on this with Claude Code? [`CLAUDE.md`](CLAUDE.md) is its orientation file.
 
 ## Install and run
 

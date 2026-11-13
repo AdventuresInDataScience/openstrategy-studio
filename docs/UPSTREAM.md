@@ -10,15 +10,15 @@ uv run python -I docs/upstream/vectorbtx_issues.py     # prints PRESENT or FIXED
 
 Run it in vectorbtX's own environment while patching, or copy the checks into vectorbtX's tests. At `ace29e2`, all 13 are present.
 
-## Status (12 November 2026)
+## Status (13 November 2026)
 
-**All 13 are fixed in vectorbtX `16293a2`, and issue 14, found with those fixes, in `9f4cf54`**, which `uv.lock` now pins: the script reports 0 of 13 present, and vectorbtX carries the same checks in `tests/test_upstream_fixes.py`. Nothing here is open in vectorbtX. The Studio workarounds below are removed, except where an issue says it can stay:
+**All 13 are fixed in vectorbtX `16293a2`, and issue 14, found with those fixes, in `9f4cf54`**, which `uv.lock` now pins, and vectorbtX carries the same checks in `tests/test_upstream_fixes.py`. **Issue 15 is open**: found on `9f4cf54` while building the per-symbol results for shared cash, so the script now reports 1 of 14 present (exit code 1). The Studio workarounds below are removed, except where an issue says it can stay:
 
 | Issue | Studio side now |
 |---|---|
 | 1 | Removed: `compile_signals` and `export_script` shift nothing; `shift_shorts` is gone. |
 | 2 | Kept by choice: an FX pair still goes through `PortfolioBacktest(instruments=...)`. The account currency is now passed as `account_currency=`, since vectorbtX's flat `base_currency=` names a pair's base on FX terms. |
-| 3 | Studio to-do still open: require both currencies on an FX instrument. vectorbtX now skips carry for a missing leg, with a warning. |
+| 3 | Done: `validate_spec` requires both currencies on an FX instrument (`asset_class="fx"` or `mode="fx_spot"`), and the instrument grid warns beside the cell. vectorbtX skips carry for a missing leg, with a warning. |
 | 4 | Carry now includes `carry_markup`, which the Settings page can set. Saved FX runs change by the markup. |
 | 5, 6 | Removed: `engine.STOP_ENTRY_PRICE` / `STOP_EXIT_PRICE` and their `call_plan` lines. |
 | 7, 8 | Nothing to remove; `validate_spec` still rejects fixed weights above 100%. |
@@ -26,14 +26,15 @@ Run it in vectorbtX's own environment while patching, or copy the checks into ve
 | 10 | `pf[[column]]` stays in `run_vectorised` (harmless). |
 | 11 | Removed: `analysis.extract_results` draws `pf.x.intrabar_drawdown_series()`. |
 | 12 | Nothing to remove. |
-| 13 | The API exists (`cash`, `entry_priority`, `when_cash_short`); the Studio side is still to build. |
+| 13 | Built (13 November 2026); see "Studio side" under issue 13. |
 | 14 | Fixed in `9f4cf54`; nothing to remove. The pinning test became `test_extra_exits_check_the_entry_bar_without_a_warning`, and the exit-rules gate gained entry-bar cases. |
+| 15 | **Open.** No workaround, by design: the tear sheet shows the library's own numbers. `test_golden_numbers_from_the_vectorbtx_example` will fail when it is fixed; re-run `tests/fixtures/golden/make_golden.py`. |
 
 ## Where each phase 0 finding belongs
 
 | Belongs in | Findings |
 |---|---|
-| **vectorbtX: bugs** | 1 to 12 below. Ten give wrong numbers without an error, one crashes, and one is housekeeping. |
+| **vectorbtX: bugs** | 1 to 12 below. Ten give wrong numbers without an error, one crashes, and one is housekeeping. Later: 14 (fixed) and 15 (open, wrong numbers). |
 | **vectorbtX: required feature** | 13, shared cash with an entry priority. Portfolios need it, and the Studio builds its account options on it. Check 13 in the script is its acceptance test. |
 | **ta_patterns** | `chart_patterns.BULLISH` and `CHART_PATTERNS` list `double_bottom_ugly`, but the function is `ugly_double_bottom`. |
 | **Environment** (not a library) | On Windows, uv's standalone CPython aborts when `SSLKEYLOGFILE` is set and an HTTPS context is created. vectorbtX's `FREDData` would hit it too. |
@@ -184,10 +185,13 @@ Severity: **wrong numbers** means a plausible result with no error, which is the
 
   The short arrays (once issue 1 shifts them) and reversals (`upon_opposite_entry="reverse"`) belong in the same exits-first and entries-by-priority groups.
 * ⚠️ **One subtlety the sketch does not handle.** vectorbt processes each column completely (its stop check, then its signal) before the next. A stop hit *intrabar* on a column ordered before an entry frees cash the entry could not have had at the open. That is a small optimistic bias. Either order columns with only intrabar stops after the entries, or document it.
-* **Studio side, once it exists** (no vectorbtX action):
-  * an account choice between "each symbol trades its own copy of the account" and "one shared account";
-  * for a shared account, a priority picker (symbol order, random with a seed, or by a feature such as the strongest momentum) and a skip-or-shrink choice;
-  * results that label the replicated case as N accounts, with a per-symbol table. Today the stats tables silently average the columns.
+* **Studio side, built 13 November 2026** (no vectorbtX action):
+  * the spec's `account` holds `cash` (`per_instrument` or `shared`), `entry_priority` (`{"by": "symbols", "order": [...]}`, `{"by": "random"}` seeded by `engine_extra.seed`, or `{"by": "feature", "score": ref, "highest_first": bool}`) and `when_cash_short` (`skip` or `partial`), checked by `validate_spec`. `spec.cash_model` says when the question arises at all: a rule strategy on two or more symbols. One symbol is one account either way, and a weights portfolio is shared by construction;
+  * `engine.call_plan` always names `cash=` for such a strategy, so the export says which model it is. A feature priority compiles to a per-bar score frame in `compile_signals`, on the signals' bar and unshifted (the front door shifts it with them; `test_entry_priority_score_is_causal_and_unshifted`);
+  * the Build page's Account tab has the picker, and the Pipeline tab names the account;
+  * results: `analysis.stats_tables` regroups separate accounts into one book of N x `init_cash`, matching the equity curve and the optimiser (`group_by=True`), instead of vectorbt's silent average. The Backtest page says "N separate accounts" and shows a per-symbol table, and each account in it equals that symbol run alone (`test_separate_accounts_are_reported_as_accounts`). A symbol in a shared account shows only what it traded;
+  * `engine.vectorisable` refuses a shared account;
+  * `test_shared_cash_fills_competing_entries_by_priority` checks every priority and both cash-short rules through the Studio, and the `shared_account_ma_cross` template exercises the whole path in every per-template test and in `selfcheck`.
 
 ### 14. Stops on the entry bar are not checked when an adjust callback is given (fixed in `9f4cf54`)
 
@@ -201,3 +205,10 @@ The original report:
 * **What happens.** vectorbtX now checks a stop on the bar a position is entered, by simulating each bar as its open plus the rest of the bar, and mapping the orders back. A custom `adjust_sl_func_nb`, `adjust_tp_func_nb` or `signal_func_nb` takes opaque arguments that cannot be re-indexed to the two-step index, so with one the front door falls back to whole bars and warns ("stops are NOT checked on the bar a position is entered"). The Studio's extra exits (`exit_rules.py`: time stop, breakeven, step trailing) are exactly such callbacks, so **every strategy with an extra exit keeps the entry-bar bias**: a stop the entry bar trades through is missed. It always flatters the result, most for tight stops on daily bars.
 * **Fix, a suggestion.** Let a callback opt in to split bars, for example `split_bars=True` on the front door (or a marker attribute on the function), documented as: on the split index `c.i` and `c.init_i` are steps, the bar is `c.i // 2`, even steps are the open (O = H = L = C = open) and odd steps the rest of the bar; per-bar arrays in the callback's arguments stay per bar. The Studio's templates would then index by `c.i // 2` and count bars as `c.i // 2 - c.init_i // 2`, and the time stop would fire on the open step. The phase 3 gate (`tests/test_exit_rules.py::test_gate_matches_the_reference_simulator`) would need its reference simulator to check the entry bar too.
 * **Studio side, until then.** `test_exit_rules.py::test_extra_exits_say_the_entry_bar_is_not_checked` pins the warning, so the gap stays visible; delete it when this is fixed.
+
+### 15. Holding costs reach `value()` but not `total_profit()`, `final_value()`, `total_return()` or `stats()` (open)
+
+* **Where.** vectorbtX `9f4cf54`, `core/portfolio.py`: `Portfolio.cash_flow` folds `_holding_costs` in (its docstring says this "is what makes holding costs visible at all"), but vectorbt's `total_profit` is computed from the order records (`total_profit_nb` over close and orders), not from `cash_flow`. `final_value` (`init_cash + total_profit`) and `total_return` (`total_profit / init_cash`) inherit it, and so do the `End Value` and `Total Return [%]` rows of `pf.stats()`.
+* **What happens.** A long EURUSD spread bet in a flat market, carry only (check 15 in the script): carry charged −11.46, `pf.value()[-1]` = 9,988.54, but `final_value()` and stats' End Value = 10,000.00 and `total_return()` = 0.00% (`value()` gives −0.11%). On the Studio's MA-cross template on 400 synthetic bars: `returns_stats()` Total Return −1.24% with carry, `stats()` Total Return −0.98% whether rates are given or not. So within one tear sheet the equity curve, Sharpe, drawdown and `returns_stats` include carry, while End Value and Total Return leave it out; the optimiser's `total_return` metric leaves it out too. Every strategy with `rates=` is affected, and leveraged FX carry is where it matters most.
+* **Fix, a suggestion.** Override `total_profit` on vectorbtX's `Portfolio` to add the summed `_holding_costs` (per column ungrouped, summed per group when grouped), as `cash_flow` does, so `final_value`, `total_return` and the stats rows follow. Check `trades.pnl` is meant to stay gross (per-trade P&L before swaps is the MT5 convention, with swaps reported separately), and say so in the docs either way.
+* **Studio side.** No workaround. The per-symbol table shows `Holding costs` beside `Trade P&L`, so the carry is visible. When it is fixed, `test_golden_numbers_from_the_vectorbtx_example` fails by design: re-run `tests/fixtures/golden/make_golden.py` and check that only the carry-dependent numbers moved.

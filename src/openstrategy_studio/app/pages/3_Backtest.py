@@ -79,6 +79,17 @@ elif save.button("Save run"):
     last["saved"] = analysis.save_run(data_dir, results, last["spec"], settings, last["fingerprint"])
     st.success("Saved. It is listed on Home and can be reopened here.")
 
+# How the run was funded. Runs saved before the meta recorded it say nothing.
+accounts = results["meta"].get("accounts") or {}
+if accounts.get("model") == "separate":
+    st.info(f"{accounts['count']} separate accounts, one per symbol, each starting with {accounts['each']:,.0f} "
+            f"({accounts['count'] * accounts['each']:,.0f} in all). The tables and charts treat them as one book; "
+            "the table under them shows each account on its own."
+            + (" To trade every symbol from one account, make the account shared on the Build page's Account tab."
+               if results["meta"]["kind"] == "signals" else ""))
+elif accounts.get("model") == "shared" and results["meta"]["kind"] == "signals":
+    st.caption(f"One account of {accounts['each']:,.0f}, shared by every symbol.")
+
 # --- stats ----------------------------------------------------------------------------
 tags = {"all": "All metrics", "mt5": "MT5 report", "vectorbtx": "vectorbtX extras"}
 tag = st.radio("Metrics", list(tags), format_func=tags.get, horizontal=True)
@@ -89,6 +100,11 @@ for column, (table_name, label) in zip(columns, (("portfolio", "Portfolio"), ("t
         ui.table(analysis.stats_frame(results, table_name, tag), height=420)
 st.caption("Z-score reads the other way round from most metrics: a negative value means wins and losses cluster "
            "in streaks. It is a dependency test, not a quality score.")
+if "per_symbol" in results:
+    st.markdown("**Each symbol**")
+    ui.table(results["per_symbol"], hide_index=False)
+    if accounts.get("model") != "separate":
+        st.caption("A symbol in a shared account has no equity of its own, so only what it traded is shown.")
 
 # --- figures --------------------------------------------------------------------------
 st.divider()

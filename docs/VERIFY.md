@@ -90,9 +90,11 @@ Each was marked `⚠️ VERIFY` in the code. The markers are gone where the answ
 
 `test_golden_ma_cross` compares the compiled MA-cross spec with the same strategy written as a direct vectorbtX call, and passes. The direct call is `PortfolioBacktest(instruments={"EURUSD=X": {...}})`, with no stop price overrides: since `16293a2` the front door sets them.
 
-`examples/strategies/01_ma_cross_spreadbet_fx.py` in vectorbtX passes `base_currency="EUR"` to `SingleBacktest`. On `ace29e2` that hit `docs/UPSTREAM.md` issue 2 and charged a long the whole USD rate. `16293a2` reads it as the pair, as the example's comment says, so its `pf.stats()`, `pf.trades.stats()` and `pf.returns_stats()` can now be saved as golden text in `tests/fixtures/golden/` (still to do).
+`examples/strategies/01_ma_cross_spreadbet_fx.py` in vectorbtX passes `base_currency="EUR"` to `SingleBacktest`. On `ace29e2` that hit `docs/UPSTREAM.md` issue 2 and charged a long the whole USD rate. `16293a2` reads it as the pair, as the example's comment says.
 
-The template uses a static rate table so that it runs without a FRED key; the example uses FRED. Switch the template's `account.rates` to `{"source": "fred"}` for that comparison.
+**Saved on 13 November 2026** (vectorbtX `9f4cf54`). `tests/fixtures/golden/make_golden.py` runs the example file itself, unmodified, on real Yahoo data (1,564 EURUSD bars, 2019 to 2024), with the one change the example offers for running without a FRED key: its static rate table, EUR 4% and USD 5.3%. It saves the prices it downloaded (`eurusd_2019_2024_yahoo.csv`) and the 104 numbers in `pf.stats()`, `pf.trades.stats()` and `pf.returns_stats()` (`ma_cross_01.json`). `test_golden_numbers_from_the_vectorbtx_example` runs the Studio's MA-cross template on those prices with the same rates, offline, and agrees with every number to 1e-9. The example's flat `SingleBacktest` and the Studio's `PortfolioBacktest(instruments=...)` therefore give the same result on real data.
+
+⚠️ The saved `stats()` leave carry out of Total Return and End Value (−2.75%, with −30.73 of carry not counted; `docs/UPSTREAM.md` issue 15). When vectorbtX fixes that, the test fails by design: re-run the script and check that only the carry-dependent numbers moved.
 
 ## 5. Decisions taken where the plan left a choice
 
@@ -106,7 +108,8 @@ The template uses a static rate table so that it runs without a FRED key; the ex
 * **References can shift.** A reference can carry its own `shift` (`{"feature": "upper", "shift": 1}`), so a breakout can compare with the previous bar's channel. This is in addition to the leaf-level `shift`.
 * **Structure search uses choice nodes.** A choice is `{"choose": label or optimisable categorical, "options": {label: subtree}}`, and it can sit anywhere in the spec. `apply_params` resolves choices, so nothing downstream sees them. `validate_spec` checks every alternative. BUTChC and Optuna search the conditional space; the other backends fix the structure at the current choice.
 * **The extra exits need a fixed stop.** They adjust an existing stop, and vectorbt only calls the adjustment while a stop is active.
-* **The vectorised grid is limited.** It only varies parameters that change the signals, on a single symbol.
+* **The vectorised grid is limited.** It only varies parameters that change the signals, on a single symbol, and never a shared account.
+* **Cash across symbols.** A rule strategy on several symbols names its cash model explicitly (`account.cash`, default `per_instrument`, vectorbt's own behaviour). Separate accounts are reported as one book of N x `init_cash`, the sum the equity curve already drew and the optimiser already scored, with a per-symbol table beside it. A random entry priority must be seeded. Buy and hold is not offered in a shared account: without a size, the first symbol would take all the cash.
 
 ## 6. Windows findings in the Studio itself (fixed)
 
@@ -119,3 +122,5 @@ The template uses a static rate table so that it runs without a FRED key; the ex
 The items that belong in vectorbtX (twelve bugs and one required feature, shared cash with an entry priority, each with a standalone reproduction or acceptance check in `docs/upstream/vectorbtx_issues.py`) are in [`UPSTREAM.md`](UPSTREAM.md), with the line numbers, suggested fixes, and the Studio workaround to remove once each is fixed. That document also covers the ta_patterns naming bug and the shared-cash design question.
 
 All 13 are fixed in vectorbtX `16293a2`, and the Studio's workarounds for them are removed (each issue's status is in `UPSTREAM.md`). Issue 14, a limitation that came with the entry-bar stop fix, is fixed in `9f4cf54`. Nothing found in phase 0 is open in vectorbtX.
+
+Issue 15 was found after phase 0, on `9f4cf54`, while checking the per-symbol results for shared cash: holding costs reach `value()` and `returns()` but not `total_profit()`, `final_value()`, `total_return()` or the End Value and Total Return rows of `stats()`. It is open, with check 15 in the script.

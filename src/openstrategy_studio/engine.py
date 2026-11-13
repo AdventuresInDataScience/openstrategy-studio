@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .spec import SIZING_KEYS, apply_params, strategy_kind
+from .spec import SIZING_KEYS, apply_params, cash_model, strategy_kind
 
 
 # ⚠️ Which of stop-loss or take-profit wins when one bar's range contains both.
@@ -428,7 +428,31 @@ def call_plan(spec, data_dir=None):
         # cash feedback from holding costs during the run.
         args["rates"] = ("var", "rates")
 
-    # Passed through untouched: upon_opposite_entry, seed, cash_sharing, group_by ...
+    # Cash, for a rule strategy on several symbols (docs/UPSTREAM.md issue 13).
+    # ⚠️ Left unsaid, vectorbt gives each symbol its own copy of init_cash, so three
+    # symbols on 10,000 trade 30,000. The plan always names the model, so the export
+    # says which one it is too.
+    model = cash_model(spec)
+    if model is not None:
+        args["cash"] = ("lit", model)
+    if model == "shared":
+        # Priority decides only between entries: vectorbtX places the orders that close a
+        # position first, so the cash they free is there for the entries.
+        priority = account.get("entry_priority") or {"by": "symbols"}
+        if priority["by"] == "symbols":
+            # Listed symbols first, in that order; vectorbtX puts any left out after them.
+            args["entry_priority"] = ("lit", list(priority.get("order") or symbols))
+        elif priority["by"] == "random":
+            # Seeded by engine_extra's seed=, which validate_spec requires.
+            args["entry_priority"] = ("lit", "random")
+        else:
+            # A per-bar score frame from compile_signals, on the signals' bar: the front
+            # door shifts it with them.
+            args["entry_priority"] = ("var", "entry_priority")
+        args["when_cash_short"] = ("lit", account.get("when_cash_short") or "skip")
+
+    # Passed through untouched: upon_opposite_entry, seed ... (validate_spec keeps the
+    # cash passthroughs, cash_sharing, group_by and call_seq, out of a rule strategy).
     for key, value in (spec.get("engine_extra") or {}).items():
         args[key] = ("lit", value)
     return {"front_door": "SingleBacktest" if single else "PortfolioBacktest",
@@ -516,6 +540,10 @@ def vectorisable(spec, space):
     applied = apply_params(spec)
     if strategy_kind(applied) != "signals":
         return False, "Only entry and exit rule strategies can run many trials per call."
+    if cash_model(applied) == "shared":
+        # Checked before the symbol count so the reason names the real obstacle.
+        return False, ("A shared account cannot run many trials per call: the vectorised grid gives each trial "
+                       "its own column and its own cash. Run it with the ordinary grid.")
     if len(applied["data"]["symbols"]) != 1 or "from_file" in (applied.get("instruments") or {}):
         return False, "Only single-symbol strategies with their own instrument settings can run many trials per call."
     if (applied.get("account") or {}).get("base_currency"):

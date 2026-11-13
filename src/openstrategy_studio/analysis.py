@@ -112,7 +112,15 @@ def stats_tables(pf):
     pf.get_init_cash(), not the raw argument. Benchmark-relative statistics (beta,
     alpha, M2, Treynor) use returns_stats' own default, pf.benchmark_returns(): the
     market, held unlevered. Phase 0 checked they come out finite (VERIFY 2.7).
+
+    ⚠️ Several symbols that each have their own cash are several accounts, and vectorbt's
+    stats() on ungrouped columns AVERAGES them, with only a warning. That matched
+    neither the equity curve (their sum) nor the optimiser (group_by=True). Regrouped
+    without sharing cash, the tables describe the accounts taken together, as one book
+    of N x init_cash; per_symbol_table shows each account on its own.
     """
+    if len(pf.wrapper.columns) > 1 and not pf.wrapper.grouper.is_grouped():
+        pf = pf.regroup(True)
     settings = {"init_cash": pf.get_init_cash()}
     out = {}
     for tag in ("all", "mt5", "vectorbtx"):
@@ -128,6 +136,34 @@ def stats_tables(pf):
                 values = {str(label): _jsonable(value) for label, value in table.items()}
             out.setdefault(name, {})[tag] = values
     return out
+
+
+def per_symbol_table(pf, accounts):
+    """One row per symbol. Trades and holding costs always; each account's own results when they are separate.
+
+    In a shared account a symbol has no equity of its own, so only what it traded is
+    shown. Separate accounts are independent: each row equals that symbol run on its
+    own (tests/test_engine.py checks it).
+    """
+    columns = list(pf.wrapper.columns)
+    trades = pf.trades
+    frame = pd.DataFrame(index=pd.Index(columns, name="Symbol"))
+    frame["Trades"] = trades.count(group_by=False).reindex(columns).to_numpy()
+    frame["Win rate [%]"] = (trades.win_rate(group_by=False) * 100).reindex(columns).to_numpy()
+    frame["Trade P&L"] = trades.pnl.sum(group_by=False).reindex(columns).to_numpy()
+    holding = _optional(lambda: pd.DataFrame(pf.holding_costs))
+    if holding is not None:
+        frame["Holding costs"] = holding.sum().reindex(columns).to_numpy()
+    if accounts["model"] == "separate":
+        # ⚠️ vectorbtX 9f4cf54: final_value and total_return leave holding costs out, while
+        # value() and returns() include them (docs/UPSTREAM.md issue 15). These are the
+        # library's own numbers, the same as the tear sheet's tables, until that is fixed.
+        frame["End value"] = pf.final_value(group_by=False).reindex(columns).to_numpy()
+        frame["Total return [%]"] = (pf.total_return(group_by=False) * 100).reindex(columns).to_numpy()
+        # vectorbt reports a drawdown as a negative fraction; the stats table shows it positive.
+        frame["Max drawdown [%]"] = (-pf.max_drawdown(group_by=False) * 100).reindex(columns).to_numpy()
+        frame["Sharpe ratio"] = pf.sharpe_ratio(group_by=False).reindex(columns).to_numpy()
+    return frame
 
 
 def extract_results(run, benchmark=False):
@@ -157,15 +193,30 @@ def extract_results(run, benchmark=False):
         bench_value = _total(pf.benchmark_value()).reindex(frame.index)
         frame["benchmark"] = bench_value / bench_value.iloc[0] * value.iloc[0]
 
+    # How the run was funded, read off the portfolio itself so it describes what ran.
+    # "separate" is one account per symbol, each starting with the spec's init_cash;
+    # "shared" is one account across every symbol (a shared signal account, or any
+    # weights portfolio); "single" is one symbol.
+    symbols = list(data["close"].columns)
+    if len(symbols) == 1:
+        accounts = {"model": "single", "count": 1}
+    elif pf.cash_sharing:
+        accounts = {"model": "shared", "count": 1}
+    else:
+        accounts = {"model": "separate", "count": len(symbols)}
+    accounts["each"] = init_cash / accounts["count"]
+
     results = {
         "series": frame,
         "trades": pf.trades.records_readable,
         "orders": pf.orders.records_readable,
         "stats": stats_tables(pf),
         "meta": {"name": spec["name"], "kind": run["plan"]["kind"], "freq": spec["account"]["freq"],
-                 "symbols": list(spec["data"]["symbols"]), "init_cash": init_cash,
+                 "symbols": list(spec["data"]["symbols"]), "init_cash": init_cash, "accounts": accounts,
                  "front_door": run["plan"]["front_door"], "has_benchmark": bool(benchmark)},
     }
+    if len(symbols) > 1:
+        results["per_symbol"] = per_symbol_table(pf, accounts)
     # Prices, long format, for the candlestick view and MAE/MFE.
     prices = []
     for symbol in data["close"].columns:
@@ -762,8 +813,16 @@ def pipeline_dot(spec):
         upstream = f"feature_{source['feature']}" if isinstance(source, dict) else "data"
         lines.append(f"  {upstream} -> feature_{name};")
     plan = call_plan(resolved)
-    door = f"door [label={_dot('vbt.x.' + plan['front_door'] + chr(10) + 'fills at the next open')}, shape=box3d];"
+    door_label = "vbt.x." + plan["front_door"] + chr(10) + "fills at the next open"
+    if "cash" in plan["args"]:
+        door_label += chr(10) + ("one shared account" if plan["args"]["cash"][1] == "shared"
+                                 else f"{len(data['symbols'])} accounts, one per symbol")
+    door = f"door [label={_dot(door_label)}, shape=box3d];"
     lines.append("  " + door)
+    if plan["args"].get("entry_priority") == ("var", "entry_priority"):
+        score = resolved["account"]["entry_priority"]["score"]
+        source = f"feature_{score['feature']}" if "feature" in score else "data"
+        lines.append(f"  {source} -> door [label={_dot('entry priority')}, fontsize=9, style=dashed];")
     extras = []
     if kind == "signals":
         labels = {"long_entry": "Long entry", "long_exit": "Long exit", "short_entry": "Short entry",

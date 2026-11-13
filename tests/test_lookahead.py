@@ -139,6 +139,20 @@ def test_the_compiler_shifts_no_signal(ohlcv):
     pd.testing.assert_frame_equal(compiled["short_entries"], compiled["entries"])
 
 
+def test_entry_priority_score_is_causal_and_unshifted(shared_spec, ohlcv_stocks):
+    """A shared account's priority score: no lookahead, and on the signals' own bar. The front
+    door shifts it with the signals, so a shift here would rank entries by a stale score."""
+    pytest.importorskip("vectorbt")
+    spec = apply_params(shared_spec)
+    full = C.compile_signals(spec, ohlcv_stocks)
+    close = ohlcv_stocks["close"]
+    pd.testing.assert_frame_equal(full["entry_priority"], close / close.shift(63) - 1)
+    for cut in CUTS:
+        part = C.compile_signals(spec, {field: frame.iloc[:cut] for field, frame in ohlcv_stocks.items()})
+        pd.testing.assert_frame_equal(full["entry_priority"].iloc[:cut], part["entry_priority"],
+                                      obj=f"entry_priority cut at {cut}")
+
+
 def test_weights_are_causal(momentum_spec, ohlcv_multi):
     pytest.importorskip("vectorbtx")
     spec = apply_params(momentum_spec)
