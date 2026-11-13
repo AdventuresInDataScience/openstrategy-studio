@@ -369,6 +369,97 @@ def check_holding_costs_in_totals():
                     f"and stats End Value = {end:,.2f}; total_return() = {total_return:.4%}, value() gives {from_value:.4%}"
 
 
+# ---------------------------------------------------------------------------
+# 16. Holding costs in a shared account, per instrument
+# ---------------------------------------------------------------------------
+
+EQUITY_2X = {"mode": "equity", "point_size": 1.0, "quote_currency": "GBP", "spread_points": 0.0, "leverage": 2.0}
+
+
+def check_shared_account_holding_costs():
+    failures = []
+    # Carry: A holds a EURUSD spread bet, B holds nothing. B used to pay A's carry.
+    o, h, l, c = frames([1.10] * 12, [1.1005] * 12, [1.0995] * 12, columns=("A", "B"))
+    rates = vbt.x.static_rate_table(["EUR", "USD"], c.index, {"EUR": 0.03, "USD": 0.045})
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={k: FX_SPREADBET for k in "AB"},
+                                 entries=mask(c.index, "AB", [("A", 0)]), exits=mask(c.index, "AB", []),
+                                 size=10_000, rates=rates, init_cash=10_000, cash="shared", freq="D")
+    carry = pd.DataFrame(pf.holding_costs).sum()
+    if carry["B"] != 0:
+        failures.append(f"carry: B holds nothing but paid {carry['B']:,.2f} (A paid {carry['A']:,.2f})")
+    # Share dealing: A and B buy 8,000 each against 10,000 at 2x, so the account owes 6,000.
+    o, h, l, c = frames([100.0] * 12, columns=("A", "B"))
+    size = pd.DataFrame({"A": 80.0, "B": 80.0}, index=c.index)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={k: EQUITY_2X for k in "AB"},
+                                 entries=mask(c.index, "AB", [("A", 0), ("B", 0)]), exits=mask(c.index, "AB", []),
+                                 size=size, init_cash=10_000, cash="shared", freq="D")
+    borrowed = pd.DataFrame(pf.x.borrowed_portion()).iloc[3].tolist()
+    if not np.allclose(borrowed, [3_000, 3_000]):
+        failures.append(f"share dealing: the account owes 6,000 but borrowed_portion() splits it as {borrowed}")
+    return bool(failures), "; ".join(failures) or "carry per instrument; a 6,000 debit split 3,000 / 3,000"
+
+
+# ---------------------------------------------------------------------------
+# 17. Borrowing without a margin loan; leverage on the replay path
+# ---------------------------------------------------------------------------
+
+def check_borrowing_without_a_loan():
+    failures = []
+    # A fully paid 60/40 share book (the weights path runs without a margin loan).
+    o, h, l, c = frames([100.0] * 12, columns=("A", "B"))
+    rates = vbt.x.static_rate_table(["GBP"], c.index, {"GBP": 0.05})
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={k: EQUITY_2X for k in "AB"},
+                                 weights=pd.DataFrame({"A": 0.6, "B": 0.4}, index=c.index), rates=rates,
+                                 init_cash=10_000, freq="D")
+    financing = float(pd.DataFrame(pf.holding_costs).to_numpy().sum())
+    if financing != 0:
+        failures.append(f"a fully paid 60/40 book paid {financing:,.2f} of margin financing")
+    # The replay path: 150 shares at 100 on 10,000 at 2x.
+    universe = vbt.load_universe({"X": vbt.Instrument(mode="equity", quote_currency="GBP", leverage=2.0)})
+    size = pd.DataFrame(np.nan, index=c.index, columns=["X"])
+    size.iloc[0] = 150.0
+    replay = vbt.Portfolio.from_holding_costs(pd.DataFrame({"X": c["A"]}), size, universe, rates=rates,
+                                              init_cash=10_000, freq="D")
+    held = float(pd.DataFrame(replay.assets()).iloc[-1, 0])
+    if abs(held - 150) > 1e-9:
+        failures.append(f"Portfolio.from_holding_costs funded no leverage: 150 shares ordered, {held:g} held")
+    return bool(failures), "; ".join(failures) or "a paid-for book borrows nothing; the replay funds 2x"
+
+
+# ---------------------------------------------------------------------------
+# 18. The borrow fee on a direct short (a feature, docs/dev/AUDIT-G.md G6 in vectorbtX)
+# ---------------------------------------------------------------------------
+
+def check_borrow_fee():
+    o, h, l, c = frames([100.0] * 12)
+    instrument = dict(EQUITY, quote_currency="USD", borrow_rate=0.036)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                 entries=mask(c.index, ["X"], []), exits=mask(c.index, ["X"], []),
+                                 short_entries=mask(c.index, ["X"], [("X", 0)]), short_exits=mask(c.index, ["X"], []),
+                                 size=100, init_cash=10_000, freq="D")
+    thursday = float(pd.DataFrame(pf.holding_costs).iloc[3, 0])
+    failures = [] if abs(thursday + 1.0) < 1e-9 else [f"a 10,000 short at 3.6% paid {thursday:.4f} on a Thursday, not -1.00"]
+    try:
+        vbt.Instrument(mode="cfd", contract_size=1.0, borrow_rate=0.01)
+        failures.append("a CFD accepts a borrow_rate, though its funding already covers the short")
+    except ValueError:
+        pass
+    return bool(failures), "; ".join(failures) or "a direct short pays borrow_rate daily; a CFD has none"
+
+
+# ---------------------------------------------------------------------------
+# 19. A per-instrument financing value was silently ignored
+# ---------------------------------------------------------------------------
+
+def check_financing_field_says_it_is_unused():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        vbt.Instrument(mode="cfd", contract_size=1.0, financing=0.10)
+    said = any("financing" in str(w.message) for w in caught)
+    return not said, "financing=0.10 warns that it is not used" if said else \
+        "financing=0.10 is accepted in silence and never read"
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -384,6 +475,10 @@ CHECKS = [
     (12, "pandas 4: DatetimeIndex.weekday", check_weekday_deprecation),
     (13, "Shared cash with an entry priority (required feature)", check_shared_cash_priority),
     (15, "Holding costs missing from total_profit, final_value, total_return and stats()", check_holding_costs_in_totals),
+    (16, "Shared account: carry on the whole account, share-dealing debit not split", check_shared_account_holding_costs),
+    (17, "Borrowing counted without a loan; the replay path funds no leverage", check_borrowing_without_a_loan),
+    (18, "The borrow fee on a direct short (feature)", check_borrow_fee),
+    (19, "A per-instrument financing value is ignored in silence", check_financing_field_says_it_is_unused),
 ]
 
 

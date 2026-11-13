@@ -79,6 +79,29 @@ def test_backtest_page_says_how_the_run_was_funded(tmp_path, monkeypatch):
         assert any(item.value == "**Each symbol**" for item in app.markdown)
 
 
+def test_the_backtest_page_shows_what_vectorbtx_flagged(tmp_path, monkeypatch):
+    """vectorbtX reports what it could not price (a short borrowed for free, a carry leg
+    with no currency) as Python warnings, which never reach a page on their own."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from conftest import make_ohlcv
+    from openstrategy_studio import analysis, engine
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = load_template("shared_account_ma_cross")
+    run = engine.run_backtest(spec, make_ohlcv(400, ("AAPL", "MSFT", "NVDA"), seed=3, base=100.0))
+    results = analysis.extract_results(run)
+    results["meta"]["warnings"] = ["Short positions in ['AAPL'] borrowed the securities for free."]
+    app = testing.AppTest.from_file(str(APP / "pages" / "3_Backtest.py"), default_timeout=180)
+    app.session_state["spec"] = spec
+    app.session_state["spec_rev"] = 0
+    app.session_state["last_run"] = {"results": results, "spec": run["spec"], "fingerprint": {},
+                                     "saved": None, "id": "test"}
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert any("borrowed the securities for free" in item.value for item in app.warning)
+
+
 def test_account_choices_write_the_spec(tmp_path, monkeypatch):
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")

@@ -19,6 +19,7 @@ findings (with what changed) are in docs/VERIFY.md. Anything still marked
 """
 
 import importlib.metadata
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -168,6 +169,10 @@ def instrument_fields(spec):
     for symbol in spec["data"]["symbols"]:
         fields = dict(instruments.get(symbol) or {})
         fields.pop("price_field", None)
+        # `financing` is reserved in vectorbtX (9fa427e): financing is the rate table plus
+        # the Settings page's markup for every instrument, and a per-instrument value was
+        # never read. The Build page no longer offers it; an older spec may still hold one.
+        fields.pop("financing", None)
         # Blank cells mean "use the mode default". vectorbtX keeps them as None
         # until emit, because NaN means something to vectorbt, so drop them here.
         out[symbol] = {key: value for key, value in fields.items() if value is not None and value != ""}
@@ -478,7 +483,8 @@ def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=Fa
 
     window=(start, end) compiles on the FULL history and slices afterwards, so
     indicators are warmed up and nothing looks ahead (walk-forward and train/test
-    splits rely on this). Returns {"pf", "spec", "data", "compiled", "plan"}.
+    splits rely on this). Returns {"pf", "spec", "data", "compiled", "plan",
+    "warnings"}: "warnings" is vectorbtX's notes about this run, in plain text.
     """
     from .compile import compile_signals, compile_weights   # compile imports this module
 
@@ -519,8 +525,21 @@ def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=Fa
     for keyword, (how, value) in plan["args"].items():
         kwargs[keyword] = runtime[value] if how == "var" else value
     front_door = getattr(vectorbtx().x, plan["front_door"])
-    pf = front_door(**kwargs)
-    return {"pf": pf, "spec": spec, "data": prepared, "compiled": compiled, "plan": plan}
+    # ⚠️ vectorbtX reports what it could not price as WARNINGS, not errors: a short held
+    # with no borrow_rate (borrowed for free), a carry leg with no currency, high/low that
+    # do not bracket the close. Python sends warnings to the console, which a Studio user
+    # never sees, so each run collects its own and returns them for the page to show.
+    # "always", because Python otherwise shows a warning once per process and a long-lived
+    # Streamlit server would swallow it on every run after the first.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", UserWarning)
+        pf = front_door(**kwargs)
+    notes = []
+    for warning in caught:
+        message = str(warning.message)
+        if issubclass(warning.category, UserWarning) and message not in notes:
+            notes.append(message)
+    return {"pf": pf, "spec": spec, "data": prepared, "compiled": compiled, "plan": plan, "warnings": notes}
 
 
 # ---------------------------------------------------------------------------

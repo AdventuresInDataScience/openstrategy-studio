@@ -5,7 +5,7 @@ This code was first written without vectorbt, vectorbtX, ta_patterns, BUTChC, Op
 | Package | Version |
 |---|---|
 | vectorbt | 1.1.0 |
-| vectorbtX | 0.1.0, commit `9f4cf54` (the commit `uv.lock` pins; phase 0 itself ran on `ace29e2`) |
+| vectorbtX | 0.1.0, commit `9fa427e` (the commit `uv.lock` pins; phase 0 itself ran on `ace29e2`) |
 | numba / numpy / pandas | 0.68.1 / 2.5.4 / 3.1.1 |
 | Streamlit / plotly | 1.67.0 / 6.9.0 |
 | ta_patterns / BUTChC / Optuna / marsopt | 1.2.1 / 0.6.1 / 5.0.0 / 0.2.0 |
@@ -16,6 +16,8 @@ Result: `uv run pytest -rs` passes with every extra installed (`uv sync --extra 
 **Re-run on vectorbtX `16293a2`** (12 November 2026), which fixes all 13 items in `docs/UPSTREAM.md`: `docs/upstream/vectorbtx_issues.py` reports 0 of 13 present. With the new library and the old workarounds still in place, 4 tests failed, each an expected consequence: the short double shift (issue 1, two tests, one of them the exit-rules gate's short case), the intrabar drawdown now agreeing with the Studio's (issue 11), and carry now including its markup (issue 4). With the workarounds removed (issues 1, 5, 6, 9 and 11), `uv run pytest -rs` gives 133 passed and 1 skipped, both phase 3 gates pass unchanged, and `selfcheck` passes. One new limitation came with the fix: see 2.10 and `docs/UPSTREAM.md` issue 14.
 
 **Re-run on vectorbtX `9f4cf54`** (12 November 2026), which fixes issue 14. On it, only the test pinning that gap failed, as intended. It is replaced by a positive test, and the exit-rules gate gained four entry-bar cases, which pass on `9f4cf54` and fail on `16293a2`. `uv run pytest -rs` gives 134 passed and 1 skipped, both phase 3 gates pass, and `selfcheck` passes.
+
+**Re-run on vectorbtX `9fa427e`** (13 November 2026), which fixes `docs/UPSTREAM.md` issues 15 to 17 and 19 and builds 18 (the borrow fee on a direct short): the script reports 0 of 18 present, and 15 to 19 present against `9f4cf54`. With the new library, only `test_golden_numbers_from_the_vectorbtx_example` failed, by design (issue 15 puts carry into End Value and Total Return); regenerated on the same prices (section 4), exactly those two numbers moved. Three Studio tests short a synthetic equity instrument with no `borrow_rate`, so vectorbtX now warns in them, as intended. With the Studio side of 18 and 19 done (the `borrow_rate` grid column, no financing column, vectorbtX's warnings on the Backtest page), `uv run pytest -rs` gives 151 passed and 1 skipped, both phase 3 gates pass, and `selfcheck` passes.
 
 The phase 0 gate is: **every item below has a passing test or a written answer.** Two items need things this machine does not have (a real MT4/MT5 export, and a clean machine for the installers); they are marked ⏳.
 
@@ -94,7 +96,7 @@ Each was marked `⚠️ VERIFY` in the code. The markers are gone where the answ
 
 **Saved on 13 November 2026** (vectorbtX `9f4cf54`). `tests/fixtures/golden/make_golden.py` runs the example file itself, unmodified, on real Yahoo data (1,564 EURUSD bars, 2019 to 2024), with the one change the example offers for running without a FRED key: its static rate table, EUR 4% and USD 5.3%. It saves the prices it downloaded (`eurusd_2019_2024_yahoo.csv`) and the 104 numbers in `pf.stats()`, `pf.trades.stats()` and `pf.returns_stats()` (`ma_cross_01.json`). `test_golden_numbers_from_the_vectorbtx_example` runs the Studio's MA-cross template on those prices with the same rates, offline, and agrees with every number to 1e-9. The example's flat `SingleBacktest` and the Studio's `PortfolioBacktest(instruments=...)` therefore give the same result on real data.
 
-⚠️ The saved `stats()` leave carry out of Total Return and End Value (−2.75%, with −30.73 of carry not counted; `docs/UPSTREAM.md` issue 15). When vectorbtX fixes that, the test fails by design: re-run the script and check that only the carry-dependent numbers moved.
+**Regenerated on 13 November 2026** (vectorbtX `9fa427e`, which fixes `docs/UPSTREAM.md` issue 15: `stats()` left carry out of Total Return and End Value). Run with `--offline`, which serves the saved prices to the example's own Yahoo download, so the bars are the same and Yahoo's revisions cannot move anything. As intended, exactly two of the 104 numbers moved, by exactly the summed carry: End Value 9,756.00 to 9,725.28, and Total Return [%] −2.44 to −2.75, which now equals `returns_stats()`'s.
 
 ## 5. Decisions taken where the plan left a choice
 

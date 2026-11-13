@@ -26,9 +26,11 @@ INSTRUMENT_FIELDS = {
     "mode": "text", "asset_class": "text", "point_size": "number", "contract_size": "number", "increment": "number",
     "min_size": "number", "allow_fractional": "flag", "quote_currency": "text", "base_currency": "text",
     "cost_currency": "text", "commission_pct": "number", "commission_flat": "number", "commission_per_unit": "number",
-    "commission_min": "number", "spread_points": "number", "slippage": "text", "financing": "text",
+    "commission_min": "number", "spread_points": "number", "slippage": "text", "borrow_rate": "number",
     "rounding": "text", "leverage": "number", "leverage_type": "text", "price_field": "text",
 }
+# No financing column: financing is the rate table plus the Settings page's markup, for every
+# instrument alike, and vectorbtX keeps its per-instrument field reserved (9fa427e).
 SIZING_LABELS = {"risk_pct": "Risk a share of starting cash per trade (0.01 = 1%)",
                  "risk_amount": "Risk a cash amount per trade", "stake": "Stake per point (spread bets)",
                  "notional": "Position value in cash", "size": "Units (shares, contracts, lots)"}
@@ -150,8 +152,14 @@ with form:
                       "allow_fractional": st.column_config.SelectboxColumn("allow_fractional", options=["", "true", "false"]),
                       "price_field": st.column_config.SelectboxColumn("price_field", options=["", "close", "adj_close"]),
                       "slippage": st.column_config.TextColumn("slippage", help="A number, or auto (needs volume)."),
-                      "financing": st.column_config.TextColumn("financing", help="A number, or auto.")}
-            st.caption("Blank cells use the mode's default. Costs come only from these fields.")
+                      "borrow_rate": st.column_config.NumberColumn(
+                          "borrow_rate", min_value=0.0, format="%.4f",
+                          help="Equity mode only. The yearly fee for borrowing what you short (0.005 = 0.5% a "
+                               "year), charged daily on the short's value. Blank: unknown, so a short is charged "
+                               "nothing and the run says so. 0: the borrow is free. CFDs and spread bets have no "
+                               "borrow fee; their funding covers the short.")}
+            st.caption("Blank cells use the mode's default. Costs come only from these fields. Financing on held "
+                       "positions comes from the account's rates and the markup on the Settings page.")
             edited = st.data_editor(grid, column_config=config, key=ui.key("instruments.grid"), width="stretch")
             updated = {}
             for symbol, values in edited.iterrows():
@@ -164,7 +172,7 @@ with form:
                         fields[field] = float(value)
                     elif kind_name == "flag":
                         fields[field] = value == "true"
-                    elif field in ("slippage", "financing") and value != "auto":
+                    elif field == "slippage" and value != "auto":
                         fields[field] = float(value)
                     else:
                         fields[field] = str(value)
@@ -190,6 +198,9 @@ with form:
                             not (fields.get("base_currency") and fields.get("quote_currency")):
                         st.warning(f"{symbol}: an FX instrument needs both base_currency and quote_currency "
                                    "(EUR and USD for EURUSD), or its carry cannot be priced.")
+                    if fields.get("borrow_rate") is not None and mode != "equity":
+                        st.warning(f"{symbol}: borrow_rate is used only in equity mode. A {mode} short borrows "
+                                   "nothing; its funding is its cost. Clear the cell.")
                     if mode == "spreadbet":
                         st.caption(f"{symbol}: spread bets force commission to zero; the cost is in spread_points, "
                                    "and the stake is the size, so there is no contract size.")

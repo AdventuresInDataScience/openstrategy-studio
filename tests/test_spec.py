@@ -82,6 +82,21 @@ def test_fx_instrument_needs_both_currencies(ma_spec):
     assert not any("currencies" in p for p in S.validate_spec(spec))
 
 
+def test_borrow_rate_is_for_equity_mode_and_never_negative(shared_spec, ma_spec):
+    """vectorbtX 9fa427e: the borrow fee follows how a thing is traded. A direct (equity)
+    short borrows what it sells; a spread bet or CFD short pays its funding instead."""
+    equity = copy.deepcopy(shared_spec)
+    symbol = equity["data"]["symbols"][0]
+    for rate in (0.0, 0.005):
+        equity["instruments"][symbol]["borrow_rate"] = rate
+        assert not any("borrow_rate" in p for p in S.validate_spec(equity)), rate
+    equity["instruments"][symbol]["borrow_rate"] = -0.01
+    assert any("0 or more" in p for p in S.validate_spec(equity))
+    spread_bet = copy.deepcopy(ma_spec)
+    spread_bet["instruments"]["EURUSD=X"]["borrow_rate"] = 0.005
+    assert any("only in equity mode" in p for p in S.validate_spec(spread_bet))
+
+
 def test_cash_model(shared_spec, ma_spec, momentum_spec):
     assert S.cash_model(shared_spec) == "shared"
     separate = copy.deepcopy(shared_spec)

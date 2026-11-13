@@ -529,3 +529,35 @@ def test_trailing_stop_follows_the_peak():
     when, price = exit_of(run["pf"])
     assert when > data["close"].index[5], "the trailing stop must not fire while price rises"
     assert price < 110 and price > 104, "it exits a few points below the peak"
+
+
+# ---------------------------------------------------------------------------
+# The borrow fee, the reserved financing field, and vectorbtX's warnings (9fa427e)
+# ---------------------------------------------------------------------------
+
+def test_a_direct_short_pays_its_borrow_rate_and_the_run_says_when_it_has_none():
+    """vectorbtX charges a borrow fee on a direct (equity) short at the instrument's
+    borrow_rate and only warns when none is set. Python sends warnings to the console, so
+    the Studio collects each run's and keeps them with its results for the page to show."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import analysis
+
+    data = bars(opens=[100.0] * 12, highs=[101.0] * 12, lows=[99.0] * 12, closes=[100.0] * 12)
+    risk = {"sizing": {"size": 100}, "stop": {"kind": "none"}}
+    spec = pulse_spec("short_entry", 0, "short_exit", 11, risk=risk)     # short from bar 1, held
+    run = engine.run_backtest(spec, data)
+    assert any("borrow_rate" in note for note in run["warnings"])
+    assert analysis.extract_results(run)["meta"]["warnings"] == run["warnings"]
+
+    spec["instruments"]["X"]["borrow_rate"] = 0.036
+    run = engine.run_backtest(spec, data)
+    assert not any("borrow_rate" in note for note in run["warnings"])
+    thursday = pd.DataFrame(run["pf"].holding_costs)["X"].iloc[3]
+    assert float(thursday) == pytest.approx(-100 * 100.0 * 0.036 / 360)  # 10,000 short, 3.6% a year
+
+
+def test_a_per_instrument_financing_value_is_not_passed_on():
+    """vectorbtX keeps the field reserved: financing is the rate table plus the markup."""
+    spec = pulse_spec("long_entry", 0, "long_exit", 5)
+    spec["instruments"]["X"]["financing"] = 0.10
+    assert "financing" not in engine.instrument_fields(spec)["X"]

@@ -90,6 +90,13 @@ if accounts.get("model") == "separate":
 elif accounts.get("model") == "shared" and results["meta"]["kind"] == "signals":
     st.caption(f"One account of {accounts['each']:,.0f}, shared by every symbol.")
 
+# What vectorbtX could not price, or priced on an assumption. Runs saved before the meta
+# recorded these say nothing.
+notes = results["meta"].get("warnings") or []
+if notes:
+    st.warning("vectorbtX flagged this run. Its numbers may leave something out:\n\n"
+               + "\n".join(f"- {note}" for note in notes))
+
 # --- stats ----------------------------------------------------------------------------
 tags = {"all": "All metrics", "mt5": "MT5 report", "vectorbtx": "vectorbtX extras"}
 tag = st.radio("Metrics", list(tags), format_func=tags.get, horizontal=True)

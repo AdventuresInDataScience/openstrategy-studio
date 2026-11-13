@@ -714,6 +714,17 @@ def _validate_resolved(spec):
                 # issue 3), so the run quietly shows no holding costs at all.
                 problems.append(f"'{symbol}' is an FX instrument, so name both of its currencies: base_currency and "
                                 "quote_currency (EUR and USD for EURUSD). Carry needs both.")
+            rate = (instruments.get(symbol) or {}).get("borrow_rate")
+            if rate is not None:
+                # The borrow fee follows how a thing is traded (vectorbtX 9fa427e): shorting
+                # what you trade directly borrows it; a CFD or spread bet short pays its
+                # funding instead. vectorbtX rejects the rest at construction; say it here.
+                if instruments[symbol].get("mode") != "equity":
+                    problems.append(f"'{symbol}' sets borrow_rate, which applies only in equity mode: a CFD or "
+                                    "spread bet short borrows nothing, and its funding is its cost. Clear borrow_rate.")
+                elif isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate < 0:
+                    problems.append(f"'{symbol}' borrow_rate must be a yearly rate of 0 or more "
+                                    "(0.005 is 0.5% a year).")
         for symbol in instruments:
             if symbol not in symbols:
                 problems.append(f"Instrument settings for '{symbol}', which is not in the symbol list.")

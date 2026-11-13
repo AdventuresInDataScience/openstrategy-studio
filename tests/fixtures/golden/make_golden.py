@@ -12,6 +12,14 @@ tests/test_engine.py::test_golden_numbers_from_the_vectorbtx_example checks the 
 MA-cross template against them offline (plan section 12, test 1; docs/VERIFY.md section 4).
 
 Re-run it only on purpose: the saved prices pin the comparison, and Yahoo revises history.
+
+After a vectorbtX bump that changes results, regenerate on the SAME prices, offline:
+
+    uv run python -I tests/fixtures/golden/make_golden.py ../vectorbtx --offline
+
+The example still runs unmodified; its Yahoo download is served the saved prices instead,
+so only the numbers the library change moves can move. Check that they are the ones the
+bump's changelog says they should be.
 """
 
 import importlib.metadata
@@ -22,6 +30,7 @@ import runpy
 import sys
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 # uv's CPython on Windows aborts the whole process when SSLKEYLOGFILE is set and an HTTPS
 # context is created (CLAUDE.md); the Yahoo download creates one.
@@ -53,15 +62,29 @@ def jsonable(value):
     return number if math.isfinite(number) else None
 
 
-def main(vectorbtx_dir):
+def saved_prices_download(symbol, start=None, end=None, **_ignored):
+    """Stands in for vbt.YFData.download: the saved bars, shaped as the example reads them.
+
+    The example calls data.get("Close") and so on, then strips the time zone Yahoo's index
+    carries, so the saved (naive) index is given back as UTC for it to strip.
+    """
+    prices = pd.read_csv(HERE / "eurusd_2019_2024_yahoo.csv", index_col="date", parse_dates=["date"])
+    prices.index = prices.index.tz_localize("UTC")
+    return SimpleNamespace(get=lambda field: prices[field.lower()].rename(field))
+
+
+def main(vectorbtx_dir, offline=False):
     example = Path(vectorbtx_dir) / "examples" / "strategies" / "01_ma_cross_spreadbet_fx.py"
     vbt.x.FREDData.download_rates = static_rates
+    if offline:
+        vbt.YFData.download = saved_prices_download
     namespace = runpy.run_path(str(example), run_name="golden")
     pf = namespace["pf"]
     prices = pd.DataFrame({"open": namespace["open_"], "high": namespace["high"], "low": namespace["low"],
                            "close": namespace["close"]})
     prices.index.name = "date"
-    prices.to_csv(HERE / "eurusd_2019_2024_yahoo.csv")
+    if not offline:
+        prices.to_csv(HERE / "eurusd_2019_2024_yahoo.csv")
     source = json.loads(importlib.metadata.distribution("vectorbtx").read_text("direct_url.json") or "{}")
     golden = {
         "made_on": date.today().isoformat(),
@@ -78,4 +101,5 @@ def main(vectorbtx_dir):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "../vectorbtx")
+    arguments = [argument for argument in sys.argv[1:] if argument != "--offline"]
+    main(arguments[0] if arguments else "../vectorbtx", offline="--offline" in sys.argv[1:])

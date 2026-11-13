@@ -1979,7 +1979,7 @@ wheels = [
 [[package]]
 name = "vectorbtx"
 version = "0.1.0"
-source = { git = "https://github.com/AdventuresInDataScience/vectorbtx#9f4cf54cd56812c5ecb994a4842f11118bc91221" }
+source = { git = "https://github.com/AdventuresInDataScience/vectorbtx#9fa427e4d81df9840f8cc1a34f5088d30bd11ba0" }
 dependencies = [
     { name = "numpy" },
     { name = "pandas" },

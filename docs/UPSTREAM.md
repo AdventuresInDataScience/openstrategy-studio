@@ -12,7 +12,7 @@ Run it in vectorbtX's own environment while patching, or copy the checks into ve
 
 ## Status (13 November 2026)
 
-**All 13 are fixed in vectorbtX `16293a2`, and issue 14, found with those fixes, in `9f4cf54`**, which `uv.lock` now pins, and vectorbtX carries the same checks in `tests/test_upstream_fixes.py`. **Issue 15 is open**: found on `9f4cf54` while building the per-symbol results for shared cash, so the script now reports 1 of 14 present (exit code 1). The Studio workarounds below are removed, except where an issue says it can stay:
+**All 13 are fixed in vectorbtX `16293a2`; issue 14, found with those fixes, in `9f4cf54`; and issues 15 to 19 in `9fa427e`**, which `uv.lock` now pins. 15 was found on `9f4cf54` while building the per-symbol results for shared cash, and 16 to 19 while fixing it (18 is a feature: the borrow fee, a documented gap in vectorbtX's own audit). The script reports 0 of 18 present (exit code 0); against `9f4cf54` it reports 15 to 19 present. vectorbtX carries the same checks in `tests/test_upstream_fixes.py`, `tests/test_borrow.py` and `tests/test_holding_sim.py`. The Studio workarounds below are removed, except where an issue says it can stay:
 
 | Issue | Studio side now |
 |---|---|
@@ -28,14 +28,18 @@ Run it in vectorbtX's own environment while patching, or copy the checks into ve
 | 12 | Nothing to remove. |
 | 13 | Built (13 November 2026); see "Studio side" under issue 13. |
 | 14 | Fixed in `9f4cf54`; nothing to remove. The pinning test became `test_extra_exits_check_the_entry_bar_without_a_warning`, and the exit-rules gate gained entry-bar cases. |
-| 15 | **Open.** No workaround, by design: the tear sheet shows the library's own numbers. `test_golden_numbers_from_the_vectorbtx_example` will fail when it is fixed; re-run `tests/fixtures/golden/make_golden.py`. |
+| 15 | Fixed in `9fa427e`; there was no workaround to remove. The golden numbers were regenerated on the same prices (`make_golden.py --offline`): End Value and Total Return [%] moved by exactly the summed carry (−30.73), and nothing else did. |
+| 16 | Fixed in `9fa427e`; nothing to remove. Shared-account runs with rates now charge each symbol its own carry, and a shared share-dealing account is financed on its debit, split by long value. |
+| 17 | Fixed in `9fa427e`; nothing to remove. A portfolio (weights) of shares with rates no longer pays financing on a book it paid for. |
+| 18 | Built (13 November 2026): `borrow_rate` in the Build page's instrument grid (equity mode only; `validate_spec` says so elsewhere), and vectorbtX's warnings now reach the Backtest page (`run_backtest` collects them; `extract_results` keeps them in the run's meta). |
+| 19 | Done: the grid's financing column is gone, and `engine.instrument_fields` drops a per-instrument `financing` value an older spec may hold. |
 
 ## Where each phase 0 finding belongs
 
 | Belongs in | Findings |
 |---|---|
-| **vectorbtX: bugs** | 1 to 12 below. Ten give wrong numbers without an error, one crashes, and one is housekeeping. Later: 14 (fixed) and 15 (open, wrong numbers). |
-| **vectorbtX: required feature** | 13, shared cash with an entry priority. Portfolios need it, and the Studio builds its account options on it. Check 13 in the script is its acceptance test. |
+| **vectorbtX: bugs** | 1 to 12 below. Ten give wrong numbers without an error, one crashes, and one is housekeeping. Later, all fixed: 14, 15, 16 and 17 (wrong numbers), and 19 (a setting accepted in silence and never read). |
+| **vectorbtX: required feature** | 13, shared cash with an entry priority. Portfolios need it, and the Studio builds its account options on it. Check 13 in the script is its acceptance test. Later: 18, the borrow fee on a direct short (check 18). |
 | **ta_patterns** | `chart_patterns.BULLISH` and `CHART_PATTERNS` list `double_bottom_ugly`, but the function is `ugly_double_bottom`. |
 | **Environment** (not a library) | On Windows, uv's standalone CPython aborts when `SSLKEYLOGFILE` is set and an HTTPS context is created. vectorbtX's `FREDData` would hit it too. |
 | **The Studio** (fixed there; no action for you) | A label lookup in `pf.stats(tags="vectorbtx")` for returns metrics, which vectorbtX's docs correctly place in `returns_stats`. Reading `returns_stats(tags="mt5")` returning `None`. Choosing a no-signal front-door call as the benchmark (the 30x funding behind it is issue 7). A Windows file race in job folders, a text-encoding slip, the desktop health check, and two test-harness bugs. Still to add: the instrument grid should require both currencies for an FX instrument. |
@@ -206,9 +210,43 @@ The original report:
 * **Fix, a suggestion.** Let a callback opt in to split bars, for example `split_bars=True` on the front door (or a marker attribute on the function), documented as: on the split index `c.i` and `c.init_i` are steps, the bar is `c.i // 2`, even steps are the open (O = H = L = C = open) and odd steps the rest of the bar; per-bar arrays in the callback's arguments stay per bar. The Studio's templates would then index by `c.i // 2` and count bars as `c.i // 2 - c.init_i // 2`, and the time stop would fire on the open step. The phase 3 gate (`tests/test_exit_rules.py::test_gate_matches_the_reference_simulator`) would need its reference simulator to check the entry bar too.
 * **Studio side, until then.** `test_exit_rules.py::test_extra_exits_say_the_entry_bar_is_not_checked` pins the warning, so the gap stays visible; delete it when this is fixed.
 
-### 15. Holding costs reach `value()` but not `total_profit()`, `final_value()`, `total_return()` or `stats()` (open)
+### 15. Holding costs reach `value()` but not `total_profit()`, `final_value()`, `total_return()` or `stats()` (fixed in `9fa427e`)
+
+* **What was done.** As suggested: vectorbtX's `Portfolio.total_profit` adds each column's summed holding costs on the ungrouped branch (upstream's grouped branch re-enters it and sums per group), so `final_value()` equals `value()[-1]` and stats' End Value and Total Return follow. It is not `@cached_method`: that decorator keys its cache on the method name, so an override and the cached parent it calls would share one slot and recurse. Trade P&L stays before holding costs, by design and now documented: `trades.pnl` and the MT5 trade metrics built from it (Total Net Profit, Recovery Factor, the balance drawdowns) leave carry out, because a charge accrues per bar and has no trade to belong to; `pf.holding_costs` holds the difference.
+* **Studio side, done.** The golden numbers were regenerated with `make_golden.py --offline`, which replays the saved prices through the example's own download call: only End Value (9,756.00 to 9,725.28) and Total Return [%] (−2.44 to −2.75) moved, by exactly the summed carry.
+
+The original report:
 
 * **Where.** vectorbtX `9f4cf54`, `core/portfolio.py`: `Portfolio.cash_flow` folds `_holding_costs` in (its docstring says this "is what makes holding costs visible at all"), but vectorbt's `total_profit` is computed from the order records (`total_profit_nb` over close and orders), not from `cash_flow`. `final_value` (`init_cash + total_profit`) and `total_return` (`total_profit / init_cash`) inherit it, and so do the `End Value` and `Total Return [%]` rows of `pf.stats()`.
 * **What happens.** A long EURUSD spread bet in a flat market, carry only (check 15 in the script): carry charged −11.46, `pf.value()[-1]` = 9,988.54, but `final_value()` and stats' End Value = 10,000.00 and `total_return()` = 0.00% (`value()` gives −0.11%). On the Studio's MA-cross template on 400 synthetic bars: `returns_stats()` Total Return −1.24% with carry, `stats()` Total Return −0.98% whether rates are given or not. So within one tear sheet the equity curve, Sharpe, drawdown and `returns_stats` include carry, while End Value and Total Return leave it out; the optimiser's `total_return` metric leaves it out too. Every strategy with `rates=` is affected, and leveraged FX carry is where it matters most.
 * **Fix, a suggestion.** Override `total_profit` on vectorbtX's `Portfolio` to add the summed `_holding_costs` (per column ungrouped, summed per group when grouped), as `cash_flow` does, so `final_value`, `total_return` and the stats rows follow. Check `trades.pnl` is meant to stay gross (per-trade P&L before swaps is the MT5 convention, with swaps reported separately), and say so in the docs either way.
 * **Studio side.** No workaround. The per-symbol table shows `Holding costs` beside `Trade P&L`, so the carry is visible. When it is fixed, `test_golden_numbers_from_the_vectorbtx_example` fails by design: re-run `tests/fixtures/golden/make_golden.py` and check that only the carry-dependent numbers moved.
+
+### 16. Holding costs in a shared account are charged on the wrong amounts (fixed in `9fa427e`)
+
+Found while fixing 15. Two faults, in opposite directions, both only with `cash="shared"` and `rates=`.
+
+* **Carry and full-notional financing were over-charged.** `apply_holding_costs` read position values from `pf.asset_value()`, which a shared account reports once for the whole account, and `build_charges` gave that one series to every instrument in it. Each paid on the whole account's positions: an account of N instruments paid up to N times its carry, and an instrument holding nothing paid as much as the others (check 16: A holds a EURUSD spread bet, B holds nothing, and B paid A's 11.46). Now each instrument is charged on its own position, so a shared account pays what separate accounts placing the same orders pay; `build_charges` raises when an input has no column for an instrument instead of sharing out an account's series.
+* **Margin share-dealing financing was under-charged.** Financing on the borrowed basis (`mode="equity"`) read each instrument's borrowing as if it had the account's whole equity to itself, so A and B buying 8,000 each against 10,000 at 2x owed 6,000 and paid nothing. **The owner's decision** on how to share an account's debit between its instruments: in proportion to their long market value (shorts take none, since a short sale adds cash); equally if the account owes money while holding no longs; each share charged at that instrument's own currency's rate. `borrowed_portion(group_by=True)` on separate accounts now sums their borrowing instead of netting their cash.
+* **Studio side.** Nothing to remove. The shipped shared template (shares at 1x, no rates) was not affected; FX or levered share strategies on shared cash with rates were.
+
+### 17. Borrowing counted without a loan, and the replay path funds no leverage (fixed in `9fa427e`)
+
+Found while fixing 16.
+
+* **Borrowing without a margin loan.** A portfolio with no margin loan fell back to `|asset value| − free cash`, measured after the purchase, which counts money already spent as borrowed: 8,000 bought from 10,000 showed 6,000 borrowed. The front door's rebalancing (`weights=`) path runs without a loan, so **every fully invested share portfolio with `rates=` paid margin financing on its whole book** (check 17: 35.07 on a fully paid 60/40 book in 12 bars). Borrowing is now each account's overdraft, `max(0, −cash)`, everywhere, so a paid-for position and a short sale borrow nothing; interest on an overdraft is always a charge.
+* **The replay path, `Portfolio.from_holding_costs`,** took `init_cash` as the engine's cash, so a margin account could never borrow: a 2x position sized beyond equity was part-filled at 1x. It now funds leverage as the front door does (`init_cash` is equity; the engine gets equity × leverage; the loan is recorded). Without `rates=` it no longer charges financing or carry at the markup alone.
+* **Studio side.** Nothing to remove; the Studio uses only the front door. The shipped portfolio templates set no rates, so were not affected.
+
+### 18. The borrow fee on a direct short (a feature; built in `9fa427e`)
+
+vectorbtX's own audit (`docs/dev/AUDIT-G.md`, G6) had left the short borrow charge out as "document, do not build", since its rate is not published.
+
+* **What was built.** **The owner's rule: the fee follows how the instrument is traded, not what it is.** Shorting something traded directly (`mode="equity"`: a share, ETF, fund or commodity product) means borrowing it, and the lender charges for that. A CFD or spread bet borrows nothing: its short side already pays funding at benchmark − markup, so it has no borrow fee (and an index, which can only be traded that way, never has one). Set `borrow_rate` on an equity instrument (an annual fraction, `0.005` is 0.5% a year) and a short pays it daily on its market value, accrued like financing. It needs no `rates=`. There is no default rate: a direct short held with none set is charged nothing and **warns**; `borrow_rate=0.0` states that the borrow is free. `validate_spec` rejects `borrow_rate` outside equity.
+* **Studio side, done.** The Build page's instrument grid has a `borrow_rate` column (help text says equity only, blank warns, 0 is free) and warns beside a non-equity instrument that sets one; `spec.validate_spec` reports it before a run. Because vectorbtX reports what it could not price as Python warnings, which never reach a Streamlit page, `engine.run_backtest` now collects each run's warnings (`"warnings"` in its result), `analysis.extract_results` keeps them in the run's meta (saved runs keep them), and the Backtest page shows them in a warning box. `test_a_direct_short_pays_its_borrow_rate_and_the_run_says_when_it_has_none` pins both.
+
+### 19. A per-instrument `financing` value was accepted and never read (fixed in `9fa427e`)
+
+* **What happened.** `Instrument.financing` was documented as an annual rate or `"auto"`, and the Build page offered it as a grid column ("A number, or auto."), but nothing in vectorbtX read it. Financing was always the benchmark from `rates=` plus `financing_markup=`: with `financing=0.10`, a 10,000 CFD long paid 2.22 a day (5% + 3%) with rates and nothing without, never the 2.78 that 10% is.
+* **What was done (the owner's call).** Financing stays one rule for every instrument, which is how retail brokers charge it. The field is kept, reserved for a possible future per-instrument cost structure (the kind professional desks negotiate), resolves to `"auto"`, and a number in it warns that it is not used.
+* **Studio side, done.** The grid's financing column is removed; `engine.instrument_fields` drops a value an older spec may hold, so it is never passed on.

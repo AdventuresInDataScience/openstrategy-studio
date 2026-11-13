@@ -213,7 +213,9 @@ def extract_results(run, benchmark=False):
         "stats": stats_tables(pf),
         "meta": {"name": spec["name"], "kind": run["plan"]["kind"], "freq": spec["account"]["freq"],
                  "symbols": list(spec["data"]["symbols"]), "init_cash": init_cash, "accounts": accounts,
-                 "front_door": run["plan"]["front_door"], "has_benchmark": bool(benchmark)},
+                 "front_door": run["plan"]["front_door"], "has_benchmark": bool(benchmark),
+                 # vectorbtX's notes about this run (engine.run_backtest), kept with it.
+                 "warnings": list(run.get("warnings") or [])},
     }
     if len(symbols) > 1:
         results["per_symbol"] = per_symbol_table(pf, accounts)

@@ -5,15 +5,15 @@
     "EUR": 0.04,
     "USD": 0.053
   },
-  "vectorbtx": "9f4cf54cd56812c5ecb994a4842f11118bc91221",
+  "vectorbtx": "9fa427e4d81df9840f8cc1a34f5088d30bd11ba0",
   "vectorbt": "1.1.0",
   "stats": {
     "Start": "2019-01-01 00:00:00",
     "End": "2024-12-30 00:00:00",
     "Period": "1564 days 00:00:00",
     "Start Value": 10000.0,
-    "End Value": 9756.003667775534,
-    "Total Return [%]": -2.4399633222446573,
+    "End Value": 9725.27849336135,
+    "Total Return [%]": -2.7472150663865014,
     "Benchmark Return [%]": -9.255030634013261,
     "Max Gross Exposure [%]": 200.43132253782892,
     "Total Fees Paid": 0.0,
