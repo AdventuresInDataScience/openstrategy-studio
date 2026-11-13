@@ -819,26 +819,20 @@ def _dot(text):
     return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
-def _rule_references(node, found):
-    """Every feature, price, pattern and filter a rule tree reads."""
-    if not isinstance(node, dict):
-        return found
-    for key in ("all", "any"):
-        for child in node.get(key, []):
-            _rule_references(child, found)
-    if "not" in node:
-        _rule_references(node["not"], found)
-    if "pattern" in node:
-        found.add(("pattern", f"{node['pattern']} ({node.get('side', 'either')})"))
-    if "filter" in node:
-        found.add(("filter", node["filter"].replace("_", " ")))
-    for side in ("left", "right", "lower", "upper"):
-        ref = node.get(side)
-        if isinstance(ref, dict):
-            if "feature" in ref:
-                found.add(("feature", ref["feature"]))
-            elif "price" in ref:
-                found.add(("price", ref["price"]))
+def _rule_references(rule, found):
+    """Every feature, price and filter a rule's conditions read (a pattern is a feature)."""
+    for condition in (rule.get("conditions") or {}).values():
+        if "pattern" in condition:
+            found.add(("feature", condition["pattern"]))
+        if "filter" in condition:
+            found.add(("filter", condition["filter"].replace("_", " ")))
+        for side in ("left", "right", "lower", "upper"):
+            ref = condition.get(side)
+            if isinstance(ref, dict):
+                if "feature" in ref:
+                    found.add(("feature", ref["feature"]))
+                elif "price" in ref:
+                    found.add(("price", ref["price"]))
     return found
 
 
@@ -853,9 +847,9 @@ def pipeline_dot(spec, palette=None):
 
     Alternatives (structure search) are drawn as they are currently chosen.
     """
-    from .blocks import BLOCKS
     from .engine import call_plan
-    from .spec import apply_params, collect_choices, strategy_kind
+    from .indicators import catalogue, describe
+    from .spec import apply_params, collect_choices, ref_feature, strategy_kind
 
     colours = palette or PIPELINE_PALETTE
     choices = collect_choices(spec)
@@ -869,15 +863,11 @@ def pipeline_dot(spec, palette=None):
     lines.append(f"  data [label={_dot('Data' + chr(10) + ', '.join(data['symbols']) + chr(10) + data['timeframe'] + ' bars')}, "
                  "shape=cylinder];")
     for name, feature in (resolved.get("features") or {}).items():
-        block = BLOCKS[feature["block"]]
-        settings = ", ".join(f"{key}={value}" for key, value in feature.items()
-                             if key not in ("block", "source", "code", "params"))
-        if feature["block"] == "pattern":
-            settings = f"{feature.get('name')} ({feature.get('module', 'candle')})"
-        lines.append(f"  feature_{name} [label={_dot(name + chr(10) + block['label'] + (chr(10) + settings if settings else ''))}];")
-        source = feature.get("source")
-        upstream = f"feature_{source['feature']}" if isinstance(source, dict) else "data"
-        lines.append(f"  {upstream} -> feature_{name};")
+        item = catalogue()[feature["indicator"]]
+        lines.append(f"  feature_{name} [label={_dot(name + chr(10) + item['label'] + chr(10) + describe(feature))}];")
+        upstream = sorted({ref_feature(ref) for ref in (feature.get("inputs") or {}).values() if ref_feature(ref)})
+        for source in upstream or ["data"]:
+            lines.append(f"  {'feature_' + source if source != 'data' else 'data'} -> feature_{name};")
     plan = call_plan(resolved)
     door_label = "vbt.x." + plan["front_door"] + chr(10) + "fills at the next open"
     if "cash" in plan["args"]:
@@ -897,8 +887,9 @@ def pipeline_dot(spec, palette=None):
             rule = resolved["rules"].get(slot)
             if not rule:
                 continue
-            searched = " (alternatives searched)" if f"rules.{slot}" in choices else ""
-            lines.append(f"  rule_{slot} [label={_dot(label + searched)}, fillcolor=\"{colours['rule']}\"];")
+            searched = " (versions searched)" if f"rules.{slot}" in choices else ""
+            logic = chr(10) + rule["logic"] if len(rule.get("conditions") or {}) > 1 else ""
+            lines.append(f"  rule_{slot} [label={_dot(label + searched + logic)}, fillcolor=\"{colours['rule']}\"];")
             for kind_name, name in sorted(_rule_references(rule, set())):
                 if kind_name == "feature":
                     lines.append(f"  feature_{name} -> rule_{slot};")

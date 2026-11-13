@@ -1,6 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "EURUSD hammer reversal",
+  "setup": {
+    "kind": "signals",
+    "trading": "spreadbet"
+  },
   "data": {
     "symbols": [
       "EURUSD=X"
@@ -11,7 +15,6 @@
   },
   "instruments": {
     "EURUSD=X": {
-      "mode": "spreadbet",
       "asset_class": "fx",
       "point_size": 0.0001,
       "base_currency": "EUR",
@@ -26,53 +29,55 @@
   },
   "features": {
     "rsi": {
-      "block": "rsi",
-      "source": "close",
-      "window": 14,
-      "ewm": false
+      "indicator": "talib:RSI",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 14
+      }
+    },
+    "hammer": {
+      "indicator": "pattern:candle:hammer",
+      "inputs": {},
+      "params": {
+        "shadow_factor": 2.0,
+        "require_trend": true
+      }
     }
   },
   "rules": {
     "long_entry": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "pattern": "hammer",
-          "module": "candle",
-          "side": "bullish",
-          "params": {
-            "shadow_factor": {
-              "value": 2.0,
-              "opt": {
-                "min": 1.2,
-                "max": 3.0
-              }
-            },
-            "require_trend": true
-          }
+          "side": "bullish"
         },
-        {
+        "B": {
           "left": {
             "feature": "rsi"
           },
           "op": "<",
           "right": {
-            "const": 40
+            "const": 40.0
           }
         }
-      ]
+      },
+      "logic": "A and B"
     },
     "long_exit": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "feature": "rsi"
           },
           "op": "crosses_above",
           "right": {
-            "const": 60
+            "const": 60.0
           }
         }
-      ]
+      },
+      "logic": "A"
     },
     "short_entry": null,
     "short_exit": null
@@ -93,5 +98,14 @@
     "init_cash": 10000,
     "freq": "D"
   },
-  "engine_extra": {}
+  "engine_extra": {},
+  "optimise": {
+    "variables": {
+      "features.hammer.params.shadow_factor": {
+        "start": 1.2,
+        "stop": 3.0,
+        "step": 0.2
+      }
+    }
+  }
 }

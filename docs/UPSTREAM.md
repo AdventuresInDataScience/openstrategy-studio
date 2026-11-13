@@ -250,3 +250,22 @@ vectorbtX's own audit (`docs/dev/AUDIT-G.md`, G6) had left the short borrow char
 * **What happened.** `Instrument.financing` was documented as an annual rate or `"auto"`, and the Build page offered it as a grid column ("A number, or auto."), but nothing in vectorbtX read it. Financing was always the benchmark from `rates=` plus `financing_markup=`: with `financing=0.10`, a 10,000 CFD long paid 2.22 a day (5% + 3%) with rates and nothing without, never the 2.78 that 10% is.
 * **What was done (the owner's call).** Financing stays one rule for every instrument, which is how retail brokers charge it. The field is kept, reserved for a possible future per-instrument cost structure (the kind professional desks negotiate), resolves to `"auto"`, and a number in it warns that it is not used.
 * **Studio side, done.** The grid's financing column is removed; `engine.instrument_fields` drops a value an older spec may hold, so it is never passed on.
+
+### 20. Orders that fill at the close, or expire (a feature request; not built)
+
+Found while adding "good till the end of the day" to the Studio's Risk step (13 November 2026).
+
+* **What is missing.** Every signal fills at the next bar's open. vectorbt 1.1.0's `from_signals` has no limit or stop entry orders and no time in force, and the front door offers neither. So two common intraday rules cannot be modelled exactly: a market-on-close exit (flat at the session's close), and an entry order that lapses at the end of its day.
+* **What the Studio does meanwhile (honest approximations, labelled as such on the Risk step).** "Entries are good for the day only" drops an entry whose fill bar falls on the next day (UTC date). "Close before the end of the day" fires an exit on the bar before each day's last bar, so it fills at the last bar's open, not at the close; entries that would fill on that last bar are dropped. Both are signal masks in `compile_signals`, on the signal bar, so nothing is shifted.
+* **Suggested API.** `exit_at="close"` on an exit signal array (fill at that bar's close, paying the spread), and `entry_expiry="day"` with a session-end time (`end_of_day`, already a vectorbtX setting) for pending entries. The Studio would then replace both masks with the real orders.
+
+# ta_patterns issues found by OpenStrategy Studio
+
+Found by the lookahead audit in `tests/test_indicators.py::test_no_entry_looks_ahead`, which computes every catalogue entry on full data and on truncated copies and requires the shared bars to agree. ta_patterns 1.2.1; the local checkout (`../ta_patterns`, `ce791c6`) is identical.
+
+### P1. The flag and pennant detectors read the last close on their first bar
+
+* **Where.** `chart_patterns/classic.py:872`, `_flagpole(c, i, min_move, pole_bars)`, called with `i - window` by `flag_bull` (909), `flag_bear` (952), `pennant_bull` (1030) and `pennant_bear` (1066).
+* **What happens.** The guard is `if i < pole_bars: return -1, 0`, then `pole_end = i - 1` and `pole_start = pole_end - pole_bars`. When `i == pole_bars` (the first bar each detector evaluates, `pole_bars + window`), `pole_start` is `-1`, and `c[-1]` is **the last close in the whole array**. So that bar's signal depends on the final bar of the history: lookahead. Evidence: `flag_bear` on a 400-bar random walk gives a different signal at bar 40 when computed on the first 150 bars than on all 400.
+* **Suggested fix.** `if i <= pole_bars: return -1, 0` (or `if i - 1 - pole_bars < 0`), plus a truncation test over every detector like the Studio's.
+* **Studio side.** The four detectors are left out of the catalogue (`indicators.EXCLUDED`, with this reason) until ta_patterns is fixed. Then: delete the four lines from `EXCLUDED`, rerun `python -m openstrategy_studio.indicators`, and check the audit passes.

@@ -68,5 +68,5 @@ def momentum_spec():
     spec["data"]["symbols"] = ["AAA", "BBB", "CCC", "DDD"]
     instrument = next(iter(spec["instruments"].values()))
     spec["instruments"] = {symbol: dict(instrument) for symbol in spec["data"]["symbols"]}
-    spec["selection"]["top_n"]["value"] = 2
+    spec["selection"]["top_n"] = 2
     return spec

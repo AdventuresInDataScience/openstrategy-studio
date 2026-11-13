@@ -1,20 +1,21 @@
 """Pattern research and the pipeline diagram (phase 3)."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from openstrategy_studio import blocks, research
-from openstrategy_studio.spec import list_templates, load_template
+from openstrategy_studio import indicators, research
+from openstrategy_studio.spec import list_templates, load_template, validate_spec
 
 
 @pytest.fixture
 def every_tenth_bar(monkeypatch):
     """A stand-in detector: bullish on bars 10, 20, 30 ... (completed bars only)."""
-    def detector(o, h, l, c, **keywords):
+    def detector(module, name, params, o, h, l, c, v):
         out = np.zeros(len(c), dtype="int8")
         out[10::10] = 1
-        return out
-    monkeypatch.setattr(blocks, "pattern_function", lambda module, name: detector)
+        return pd.DataFrame({column: out for column in c.columns}, index=c.index)
+    monkeypatch.setattr(indicators, "run_pattern", detector)
 
 
 def test_forward_returns_start_at_the_next_open(ohlcv):
@@ -39,8 +40,10 @@ def test_study_measures_signed_returns(ohlcv, every_tenth_bar):
 
 
 def test_bearish_signals_are_judged_as_shorts(ohlcv, monkeypatch):
-    monkeypatch.setattr(blocks, "pattern_function",
-                        lambda module, name: (lambda o, h, l, c, **k: np.where(np.arange(len(c)) % 10 == 5, -1, 0).astype("int8")))
+    def detector(module, name, params, o, h, l, c, v):
+        values = np.where(np.arange(len(c)) % 10 == 5, -1, 0).astype("int8")
+        return pd.DataFrame({column: values for column in c.columns}, index=c.index)
+    monkeypatch.setattr(indicators, "run_pattern", detector)
     table = research.study(ohlcv, [{"module": "candle", "name": "bear", "params": {}}], horizons=(3,), min_hits=5)
     forward = research.forward_returns(ohlcv, 3)["EURUSD=X"]
     hits = [t for t in range(5, len(forward), 10)]
@@ -56,10 +59,13 @@ def test_event_path(ohlcv, every_tenth_bar):
 
 def test_add_pattern_to_rule(ma_spec):
     research.add_pattern_to_rule(ma_spec, "long_entry", "candle", "hammer", "bullish")
-    assert ma_spec["rules"]["long_entry"]["all"][-1]["pattern"] == "hammer"
+    assert ma_spec["features"]["hammer"]["indicator"] == "pattern:candle:hammer"
+    assert ma_spec["rules"]["long_entry"]["conditions"]["B"] == {"pattern": "hammer", "side": "bullish"}
+    assert ma_spec["rules"]["long_entry"]["logic"] == "A and B"
     research.add_pattern_to_rule(ma_spec, "short_entry", "chart", "double_top", "bearish")
-    assert ma_spec["rules"]["short_entry"] == {"all": [{"pattern": "double_top", "module": "chart", "side": "bearish",
-                                                        "params": {}}]}
+    assert ma_spec["rules"]["short_entry"] == {"conditions": {"A": {"pattern": "double_top", "side": "bearish"}},
+                                               "logic": "A"}
+    assert validate_spec(ma_spec) == []
 
 
 def test_slow_patterns():
@@ -78,6 +84,12 @@ def test_pipeline_diagram_for_every_template():
     assert "feature_fast -> rule_long_entry;" in dot and "rule_long_entry -> door;" in dot
     dot = analysis.pipeline_dot(load_template("momentum_top_n"))
     assert "feature_mom -> selection;" in dot and "schedule -> door;" in dot
-    assert "alternatives searched" in analysis.pipeline_dot(load_template("structure_search"))
+    assert "versions searched" in analysis.pipeline_dot(load_template("structure_search"))
     dot = analysis.pipeline_dot(load_template("shared_account_ma_cross"))
     assert "one shared account" in dot and "feature_strength -> door" in dot
+
+
+def test_every_pattern_row_comes_from_the_catalogue():
+    rows = research.pattern_rows()
+    assert len(rows) == sum(1 for item in indicators.catalogue().values() if item["source"] == "pattern")
+    assert {"module", "name", "direction", "family"} <= set(rows[0])

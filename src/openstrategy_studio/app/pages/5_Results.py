@@ -8,9 +8,10 @@ import pandas as pd
 import streamlit as st
 
 from openstrategy_studio import analysis, engine, jobs, optimise, store, ui
-from openstrategy_studio.spec import get_path, is_opt, set_path, spec_hash
+from openstrategy_studio.spec import set_path, spec_hash
 
 settings, data_dir = ui.boot("Results")
+ui.page_help("results")
 ui.font_css()
 st.title("Results")
 theme, glow = ui.theme_picker(settings, "results")
@@ -86,13 +87,10 @@ with optimisation_tab:
             if left.button("Apply to the strategy",
                            help="Writes these values into the job's strategy, keeping the optimisation ranges, "
                                 "and opens it on the Build page."):
+                # The values go where the variables point; the variables (and their ranges) stay.
                 updated = copy.deepcopy(job["spec"])
                 for path, value in params.items():
-                    node = get_path(updated, path)
-                    if is_opt(node):
-                        node["value"] = value
-                    else:
-                        set_path(updated, path, value)
+                    set_path(updated, path, value)
                 if spec_hash(ui.current()) != spec_hash(job["spec"]):
                     st.info("The strategy open now differs from the one this job optimised; the job's version was used.")
                 ui.replace_spec(updated)

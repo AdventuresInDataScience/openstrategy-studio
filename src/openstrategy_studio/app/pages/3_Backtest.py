@@ -9,6 +9,7 @@ from openstrategy_studio.analysis import FIGURES
 from openstrategy_studio.spec import validate_spec
 
 settings, data_dir = ui.boot("Backtest")
+ui.page_help("backtest")
 ui.font_css()
 spec = ui.current()
 st.title("Backtest")
@@ -22,7 +23,7 @@ if missing:
 ui.show_problems(problems)
 trusted = True
 if ui.has_python_block(spec) and st.session_state.get("untrusted_python"):
-    trusted = st.checkbox("This strategy came from a file and contains Python blocks. I have read them on the "
+    trusted = st.checkbox("This strategy came from a file and contains Python code. I have read it on the "
                           "Build page and trust them to run on this machine.")
 
 row = st.columns([1, 2, 2])

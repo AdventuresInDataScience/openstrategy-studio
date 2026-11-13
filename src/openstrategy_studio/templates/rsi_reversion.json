@@ -1,6 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "SPY RSI reversion",
+  "setup": {
+    "kind": "signals",
+    "trading": "equity"
+  },
   "data": {
     "symbols": [
       "SPY"
@@ -11,7 +15,6 @@
   },
   "instruments": {
     "SPY": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
@@ -20,43 +23,37 @@
   },
   "features": {
     "rsi": {
-      "block": "rsi",
-      "source": "close",
-      "window": {
-        "value": 14,
-        "opt": {
-          "min": 5,
-          "max": 30,
-          "int": true
-        }
+      "indicator": "talib:RSI",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 14
       }
     },
     "trend": {
-      "block": "ma",
-      "source": "close",
-      "window": 200,
-      "ewm": false
+      "indicator": "talib:SMA",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 200
+      }
     }
   },
   "rules": {
     "long_entry": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "feature": "rsi"
           },
           "op": "crosses_above",
           "right": {
-            "const": {
-              "value": 30,
-              "opt": {
-                "min": 15,
-                "max": 40
-              }
-            }
+            "const": 30.0
           }
         },
-        {
+        "B": {
           "left": {
             "price": "close"
           },
@@ -65,26 +62,22 @@
             "feature": "trend"
           }
         }
-      ]
+      },
+      "logic": "A and B"
     },
     "long_exit": {
-      "any": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "feature": "rsi"
           },
           "op": "crosses_above",
           "right": {
-            "const": {
-              "value": 70,
-              "opt": {
-                "min": 55,
-                "max": 85
-              }
-            }
+            "const": 70.0
           }
         }
-      ]
+      },
+      "logic": "A"
     },
     "short_entry": null,
     "short_exit": null
@@ -102,5 +95,22 @@
     "init_cash": 10000,
     "freq": "D"
   },
-  "engine_extra": {}
+  "engine_extra": {},
+  "optimise": {
+    "variables": {
+      "features.rsi.params.timeperiod": {
+        "start": 5,
+        "stop": 30,
+        "step": 2
+      },
+      "rules.long_entry.conditions.A.right.const": {
+        "start": 15,
+        "stop": 40
+      },
+      "rules.long_exit.conditions.A.right.const": {
+        "start": 55,
+        "stop": 85
+      }
+    }
+  }
 }

@@ -9,6 +9,7 @@ import streamlit as st
 from openstrategy_studio import config, engine, style, ui
 
 settings, data_dir = ui.boot("Settings")
+ui.page_help("settings")
 st.title("Settings")
 st.caption(f"Stored in {config.settings_path()}")
 

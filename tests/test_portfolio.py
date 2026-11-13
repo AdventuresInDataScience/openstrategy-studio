@@ -8,6 +8,11 @@ from openstrategy_studio import compile as C, engine
 from openstrategy_studio.spec import apply_params
 
 
+def one(condition):
+    """A rule of one condition: the shape every rule slot takes (conditions and a logic line)."""
+    return {"conditions": {"A": condition}, "logic": "A"}
+
+
 def test_inverse_vol_rows_sum_to_one(ohlcv_multi):
     weights = C.inverse_vol_weight(ohlcv_multi["close"], window=20).dropna()
     assert np.allclose(weights.sum(axis=1), 1.0)
@@ -59,7 +64,7 @@ def test_intrabar_drawdown_brackets_the_close_drawdown(ma_spec, ohlcv, momentum_
     pytest.importorskip("vectorbtx")
     from openstrategy_studio import analysis
 
-    fast = {"features.fast.window": 5, "features.slow.window": 20}       # enough trades on 400 bars
+    fast = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}       # enough trades on 400 bars
     single = engine.run_backtest(ma_spec, ohlcv, params=fast)
     shared = engine.run_backtest(momentum_spec, ohlcv_multi)
     assert not single["pf"].cash_sharing and shared["pf"].cash_sharing
@@ -86,13 +91,13 @@ def test_intrabar_drawdown_of_a_short_uses_the_high(ma_spec):
     data = {"open": frame(closes), "high": frame(highs), "low": frame([99.5] * 8), "close": frame(closes),
             "volume": frame([1000.0] * 8)}
     code = "out = close * 0.0\nout.iloc[0] = 1.0\nreturn out"
-    spec = {"version": 1, "name": "short", "data": {"symbols": ["X"], "timeframe": "1d", "start": "2000-01-01",
-                                                     "end": "2100-01-01"},
-            "instruments": {"X": {"mode": "equity", "point_size": 1.0, "quote_currency": "USD",
+    spec = {"version": 2, "name": "short", "setup": {"kind": "signals", "trading": "equity"},
+            "data": {"symbols": ["X"], "timeframe": "1d", "start": "2000-01-01", "end": "2100-01-01"},
+            "instruments": {"X": {"point_size": 1.0, "quote_currency": "USD",
                                   "cost_currency": "USD", "spread_points": 0.0}},
-            "features": {"pulse": {"block": "python", "code": code}},
+            "features": {"pulse": {"indicator": "studio:python", "inputs": {}, "params": {"code": code}}},
             "rules": {"long_entry": None, "long_exit": None, "short_exit": None,
-                      "short_entry": {"left": {"feature": "pulse"}, "op": ">", "right": {"const": 0.5}}},
+                      "short_entry": one({"left": {"feature": "pulse"}, "op": ">", "right": {"const": 0.5}})},
             "risk": {"sizing": {"size": 10}, "stop": {"kind": "none"}}, "account": {"init_cash": 10_000, "freq": "D"}}
     series = analysis.extract_results(engine.run_backtest(spec, data))["series"]
     # Short 10 shares from 100: at the 104 high the book is down 40 of 10,000 (plus the 0.5 bar-2 swing).

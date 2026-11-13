@@ -1,6 +1,7 @@
 """Test 8: the exported script and the in-app run agree."""
 
 import ast
+import copy
 
 import pandas as pd
 import pytest
@@ -52,7 +53,7 @@ def test_export_equivalence_shared_account(shared_spec, ohlcv_stocks):
     pytest.importorskip("vectorbtx")
     source = export_script(shared_spec)
     assert "cash='shared'" in source and "entry_priority=entry_priority" in source
-    assert "entry_priority = full(F['strength__momentum'], close)" in source
+    assert "entry_priority = full(F['strength__real'], close)" in source
     in_app = engine.run_backtest(shared_spec, ohlcv_stocks)["pf"]
     exported = run_exported(shared_spec, ohlcv_stocks)
     pd.testing.assert_series_equal(in_app.stats(), exported.stats())
@@ -67,9 +68,38 @@ def test_export_equivalence_shared_account(shared_spec, ohlcv_stocks):
 def test_export_equivalence_every_template_shape(ohlcv):
     """Rules with patterns, filters, shifts and channels export the same signals."""
     pytest.importorskip("vectorbtx")
-    for name in ("donchian_breakout", "rsi_reversion"):
+    for name in ("donchian_breakout", "rsi_reversion", "candlestick_reversal"):
         spec = S.load_template(name)
         symbol = spec["data"]["symbols"][0]
         data = {field: frame.rename(columns={"EURUSD=X": symbol}) for field, frame in ohlcv.items()}
         in_app = engine.run_backtest(spec, data)["pf"]
         pd.testing.assert_series_equal(in_app.stats(), run_exported(spec, data).stats())
+
+
+def test_export_equivalence_catalogue_logic_and_order_timing(ma_spec):
+    """TA-Lib, pandas-ta and the Studio's own entries, a feature of a feature, a logic line with
+    xor and not, and the intraday order masks: the script and the app agree."""
+    pytest.importorskip("vectorbtx")
+    from conftest import make_ohlcv
+    from openstrategy_studio import indicators
+
+    spec = copy.deepcopy(ma_spec)
+    spec["data"]["timeframe"] = "1h"
+    spec["account"]["freq"] = "1h"
+    spec["features"]["kc"] = indicators.new_feature("talib:KC")
+    spec["features"]["ce"] = indicators.new_feature("pandas_ta:CE")
+    spec["features"]["band"] = dict(indicators.new_feature("studio:percent_band"), inputs={"source": {"feature": "slow"}})
+    entry = spec["rules"]["long_entry"]
+    entry["conditions"]["B"] = {"left": {"price": "close"}, "op": ">", "right": {"feature": "kc", "output": "lowerband"}}
+    entry["conditions"]["C"] = {"left": {"price": "close"}, "op": "<", "right": {"feature": "band", "output": "upper"}}
+    entry["conditions"]["D"] = {"left": {"price": "close"}, "op": ">", "right": {"feature": "ce", "output": "ce_l"}}
+    entry["logic"] = "(A or (B xor C)) and not D"
+    spec["risk"]["orders"] = {"good_for_day": True, "flat_by_day_end": True}
+    assert S.validate_spec(spec) == []
+    data = make_ohlcv(600, ("EURUSD=X",), freq="1h", seed=5)
+    source = export_script(spec)
+    assert "run_library_indicator('pandas_ta', 'CE'" in source and "day_boundaries(close.index)" in source
+    in_app = engine.run_backtest(spec, data, params={"features.fast.params.timeperiod": 5,
+                                                     "features.slow.params.timeperiod": 20})
+    applied = S.apply_params(spec, {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20})
+    pd.testing.assert_series_equal(in_app["pf"].stats(), run_exported(applied, data).stats())

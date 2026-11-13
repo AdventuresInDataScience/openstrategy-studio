@@ -233,6 +233,11 @@ def css_variables(theme):
         "--os-shadow": studio["shadow"],
         "--os-shadow-hover": studio["shadow_hover"],
         "--os-glow": studio["glow"],
+        "--os-positive": studio["positive"],
+        "--os-negative": studio["negative"],
+        # Fonts for the Studio's own HTML (the At a glance panel); Streamlit sets its own.
+        "--os-heading-font": table.get("headingFont", table.get("font", "sans-serif")),
+        "--os-code-font": table.get("codeFont", "monospace"),
         "--os-radius": RADIUS_KEYWORDS.get(radius, radius),
         "--os-button-radius": RADIUS_KEYWORDS.get(button_radius, button_radius),
         # The sidebar has its own colours when [theme.sidebar] sets them.

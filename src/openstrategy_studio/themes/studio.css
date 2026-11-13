@@ -103,7 +103,9 @@
   box-shadow: var(--os-shadow);
 }
 
-[data-testid="stExpander"] details {
+/* Main-area expanders only: the sidebar has its own colours, and the card's surface
+   would turn its guide into a pale box on a dark sidebar. */
+[data-testid="stMain"] [data-testid="stExpander"] details {
   background: var(--os-surface);
   border-color: var(--os-border);
   border-radius: var(--os-radius);
@@ -158,6 +160,94 @@
 [data-testid="stBaseButton-secondaryFormSubmit"]:not(:disabled):hover {
   border-color: var(--os-primary);
   box-shadow: var(--os-shadow-hover);
+}
+
+/* --- the Build page's At a glance panel ------------------------------------- */
+
+/* It stays in view while the form scrolls: its column stretches to the row's height
+   (columns otherwise end with their content), and the panel sticks inside it. The
+   sticky element is the layout wrapper round the keyed container, because that
+   wrapper is exactly the panel's height and the column's block above it is the
+   row's (checked in Edge on Streamlit 1.67). */
+[data-testid="stColumn"]:has(.st-key-glance) {
+  align-self: stretch;
+}
+
+[data-testid="stLayoutWrapper"]:has(> .st-key-glance) {
+  position: sticky;
+  top: 4.25rem;
+}
+
+.os-glance {
+  background: var(--os-surface);
+  border: 1px solid var(--os-border);
+  border-radius: var(--os-radius);
+  box-shadow: var(--os-shadow);
+  padding: 0.75rem 0.85rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  max-height: calc(100vh - 6rem);
+  overflow-y: auto;
+}
+
+.os-glance-title {
+  font-family: var(--os-heading-font);
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin-bottom: 0.4rem;
+  background: var(--os-title-fill);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.os-glance-row {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.18rem 0;
+  border-top: 1px solid color-mix(in srgb, var(--os-border) 60%, transparent);
+}
+
+.os-glance-label {
+  flex: 0 0 5.2rem;
+  color: var(--os-muted);
+  font-weight: 600;
+}
+
+.os-glance-text {
+  flex: 1;
+  color: var(--os-text);
+  font-family: var(--os-code-font);
+  font-size: 0.74rem;
+  word-break: break-word;
+}
+
+.os-glance-sub {
+  border-top: none;
+  padding-left: 0.6rem;
+}
+
+.os-glance-ok,
+.os-glance-problems {
+  margin-top: 0.6rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: var(--os-radius);
+}
+
+.os-glance-ok {
+  color: var(--os-positive);
+  background: color-mix(in srgb, var(--os-positive) 12%, transparent);
+  font-weight: 600;
+}
+
+.os-glance-problems {
+  color: var(--os-text);
+  background: color-mix(in srgb, var(--os-negative) 12%, transparent);
+  border-left: 3px solid var(--os-negative);
+}
+
+.os-glance-problems div + div {
+  margin-top: 0.25rem;
 }
 
 /* --- motion: only for people who have not asked their system for less ---------- */

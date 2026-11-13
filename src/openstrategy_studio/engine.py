@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .spec import SIZING_KEYS, apply_params, cash_model, strategy_kind
+from .spec import SIZING_KEYS, apply_params, cash_model, strategy_kind, trading_mode
 
 
 # ⚠️ Which of stop-loss or take-profit wins when one bar's range contains both.
@@ -168,6 +168,8 @@ def instrument_fields(spec):
     out = {}
     for symbol in spec["data"]["symbols"]:
         fields = dict(instruments.get(symbol) or {})
+        # One trading mode per strategy, set on the Setup step: every instrument takes it.
+        fields["mode"] = trading_mode(spec)
         fields.pop("price_field", None)
         # `financing` is reserved in vectorbtX (9fa427e): financing is the rate table plus
         # the Settings page's markup for every instrument, and a per-instrument value was
@@ -218,9 +220,9 @@ def adjusted_symbols(spec, data_dir=None):
             return sorted(str(symbol) for symbol, field in frame["price_field"].items() if field == "adj_close")
         return sorted(str(symbol) for symbol, mode in frame["mode"].items() if mode == "equity")
     out = []
+    default = "adj_close" if trading_mode(spec) == "equity" else "close"
     for symbol in spec["data"]["symbols"]:
         fields = instruments.get(symbol) or {}
-        default = "adj_close" if fields.get("mode") == "equity" else "close"
         if (fields.get("price_field") or default) == "adj_close":
             out.append(symbol)
     return out

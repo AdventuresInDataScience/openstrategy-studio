@@ -29,7 +29,6 @@ import pandas as pd
 from scipy import stats
 
 from . import engine
-from .spec import value_of
 
 PENALTY = 1e12          # stands in for NaN where a backend needs a finite number
 
@@ -39,54 +38,66 @@ PENALTY = 1e12          # stands in for NaN where a backend needs a finite numbe
 
 
 def build_space(spec, include=None, conditional=False):
-    """{param path: opt dict} for every optimisable node (or only those in `include`).
+    """{param path: opt dict} in BUTChC's dialect, from the strategy's optimise variables.
 
-    Structural alternatives (choice nodes) are handled two ways:
-    * conditional=False (every backend): the structure is fixed at the current
-      choice, and only parameters inside the chosen options are searched.
-    * conditional=True (BUTChC and Optuna only): each optimisable selector
-      becomes a categorical whose next_level holds the parameters of each
-      option, in BUTChC's dialect. The objective then receives only the
-      parameters on the sampled path, and apply_params keeps the rest at their
-      current values.
+    A variable {"start", "stop", "step"} becomes {"min", "max", "step"}, with "int": true
+    for a whole-number value; {"values": [...]} stays a list. Only variables whose value
+    the strategy still has are searched (validate_spec names the others), and only those
+    in `include` when it is given.
+
+    Rule versions (rules.<slot>.choose) are handled two ways:
+    * conditional=False (every backend): the structure is fixed at the version in use,
+      and only variables inside it (or outside any version) are searched.
+    * conditional=True (BUTChC and Optuna only): a "choose" variable becomes a
+      categorical whose next_level holds each version's own variables. The objective
+      then receives only the values on the sampled path, and apply_params keeps the
+      rest at their current values.
     """
-    from .spec import is_choice, is_opt
+    from .spec import collect_choices, tunable_inputs, variables
 
-    def wanted(path):
-        return include is None or path in include
+    rows = {row["path"]: row for row in tunable_inputs(spec)}
 
-    def walk(node, path, out):
-        if is_opt(node):
-            if wanted(path):
-                out[path] = dict(node["opt"])
-            return
-        if is_choice(node):
-            selector = node["choose"]
-            selector_path = f"{path}.choose" if path else "choose"
-            if conditional and is_opt(selector) and wanted(selector_path):
-                entry = dict(selector["opt"])
-                branches = {}
-                for label in entry["values"]:
-                    branch = {}
-                    walk(node["options"][label], f"{path}.options.{label}", branch)
-                    if branch:
-                        branches[label] = branch
-                if branches:
-                    entry["next_level"] = branches
-                out[selector_path] = entry
-            else:
-                label = value_of(selector)
-                walk(node["options"][label], f"{path}.options.{label}", out)
-            return
-        if isinstance(node, dict):
-            for key, child in node.items():
-                walk(child, f"{path}.{key}" if path else str(key), out)
-        elif isinstance(node, list):
-            for index, child in enumerate(node):
-                walk(child, f"{path}.{index}" if path else str(index), out)
+    def opt_for(path, variable):
+        if "values" in variable:
+            return {"values": list(variable["values"])}
+        out = {"min": variable["start"], "max": variable["stop"]}
+        if rows[path]["type"] == "int":
+            out["int"] = True
+        if variable.get("step"):
+            out["step"] = variable["step"]       # the grid's spacing; stripped before BUTChC sees it
+        return out
 
+    wanted = {path: variable for path, variable in variables(spec).items()
+              if path in rows and (include is None or path in include)}
+    choices = collect_choices(spec)
+    selectors = {f"{owner}.choose": owner for owner in choices}
     space = {}
-    walk(spec, "", space)
+    for path, variable in wanted.items():
+        if path in selectors:
+            continue                     # a version choice: searched only conditionally, below
+        owner = next((owner for owner in choices if path.startswith(f"{owner}.options.")), None)
+        if owner is None:
+            space[path] = opt_for(path, variable)
+            continue
+        label = path[len(owner) + len(".options."):].split(".")[0]
+        if conditional and f"{owner}.choose" in wanted:
+            continue                     # goes into that version's branch
+        if label == choices[owner]["choose"]:
+            space[path] = opt_for(path, variable)
+    if conditional:
+        for selector, owner in selectors.items():
+            if selector not in wanted:
+                continue
+            entry = opt_for(selector, wanted[selector])
+            branches = {}
+            for label in entry["values"]:
+                prefix = f"{owner}.options.{label}."
+                branch = {path: opt_for(path, variable) for path, variable in wanted.items() if path.startswith(prefix)}
+                if branch:
+                    branches[label] = branch
+            if branches:
+                entry["next_level"] = branches
+            space[selector] = entry
     return dict(sorted(space.items()))
 
 

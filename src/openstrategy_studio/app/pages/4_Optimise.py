@@ -1,52 +1,162 @@
-"""Optimise: choose parameters, backend, budget, objective and constraints; start, watch and cancel jobs.
+"""Optimise: the variables to search and their ranges, then the backend, budget, objective and
+constraints; start, watch and cancel jobs.
 
 Jobs run in a separate process, so they keep going if you close the page.
 """
 
 import importlib.util
+import math
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from openstrategy_studio import data as data_module, engine, jobs, optimise, ui
-from openstrategy_studio.spec import collect_choices, collect_opts, is_opt, validate_spec
+from openstrategy_studio.spec import collect_choices, tunable_inputs, validate_spec, variable_values, variables
 
 settings, data_dir = ui.boot("Optimise")
+ui.page_help("optimise")
 spec = ui.current()
 st.title("Optimise")
 
-opts = collect_opts(spec)
 problems = validate_spec(spec)
 missing = ui.missing_data(spec, data_dir)
 if missing:
     problems = problems + [f"Import {', '.join(missing)} at {spec['data']['timeframe']} (or finer) on the Data page."]
 ui.show_problems(problems)
-if not opts:
-    st.info("Nothing to optimise yet. On the Build page, turn on Optimise beside a number to give it a range.")
 
-# --- parameters -----------------------------------------------------------------------
-included = []
-if opts:
-    st.subheader("Parameters")
-    rows = []
-    for path, node in opts.items():
-        opt = node["opt"]
-        span = ", ".join(map(str, opt["values"])) if "values" in opt else (
-            f"{opt['min']} to {opt['max']}" + (" (whole numbers)" if opt.get("int") else "")
-            + (" (log scale)" if opt.get("log") else ""))
-        rows.append({"optimise": True, "parameter": path, "current": str(node["value"]), "range": span})
-    edited = st.data_editor(pd.DataFrame(rows), hide_index=True, width="stretch", disabled=["parameter", "current", "range"],
-                            key=f"params:{ui.key('opts')}")
-    included = [row.parameter for row in edited.itertuples() if row.optimise]
-    st.caption("Unticked parameters stay at their current value.")
-searchable = [path for path, node in collect_choices(spec).items() if is_opt(node["choose"])]
+# --- variables to optimise ---------------------------------------------------------------
+# Like MT5's inputs: every value the strategy has can be added, features, rule numbers and
+# risk dials alike, each searched over a range (start, step, stop) or a list of values.
+# They are stored in the spec's optimise.variables, keyed by the value's dotted path, so
+# they are written directly here: set_value would split the path at its dots.
+st.subheader("Variables to optimise")
+rows = tunable_inputs(spec)
+by_path = {row["path"]: row for row in rows}
+# Read, not created: rendering a page must not change the spec (the section appears on the first Add).
+found = (spec.get("optimise") or {}).get("variables") or {}
+
+
+def default_variable(row):
+    """A starting range around the current value: half to double it, ten steps."""
+    if row["type"] == "choice":
+        return {"values": list(row["options"])}
+    value = row["value"] if isinstance(row["value"], (int, float)) and row["value"] else 1
+    start, stop = (value / 2, value * 2) if value > 0 else (value * 2, value / 2)
+    if row["type"] == "int":
+        start, stop = int(math.floor(start)), int(math.ceil(stop))
+        if stop <= start:
+            stop = start + 1
+        return {"start": start, "stop": stop, "step": max(1, (stop - start) // 10)}
+    return {"start": round(start, 6), "stop": round(stop, 6), "step": round((stop - start) / 10, 6)}
+
+
+def write_variables():
+    ui.save_draft()
+
+
+candidates = [row for row in rows if row["path"] not in found]
+if candidates:
+    left, right = st.columns([5, 1])
+    groups = sorted({row["group"] for row in candidates}, key=["Features", "Rules", "Risk", "Portfolio"].index)
+    picked = left.selectbox("Add a variable", candidates,
+                            format_func=lambda row: f"{row['group']}: {row['label']} (now {row['value']})",
+                            key=ui.key("optimise", ":add"),
+                            help=f"Every value of the strategy that can vary: {', '.join(groups).lower()}.")
+    right.write("")
+    if right.button("Add", type="primary", key=ui.key("optimise", ":add:go")):
+        spec.setdefault("optimise", {}).setdefault("variables", {})[picked["path"]] = default_variable(picked)
+        write_variables()
+        ui.renew_widgets()
+        st.rerun()
+if not found:
+    st.info("Nothing to optimise yet. Add a variable above: a feature's setting, a number in a rule, or a risk dial "
+            "such as the stop distance.")
+counts = []
+for path, variable in list(found.items()):
+    row = by_path.get(path)
+    with st.container(border=True):
+        if row is None:
+            left, right = st.columns([5, 1])
+            left.warning(f"{path} no longer exists in the strategy.")
+            if right.button("Remove", key=ui.key(f"opt:{path}", ":remove")):
+                del found[path]
+                write_variables()
+                ui.renew_widgets()
+                st.rerun()
+            continue
+        head = st.columns([4, 2, 1])
+        head[0].markdown(f"**{row['label']}**  \n<small>{row['group']} · now {row['value']}</small>",
+                         unsafe_allow_html=True)
+        ways = ["list"] if row["type"] == "choice" else ["range", "list"]
+        how = head[1].radio("Search", ways, index=0 if "values" not in variable or len(ways) == 1 else 1,
+                            format_func={"range": "A range", "list": "These values"}.get, horizontal=True,
+                            key=ui.key(f"opt:{path}", ":how"), label_visibility="collapsed")
+        if head[2].button("Remove", key=ui.key(f"opt:{path}", ":remove")):
+            del found[path]
+            write_variables()
+            ui.renew_widgets()
+            st.rerun()
+        if how == "range" and "values" in variable:
+            found[path] = default_variable(row)
+            write_variables()
+            ui.renew_widgets()
+            st.rerun()
+        if how == "list" and "values" not in variable:
+            found[path] = {"values": variable_values(variable, row["type"])}
+            write_variables()
+            ui.renew_widgets()
+            st.rerun()
+        if how == "range":
+            cast = int if row["type"] == "int" else float
+            number = {"step": 1} if row["type"] == "int" else {"format": "%g"}
+            columns = st.columns(3)
+            start = columns[0].number_input("Start", value=cast(variable["start"]), key=ui.key(f"opt:{path}", ":start"),
+                                            **number)
+            step = columns[1].number_input("Step", value=cast(variable.get("step") or 0), min_value=cast(0),
+                                           key=ui.key(f"opt:{path}", ":step"), **number,
+                                           help="The grid's spacing. Other searchers pick any value in the range "
+                                                "(whole numbers for a whole-number setting).")
+            stop = columns[2].number_input("Stop", value=cast(variable["stop"]), key=ui.key(f"opt:{path}", ":stop"),
+                                           **number)
+            new = {"start": cast(start), "stop": cast(stop)}
+            if step:
+                new["step"] = cast(step)
+        else:
+            if row["type"] == "choice":
+                chosen = st.multiselect("Values to try", row["options"], default=[value for value in variable["values"]
+                                                                                   if value in row["options"]],
+                                        key=ui.key(f"opt:{path}", ":values"))
+                new = {"values": chosen}
+            else:
+                text = st.text_input("Values to try, separated by commas", key=ui.key(f"opt:{path}", ":values"),
+                                     value=", ".join(str(value) for value in variable["values"]))
+                parsed = []
+                for piece in text.split(","):
+                    piece = piece.strip()
+                    if piece:
+                        try:
+                            parsed.append(int(piece) if row["type"] == "int" else float(piece))
+                        except ValueError:
+                            st.error(f"'{piece}' is not a {'whole ' if row['type'] == 'int' else ''}number.")
+                new = {"values": parsed}
+        if new != variable:
+            found[path] = new
+            write_variables()
+        size = len(variable_values(found[path], row["type"])) if (found[path].get("values") or
+                                                                    found[path].get("stop") is not None) else 0
+        counts.append(size)
+        st.caption(f"{size} value{'s' if size != 1 else ''} on the grid.")
+if counts:
+    st.caption(f"{math.prod(counts):,} combinations in a full grid.")
+
+searchable = [path for path in collect_choices(spec) if f"{path}.choose" in variables(spec)]
 structure = False
 if searchable:
-    structure = st.toggle("Also search the alternatives", value=True,
-                          help="The optimiser chooses between the alternatives you set up in the rule builder, "
-                               "tuning each one's own settings only when it is chosen. BUTChC and Optuna only.")
-space = optimise.build_space(spec, include=included, conditional=structure)
+    structure = st.toggle("Also search the rule versions", value=True,
+                          help="The optimiser chooses between the versions of a rule, tuning each one's own numbers "
+                               "only when it is chosen. BUTChC and Optuna only.")
+space = optimise.build_space(spec, conditional=structure)
 conditional = optimise.is_conditional(space)
 
 # --- backend ------------------------------------------------------------------------

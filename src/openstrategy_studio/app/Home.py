@@ -10,10 +10,11 @@ from openstrategy_studio.spec import (list_templates, load_spec, load_template, 
                                       validate_spec)
 
 settings, data_dir = ui.boot("Home")
+ui.page_help("home")
 
 st.title("OpenStrategy Studio")
-st.write("Build a trading strategy from forms and rules, backtest it, optimise it and read the tear sheet. "
-         "Everything runs on your machine with vectorbtX.")
+st.write("Build a trading strategy from indicators, patterns and rules, backtest it, optimise it and read "
+         "the tear sheet. Everything runs on your machine with vectorbtX.")
 
 # Session state vanishes on a browser refresh; every edit is also written to a draft.
 draft_path = data_dir / "drafts" / "current.json"
@@ -55,9 +56,9 @@ with left:
         problems = validate_spec(spec)
         ui.replace_spec(spec)
         if ui.has_python_block(spec):
-            # Imported specs with Python blocks warn before running.
+            # Imported specs with Python code warn before running.
             st.session_state["untrusted_python"] = True
-            st.warning("This file contains Python blocks, which run as code on your machine. Read them on the "
+            st.warning("This file contains Python code, which runs on your machine. Read it on the "
                        "Build page before running; the Backtest page will ask you to confirm.")
         ui.show_problems(problems, "This file has problems")
         if not problems:
@@ -66,10 +67,12 @@ with left:
 with right:
     st.subheader("Current strategy")
     spec = ui.current()
-    kinds = {"signals": "Entry and exit rules", "portfolio": "Portfolio (weights and schedule)",
-             "hold": "Buy and hold", "conflict": "Rules and a portfolio (pick one)"}
+    from openstrategy_studio.expressions import TRADING_WORDS
+    from openstrategy_studio.spec import trading_mode
+    kinds = {"signals": "Trading on signals", "portfolio": "A portfolio"}
     st.write(f"**{spec.get('name', 'Untitled')}**")
-    st.write(f"{kinds[strategy_kind(spec)]}, {', '.join(spec['data']['symbols'])} on "
+    st.write(f"{kinds.get(strategy_kind(spec), strategy_kind(spec))} ({TRADING_WORDS.get(trading_mode(spec))}), "
+             f"{', '.join(spec['data']['symbols'])} on "
              f"{spec['data']['timeframe']} bars, {spec['data']['start']} to {spec['data']['end']}.")
     problems = validate_spec(spec)
     if problems:

@@ -1,6 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "Top-3 momentum, monthly",
+  "setup": {
+    "kind": "portfolio",
+    "trading": "equity"
+  },
   "data": {
     "symbols": [
       "AAPL",
@@ -15,35 +19,30 @@
   },
   "instruments": {
     "AAPL": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
       "commission_pct": 0.0005
     },
     "MSFT": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
       "commission_pct": 0.0005
     },
     "NVDA": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
       "commission_pct": 0.0005
     },
     "AMZN": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
       "commission_pct": 0.0005
     },
     "GOOGL": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
@@ -52,15 +51,12 @@
   },
   "features": {
     "mom": {
-      "block": "momentum",
-      "source": "close",
-      "window": {
-        "value": 126,
-        "opt": {
-          "min": 20,
-          "max": 252,
-          "int": true
-        }
+      "indicator": "talib:ROCP",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 126
       }
     }
   },
@@ -69,26 +65,11 @@
       "feature": "mom"
     },
     "mode": "top",
-    "top_n": {
-      "value": 3,
-      "opt": {
-        "min": 1,
-        "max": 5,
-        "int": true
-      }
-    },
+    "top_n": 3,
     "min_score": 0.0
   },
   "weighting": {
-    "scheme": {
-      "value": "equal",
-      "opt": {
-        "values": [
-          "equal",
-          "inverse_vol"
-        ]
-      }
-    },
+    "scheme": "equal",
     "vol_window": 20
   },
   "schedule": {
@@ -98,12 +79,33 @@
     },
     "threshold": null,
     "combine": "and",
-    "min_trade": 0.005
+    "min_trade": 0.005,
+    "rebalance": "calendar"
   },
   "risk": {},
   "account": {
     "init_cash": 100000,
     "freq": "D"
   },
-  "engine_extra": {}
+  "engine_extra": {},
+  "optimise": {
+    "variables": {
+      "features.mom.params.timeperiod": {
+        "start": 20,
+        "stop": 252,
+        "step": 23
+      },
+      "selection.top_n": {
+        "start": 1,
+        "stop": 5,
+        "step": 1
+      },
+      "weighting.scheme": {
+        "values": [
+          "equal",
+          "inverse_vol"
+        ]
+      }
+    }
+  }
 }

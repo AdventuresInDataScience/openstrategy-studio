@@ -1,6 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "EURUSD 50/200 MA cross",
+  "setup": {
+    "kind": "signals",
+    "trading": "spreadbet"
+  },
   "data": {
     "symbols": [
       "EURUSD=X"
@@ -11,7 +15,6 @@
   },
   "instruments": {
     "EURUSD=X": {
-      "mode": "spreadbet",
       "asset_class": "fx",
       "point_size": 0.0001,
       "base_currency": "EUR",
@@ -26,34 +29,28 @@
   },
   "features": {
     "fast": {
-      "block": "ma",
-      "source": "close",
-      "window": {
-        "value": 50,
-        "opt": {
-          "min": 10,
-          "max": 100,
-          "int": true
-        }
+      "indicator": "talib:SMA",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 50
       }
     },
     "slow": {
-      "block": "ma",
-      "source": "close",
-      "window": {
-        "value": 200,
-        "opt": {
-          "min": 100,
-          "max": 300,
-          "int": true
-        }
+      "indicator": "talib:SMA",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 200
       }
     }
   },
   "rules": {
     "long_entry": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "feature": "fast"
           },
@@ -62,11 +59,12 @@
             "feature": "slow"
           }
         }
-      ]
+      },
+      "logic": "A"
     },
     "long_exit": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "feature": "fast"
           },
@@ -75,7 +73,8 @@
             "feature": "slow"
           }
         }
-      ]
+      },
+      "logic": "A"
     },
     "short_entry": null,
     "short_exit": null
@@ -106,5 +105,19 @@
   "engine_extra": {
     "upon_opposite_entry": "reverse",
     "seed": 42
+  },
+  "optimise": {
+    "variables": {
+      "features.fast.params.timeperiod": {
+        "start": 10,
+        "stop": 100,
+        "step": 9
+      },
+      "features.slow.params.timeperiod": {
+        "start": 100,
+        "stop": 300,
+        "step": 20
+      }
+    }
   }
 }

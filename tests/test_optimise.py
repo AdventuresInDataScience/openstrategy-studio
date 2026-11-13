@@ -92,7 +92,7 @@ def test_every_metric_scores_a_real_backtest(ma_spec, ohlcv, momentum_spec, ohlc
     pytest.importorskip("vectorbtx")
     from openstrategy_studio import engine
 
-    fast = {"features.fast.window": 5, "features.slow.window": 20}
+    fast = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}
     for spec, data, params in ((ma_spec, ohlcv, fast), (momentum_spec, ohlcv_multi, None)):
         pf = engine.run_backtest(spec, data, params=params)["pf"]
         for name, metric in O.METRICS.items():
@@ -110,15 +110,22 @@ def test_marsopt():
 
 def test_space_helpers(ma_spec):
     space = O.build_space(ma_spec)
-    assert space == {"features.fast.window": {"min": 10, "max": 100, "int": True},
-                     "features.slow.window": {"min": 100, "max": 300, "int": True}}
-    assert O.build_space(ma_spec, include=["features.fast.window"]).keys() == {"features.fast.window"}
+    assert space == {"features.fast.params.timeperiod": {"min": 10, "max": 100, "int": True, "step": 9},
+                     "features.slow.params.timeperiod": {"min": 100, "max": 300, "int": True, "step": 20}}
+    assert O.build_space(ma_spec, include=["features.fast.params.timeperiod"]).keys() ==         {"features.fast.params.timeperiod"}
+    # A list stays a list, and a variable the strategy no longer has is not searched.
+    listed = dict(ma_spec["optimise"]["variables"])
+    listed["features.fast.params.timeperiod"] = {"values": [10, 20]}
+    listed["features.gone.params.timeperiod"] = {"values": [1]}
+    other = dict(ma_spec, optimise={"variables": listed})
+    assert O.build_space(other)["features.fast.params.timeperiod"] == {"values": [10, 20]}
+    assert "features.gone.params.timeperiod" not in O.build_space(other)
     assert O.butchc_space({"x": {"min": 1, "max": 2, "step": 0.5}}) == {"x": {"min": 1, "max": 2}}
     assert O.from_unit({"min": 1, "max": 100, "log": True}, 0.5) == pytest.approx(10.0)
     assert O.from_unit({"values": [1, 2, 3]}, 0.999) == 3
     assert isinstance(O.from_unit({"min": 1, "max": 9, "int": True}, 0.5), int)
     assert O.grid_values({"min": 10, "max": 20, "int": True, "step": 5}) == [10, 15, 20]
-    assert O.grid_size(space) == 10 * 10
+    assert O.grid_size(space) == 11 * 11
 
 
 def test_walk_forward_folds_do_not_overlap():

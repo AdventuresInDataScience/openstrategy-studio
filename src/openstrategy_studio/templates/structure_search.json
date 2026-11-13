@@ -1,6 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "EURUSD entry structure search",
+  "setup": {
+    "kind": "signals",
+    "trading": "spreadbet"
+  },
   "data": {
     "symbols": [
       "EURUSD=X"
@@ -11,7 +15,6 @@
   },
   "instruments": {
     "EURUSD=X": {
-      "mode": "spreadbet",
       "asset_class": "fx",
       "point_size": 0.0001,
       "base_currency": "EUR",
@@ -26,70 +29,58 @@
   },
   "features": {
     "rsi": {
-      "block": "rsi",
-      "source": "close",
-      "window": {
-        "value": 14,
-        "opt": {
-          "min": 5,
-          "max": 30,
-          "int": true
-        }
+      "indicator": "talib:RSI",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 14
       }
     },
     "upper": {
-      "block": "highest",
-      "source": "high",
-      "window": {
-        "value": 20,
-        "opt": {
-          "min": 10,
-          "max": 60,
-          "int": true
-        }
+      "indicator": "talib:MAX",
+      "inputs": {
+        "close": "high"
+      },
+      "params": {
+        "timeperiod": 20
       }
     },
     "lower": {
-      "block": "lowest",
-      "source": "low",
-      "window": 10
+      "indicator": "talib:MIN",
+      "inputs": {
+        "close": "low"
+      },
+      "params": {
+        "timeperiod": 10
+      }
     },
     "trend": {
-      "block": "ma",
-      "source": "close",
-      "window": 200
+      "indicator": "talib:SMA",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 200
+      }
     }
   },
   "rules": {
     "long_entry": {
-      "choose": {
-        "value": "reversion",
-        "opt": {
-          "values": [
-            "reversion",
-            "breakout"
-          ]
-        }
-      },
+      "choose": "reversion",
       "options": {
         "reversion": {
-          "all": [
-            {
+          "conditions": {
+            "A": {
               "left": {
                 "feature": "rsi"
               },
               "op": "crosses_above",
               "right": {
-                "const": {
-                  "value": 30,
-                  "opt": {
-                    "min": 15,
-                    "max": 40
-                  }
-                }
+                "const": 30.0
               }
             },
-            {
+            "B": {
               "left": {
                 "price": "close"
               },
@@ -98,11 +89,12 @@
                 "feature": "trend"
               }
             }
-          ]
+          },
+          "logic": "A and B"
         },
         "breakout": {
-          "all": [
-            {
+          "conditions": {
+            "A": {
               "left": {
                 "price": "close"
               },
@@ -112,13 +104,14 @@
                 "shift": 1
               }
             }
-          ]
+          },
+          "logic": "A"
         }
       }
     },
     "long_exit": {
-      "any": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "price": "close"
           },
@@ -128,16 +121,17 @@
             "shift": 1
           }
         },
-        {
+        "B": {
           "left": {
             "feature": "rsi"
           },
           "op": ">",
           "right": {
-            "const": 75
+            "const": 75.0
           }
         }
-      ]
+      },
+      "logic": "A or B"
     },
     "short_entry": null,
     "short_exit": null
@@ -168,5 +162,29 @@
   "engine_extra": {
     "upon_opposite_entry": "reverse",
     "seed": 42
+  },
+  "optimise": {
+    "variables": {
+      "features.rsi.params.timeperiod": {
+        "start": 5,
+        "stop": 30,
+        "step": 2
+      },
+      "features.upper.params.timeperiod": {
+        "start": 10,
+        "stop": 60,
+        "step": 5
+      },
+      "rules.long_entry.choose": {
+        "values": [
+          "reversion",
+          "breakout"
+        ]
+      },
+      "rules.long_entry.options.reversion.conditions.A.right.const": {
+        "start": 15,
+        "stop": 40
+      }
+    }
   }
 }

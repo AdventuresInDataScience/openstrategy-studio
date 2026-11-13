@@ -1,6 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "Three stocks, one account: MA cross, strongest first",
+  "setup": {
+    "kind": "signals",
+    "trading": "equity"
+  },
   "data": {
     "symbols": [
       "AAPL",
@@ -13,7 +17,6 @@
   },
   "instruments": {
     "AAPL": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
@@ -21,7 +24,6 @@
       "leverage": 1.0
     },
     "MSFT": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
@@ -29,7 +31,6 @@
       "leverage": 1.0
     },
     "NVDA": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
@@ -39,39 +40,37 @@
   },
   "features": {
     "fast": {
-      "block": "ma",
-      "source": "close",
-      "window": {
-        "value": 20,
-        "opt": {
-          "min": 5,
-          "max": 50,
-          "int": true
-        }
+      "indicator": "talib:SMA",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 20
       }
     },
     "slow": {
-      "block": "ma",
-      "source": "close",
-      "window": {
-        "value": 100,
-        "opt": {
-          "min": 60,
-          "max": 200,
-          "int": true
-        }
+      "indicator": "talib:SMA",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 100
       }
     },
     "strength": {
-      "block": "momentum",
-      "source": "close",
-      "window": 63
+      "indicator": "talib:ROCP",
+      "inputs": {
+        "close": "close"
+      },
+      "params": {
+        "timeperiod": 63
+      }
     }
   },
   "rules": {
     "long_entry": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "feature": "fast"
           },
@@ -80,11 +79,12 @@
             "feature": "slow"
           }
         }
-      ]
+      },
+      "logic": "A"
     },
     "long_exit": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "feature": "fast"
           },
@@ -93,7 +93,8 @@
             "feature": "slow"
           }
         }
-      ]
+      },
+      "logic": "A"
     },
     "short_entry": null,
     "short_exit": null
@@ -120,5 +121,19 @@
     },
     "when_cash_short": "skip"
   },
-  "engine_extra": {}
+  "engine_extra": {},
+  "optimise": {
+    "variables": {
+      "features.fast.params.timeperiod": {
+        "start": 5,
+        "stop": 50,
+        "step": 4
+      },
+      "features.slow.params.timeperiod": {
+        "start": 60,
+        "stop": 200,
+        "step": 14
+      }
+    }
+  }
 }

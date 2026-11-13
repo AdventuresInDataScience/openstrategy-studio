@@ -15,6 +15,11 @@ from conftest import make_ohlcv
 # The call plan (pure: runs without vectorbtX)
 # ---------------------------------------------------------------------------
 
+
+def one(condition):
+    """A rule of one condition: the shape every rule slot takes (conditions and a logic line)."""
+    return {"conditions": {"A": condition}, "logic": "A"}
+
 def without_pair(ma_spec):
     """The MA-cross spec as a non-FX spread bet, which has no base currency and so stays single."""
     spec = apply_params(ma_spec)
@@ -58,7 +63,7 @@ def test_fx_carry_uses_the_pair(ma_spec, ohlcv):
     pytest.importorskip("vectorbtx")
     import warnings
 
-    fast = {"features.fast.window": 5, "features.slow.window": 20}
+    fast = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         run = engine.run_backtest(ma_spec, ohlcv, params=fast)
@@ -139,17 +144,17 @@ def test_cash_plan(shared_spec):
 def competing_spec(account, score=None, symbols=("AAA", "BBB", "CCC")):
     """Every symbol enters on bar 1 (filling at bar 2's open) and exits on bar 4, each wanting 4,000."""
     pulse = "out = close * 0.0\nout.iloc[1] = 1.0\nout.iloc[4] = 2.0\nreturn out"
-    features = {"pulse": {"block": "python", "code": pulse}}
+    features = {"pulse": {"indicator": "studio:python", "inputs": {}, "params": {"code": pulse}}}
     if score is not None:
-        features["score"] = {"block": "python", "code": score}
-    instrument = {"mode": "equity", "point_size": 1.0, "quote_currency": "USD", "cost_currency": "USD",
+        features["score"] = {"indicator": "studio:python", "inputs": {}, "params": {"code": score}}
+    instrument = {"point_size": 1.0, "quote_currency": "USD", "cost_currency": "USD",
                   "spread_points": 0.0, "leverage": 1.0}
-    rules = {"long_entry": {"left": {"feature": "pulse"}, "op": "between", "lower": {"const": 0.5},
-                            "upper": {"const": 1.5}},
-             "long_exit": {"left": {"feature": "pulse"}, "op": ">", "right": {"const": 1.5}},
+    rules = {"long_entry": one({"left": {"feature": "pulse"}, "op": "between", "lower": {"const": 0.5},
+                                "upper": {"const": 1.5}}),
+             "long_exit": one({"left": {"feature": "pulse"}, "op": ">", "right": {"const": 1.5}}),
              "short_entry": None, "short_exit": None}
-    return {"version": 1, "name": "competing", "data": {"symbols": list(symbols), "timeframe": "1d",
-                                                         "start": "2000-01-01", "end": "2100-01-01"},
+    return {"version": 2, "name": "competing", "setup": {"kind": "signals", "trading": "equity"},
+            "data": {"symbols": list(symbols), "timeframe": "1d", "start": "2000-01-01", "end": "2100-01-01"},
             "instruments": {symbol: dict(instrument) for symbol in symbols}, "features": features, "rules": rules,
             "risk": {"sizing": {"notional": 4000.0}, "stop": {"kind": "none"}},
             "account": dict({"init_cash": 10_000, "freq": "D"}, **account), "engine_extra": {"seed": 7}}
@@ -205,7 +210,7 @@ def test_separate_accounts_are_reported_as_accounts(ma_spec):
 
     symbols = ["EURUSD=X", "GBPUSD=X", "AUDUSD=X"]
     data = make_ohlcv(400, symbols, seed=5)
-    spec = apply_params(ma_spec, {"features.fast.window": 5, "features.slow.window": 20})   # enough trades
+    spec = apply_params(ma_spec, {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20})   # enough trades
     pair = spec["instruments"]["EURUSD=X"]
     spec["data"]["symbols"] = symbols
     spec["instruments"] = {symbol: dict(pair, base_currency=symbol[:3]) for symbol in symbols}
@@ -255,7 +260,7 @@ def test_benchmark_is_the_market_unlevered(ma_spec, ohlcv, momentum_spec, ohlcv_
     pytest.importorskip("vectorbtx")
     from openstrategy_studio import analysis
 
-    fast = {"features.fast.window": 5, "features.slow.window": 20}      # 50/200 never trades in 400 bars
+    fast = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}      # 50/200 never trades in 400 bars
     for spec, data, params in ((ma_spec, ohlcv, fast), (momentum_spec, ohlcv_multi, None)):
         run = engine.run_backtest(spec, data, params=params)
         results = analysis.extract_results(run, benchmark=True)
@@ -362,13 +367,13 @@ def pulse_spec(slot, bar, exit_slot, exit_bar, risk=None, symbol="X", spread_poi
     """
     code = (f"out = close * 0.0\nout.iloc[{bar}] = 1.0\nout.iloc[{exit_bar}] = 2.0\nreturn out")
     rules = {"long_entry": None, "long_exit": None, "short_entry": None, "short_exit": None}
-    rules[slot] = {"left": {"feature": "pulse"}, "op": "between", "lower": {"const": 0.5}, "upper": {"const": 1.5}}
-    rules[exit_slot] = {"left": {"feature": "pulse"}, "op": ">", "right": {"const": 1.5}}
-    return {"version": 1, "name": "pulse", "data": {"symbols": [symbol], "timeframe": "1d",
-                                                     "start": "2000-01-01", "end": "2100-01-01"},
-            "instruments": {symbol: {"mode": "equity", "point_size": 1.0, "quote_currency": "USD",
+    rules[slot] = one({"left": {"feature": "pulse"}, "op": "between", "lower": {"const": 0.5}, "upper": {"const": 1.5}})
+    rules[exit_slot] = one({"left": {"feature": "pulse"}, "op": ">", "right": {"const": 1.5}})
+    return {"version": 2, "name": "pulse", "setup": {"kind": "signals", "trading": "equity"},
+            "data": {"symbols": [symbol], "timeframe": "1d", "start": "2000-01-01", "end": "2100-01-01"},
+            "instruments": {symbol: {"point_size": 1.0, "quote_currency": "USD",
                                      "cost_currency": "USD", "spread_points": spread_points}},
-            "features": {"pulse": {"block": "python", "code": code}}, "rules": rules,
+            "features": {"pulse": {"indicator": "studio:python", "inputs": {}, "params": {"code": code}}}, "rules": rules,
             "risk": risk or {"sizing": {"size": 1}, "stop": {"kind": "none"}},
             "account": {"init_cash": 10_000, "freq": "D"}}
 

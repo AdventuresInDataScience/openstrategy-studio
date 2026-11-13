@@ -1,4 +1,4 @@
-"""Patterns: which of the 300 detectors were followed by a move, on your data?
+"""Patterns: which of the catalogue's detectors were followed by a move, on your data?
 
 Each hit is judged as a trade from the next bar's open (where a signal fills),
 bearish signals as shorts, against the same trades taken on every bar.
@@ -13,6 +13,7 @@ from openstrategy_studio import analysis, data as data_module, research, ui
 from openstrategy_studio.spec import TIMEFRAMES, strategy_kind
 
 settings, data_dir = ui.boot("Patterns")
+ui.page_help("patterns")
 ui.font_css()
 st.title("Pattern research")
 st.write("See how each candlestick and chart pattern was followed on your data, before building a rule on one.")
@@ -44,11 +45,11 @@ skip_slow = st.checkbox("Skip the slow head-and-shoulders family", value=True,
 if st.button("Run the study", type="primary", disabled=not symbols or not horizons):
     def run_study():
         frames = data_module.load_frames(data_dir, symbols, timeframe, start.isoformat(), end.isoformat())
-        catalogue = [item for item in ui.pattern_catalogue() if item["module"] in families
+        catalogue = [item for item in research.pattern_rows() if item["module"] in families
                      and item["direction"] in directions and not (skip_slow and research.is_slow(item["name"]))]
         return frames, research.study(frames, catalogue, horizons=tuple(sorted(horizons)), min_hits=int(min_hits))
 
-    outcome = ui.run_guarded("Scanning every pattern (all 300 take well under a second per symbol)", run_study)
+    outcome = ui.run_guarded("Scanning every pattern (all of them take well under a second per symbol)", run_study)
     if outcome is not None:
         st.session_state["pattern_study"] = {"frames": outcome[0], "table": outcome[1],
                                              "horizons": sorted(horizons), "symbols": symbols}
@@ -99,5 +100,5 @@ if labels:
     if row[2].button("Add rule", disabled=portfolio):
         updated = research.add_pattern_to_rule(ui.spec_copy(), slot, chosen["module"], chosen["pattern"], side)
         ui.replace_spec(updated)
-        st.success(f"Added {chosen['pattern']} ({side}) to the {slot.replace('_', ' ')} rule. Open the Build page "
-                   "to see it in the preview.")
+        st.success(f"Added {chosen['pattern']} as a feature, and a condition on it ({side}) to the "
+                   f"{slot.replace('_', ' ')} rule, joined with and. Open the Build page to see it.")

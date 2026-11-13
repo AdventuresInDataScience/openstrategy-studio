@@ -1,6 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "GBPUSD Donchian breakout",
+  "setup": {
+    "kind": "signals",
+    "trading": "spreadbet"
+  },
   "data": {
     "symbols": [
       "GBPUSD=X"
@@ -11,7 +15,6 @@
   },
   "instruments": {
     "GBPUSD=X": {
-      "mode": "spreadbet",
       "asset_class": "fx",
       "point_size": 0.0001,
       "base_currency": "GBP",
@@ -26,44 +29,46 @@
   },
   "features": {
     "entry_high": {
-      "block": "highest",
-      "source": "high",
-      "window": {
-        "value": 20,
-        "opt": {
-          "min": 10,
-          "max": 60,
-          "int": true
-        }
+      "indicator": "talib:MAX",
+      "inputs": {
+        "close": "high"
+      },
+      "params": {
+        "timeperiod": 20
       }
     },
     "entry_low": {
-      "block": "lowest",
-      "source": "low",
-      "window": {
-        "value": 20,
-        "opt": {
-          "min": 10,
-          "max": 60,
-          "int": true
-        }
+      "indicator": "talib:MIN",
+      "inputs": {
+        "close": "low"
+      },
+      "params": {
+        "timeperiod": 20
       }
     },
     "exit_high": {
-      "block": "highest",
-      "source": "high",
-      "window": 10
+      "indicator": "talib:MAX",
+      "inputs": {
+        "close": "high"
+      },
+      "params": {
+        "timeperiod": 10
+      }
     },
     "exit_low": {
-      "block": "lowest",
-      "source": "low",
-      "window": 10
+      "indicator": "talib:MIN",
+      "inputs": {
+        "close": "low"
+      },
+      "params": {
+        "timeperiod": 10
+      }
     }
   },
   "rules": {
     "long_entry": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "price": "close"
           },
@@ -73,11 +78,12 @@
             "shift": 1
           }
         }
-      ]
+      },
+      "logic": "A"
     },
     "long_exit": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "price": "close"
           },
@@ -87,11 +93,12 @@
             "shift": 1
           }
         }
-      ]
+      },
+      "logic": "A"
     },
     "short_entry": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "price": "close"
           },
@@ -101,11 +108,12 @@
             "shift": 1
           }
         }
-      ]
+      },
+      "logic": "A"
     },
     "short_exit": {
-      "all": [
-        {
+      "conditions": {
+        "A": {
           "left": {
             "price": "close"
           },
@@ -115,7 +123,8 @@
             "shift": 1
           }
         }
-      ]
+      },
+      "logic": "A"
     }
   },
   "risk": {
@@ -124,14 +133,7 @@
     },
     "stop": {
       "kind": "fixed",
-      "points": {
-        "value": 80,
-        "opt": {
-          "min": 30,
-          "max": 200,
-          "int": true
-        }
-      }
+      "points": 80
     },
     "target": null
   },
@@ -141,5 +143,24 @@
   },
   "engine_extra": {
     "upon_opposite_entry": "reverse"
+  },
+  "optimise": {
+    "variables": {
+      "features.entry_high.params.timeperiod": {
+        "start": 10,
+        "stop": 60,
+        "step": 5
+      },
+      "features.entry_low.params.timeperiod": {
+        "start": 10,
+        "stop": 60,
+        "step": 5
+      },
+      "risk.stop.points": {
+        "start": 30,
+        "stop": 200,
+        "step": 17
+      }
+    }
   }
 }

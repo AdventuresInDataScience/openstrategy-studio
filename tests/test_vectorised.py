@@ -18,7 +18,7 @@ def test_eligibility(ma_spec, momentum_spec, shared_spec):
     ok, reason = engine.vectorisable(shared_spec, O.build_space(shared_spec))
     assert not ok and "shared account" in reason
     risky = copy.deepcopy(ma_spec)
-    risky["risk"]["stop"]["points"] = {"value": 60, "opt": {"min": 20, "max": 100, "int": True}}
+    risky["optimise"]["variables"]["risk.stop.points"] = {"start": 20, "stop": 100, "step": 10}
     ok, reason = engine.vectorisable(risky, O.build_space(risky))
     assert not ok and "risk.stop.points" in reason
     search = load_template("structure_search")
@@ -29,7 +29,7 @@ def test_eligibility(ma_spec, momentum_spec, shared_spec):
 def test_vectorised_equals_one_by_one(ma_spec, ohlcv):
     pytest.importorskip("vectorbtx")
     space = O.build_space(ma_spec)
-    params_list = [{"features.fast.window": fast, "features.slow.window": slow}
+    params_list = [{"features.fast.params.timeperiod": fast, "features.slow.params.timeperiod": slow}
                    for fast in (10, 30, 50) for slow in (100, 200)]
     trials = engine.run_vectorised(ma_spec, ohlcv, params_list)
     assert len(trials) == len(params_list)

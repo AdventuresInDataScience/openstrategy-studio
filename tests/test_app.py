@@ -112,13 +112,84 @@ def test_account_choices_write_the_spec(tmp_path, monkeypatch):
     app.session_state["spec"] = spec
     app.session_state["spec_rev"] = 0
     app.run()
-    app.radio(key="r0:account.cash").set_value("shared").run()
+    app.radio(key=current_key(app, "account.cash")).set_value("shared").run()
     account = app.session_state["spec"]["account"]
     assert account["cash"] == "shared" and account["when_cash_short"] == "skip"
-    app.radio(key="r0:account.entry_priority:by").set_value("feature").run()
+    app.radio(key=current_key(app, "account.entry_priority:by")).set_value("feature").run()
     priority = app.session_state["spec"]["account"]["entry_priority"]
     assert priority == {"by": "feature", "highest_first": True, "score": {"feature": "fast"}}
-    app.radio(key="r0:account.cash").set_value("per_instrument").run()
+    app.radio(key=current_key(app, "account.cash")).set_value("per_instrument").run()
     account = app.session_state["spec"]["account"]
     assert account["cash"] == "per_instrument" and "entry_priority" not in account and "when_cash_short" not in account
     assert not app.exception
+
+
+def current_key(app, suffix):
+    """A spec-bound widget's key: structural changes renew them (ui.renew_widgets), so read the revision."""
+    return f"r{app.session_state['spec_rev']}:{suffix}"
+
+
+def test_build_steps_edit_the_spec(tmp_path, monkeypatch):
+    """The Build page as a user drives it: the nested picker, a condition and the logic line, the two Setup questions."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    # Features: Indicator > Bands and channels > Keltner Channels, added under its own name.
+    app.selectbox(key="pick:category").set_value("Indicator").run()
+    app.selectbox(key="pick:family:Indicator").set_value("Bands and channels").run()
+    app.selectbox(key="pick:item:Indicator:Bands and channels").set_value("talib:KC").run()
+    app.button(key="pick:add").click().run()
+    assert not app.exception, [item.value for item in app.exception]
+    kc = app.session_state["spec"]["features"]["kc"]
+    assert kc["indicator"] == "talib:KC" and kc["params"] == {"timeperiod": 20, "atrperiod": 10, "nbdev": 2.0}
+    # The picker remembers where it was; the suggested name moves on.
+    assert app.selectbox(key="pick:family:Indicator").value == "Bands and channels"
+    # Rules: a second condition joins the logic line with "and", and the box shows it; a broken
+    # line says what is wrong.
+    app.button(key=current_key(app, "rules.long_entry:add:comparison")).click().run()
+    rule = app.session_state["spec"]["rules"]["long_entry"]
+    assert set(rule["conditions"]) == {"A", "B"} and rule["logic"] == "A and B"
+    assert app.text_input(key=current_key(app, "rules.long_entry:logic")).value == "A and B"
+    app.text_input(key=current_key(app, "rules.long_entry:logic")).set_value("A or B or").run()
+    assert any("ends too soon" in item.value for item in app.error)
+    app.text_input(key=current_key(app, "rules.long_entry:logic")).set_value("A or not B").run()
+    assert app.session_state["spec"]["rules"]["long_entry"]["logic"] == "A or not B"
+    # Removing B takes it out of the logic line too.
+    app.button(key=current_key(app, "rules.long_entry.conditions.B:remove")).click().run()
+    rule = app.session_state["spec"]["rules"]["long_entry"]
+    assert set(rule["conditions"]) == {"A"} and rule["logic"] == "A"
+    assert not app.exception
+    # Setup: how it is traded drops the fields that way of trading rejects; a portfolio replaces the rules.
+    app.radio(key=current_key(app, "setup.trading")).set_value("equity").run()
+    assert app.session_state["spec"]["setup"]["trading"] == "equity"
+    app.radio(key=current_key(app, "setup.kind")).set_value("portfolio").run()
+    spec = app.session_state["spec"]
+    assert spec["setup"]["kind"] == "portfolio" and "rules" not in spec
+    assert spec["schedule"]["rebalance"] == "never" and spec["weighting"]["scheme"] == "equal"
+    assert not any(path.startswith("rules.") for path in spec["optimise"]["variables"])
+    assert not app.exception, [item.value for item in app.exception]
+
+
+def test_optimise_variables_are_added_and_changed(tmp_path, monkeypatch):
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    picker = app.selectbox(key=current_key(app, "optimise:add"))
+    stop = next(option for option in picker.options if "Stop distance" in option)
+    picker.select_index(picker.options.index(stop)).run()
+    app.button(key=current_key(app, "optimise:add:go")).click().run()
+    variables = app.session_state["spec"]["optimise"]["variables"]
+    assert variables["risk.stop.points"] == {"start": 30.0, "stop": 120.0, "step": 9.0}
+    app.radio(key=current_key(app, "opt:risk.stop.points:how")).set_value("list").run()
+    assert app.session_state["spec"]["optimise"]["variables"]["risk.stop.points"]["values"][:2] == [30.0, 39.0]
+    assert not app.exception, [item.value for item in app.exception]

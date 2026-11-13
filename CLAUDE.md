@@ -11,6 +11,7 @@ uv run pytest -rs                # -rs lists skips; with every extra installed o
 uv run pytest tests/test_engine.py -x -q
 uv run openstrategy-studio       # the app; also: desktop, selfcheck, worker <dir>
 uv run openstrategy-studio selfcheck --quick
+uv run python -m openstrategy_studio.indicators   # rewrite indicator_catalogue.json after a TA-Lib, pandas-ta or ta_patterns bump
 ```
 
 Never `pip install`. Add dependencies with `uv add`.
@@ -19,7 +20,15 @@ Never `pip install`. Add dependencies with `uv add`.
 
 **Where we are.** Phase 0 is done and recorded in `docs/VERIFY.md`. It found 13 items that belong in vectorbtX (twelve bugs and one required feature, shared cash with an entry priority), listed in `docs/UPSTREAM.md`. **All 13 are fixed in vectorbtX `16293a2`**, and the Studio's workarounds for them are removed. Issue 14 (with an extra exit active, a stop was not checked on its entry bar) is fixed in `9f4cf54`. **Issues 15 to 19 are fixed in `9fa427e`, which `uv.lock` pins**: holding costs in the totals (15), holding costs per instrument in a shared account (16), borrowing without a margin loan and leverage on the replay path (17), the borrow fee on a direct short (18, a feature), and the per-instrument `financing` field, which was never read and is now reserved (19). `docs/upstream/vectorbtx_issues.py` reports 0 of 18 present.
 
-**Also done on 13 November 2026: the styling half of the redesign** (page themes, the stylesheet, matching charts; see "Next" item 1).
+**Also done on 13 November 2026: the redesign's styling, then the Build page's UX** (the owner's points, in "Next" item 1). Spec version 2, with no backward compatibility (the owner's call: still in development; the templates were converted):
+* **Setup asks two questions:** what is being built (`setup.kind`: trading on signals, or a portfolio; buy and hold is a portfolio that never rebalances, `schedule.rebalance = "never"`) and how it is traded (`setup.trading`: one vectorbtX mode for every instrument). The instrument grid shows only the fields that mode accepts, and sizing is labelled for it.
+* **The feature catalogue** (`indicators.py`, `indicator_catalogue.json`): every TA-Lib function but its candlesticks (176, TA-Lib 0.8), the pandas-ta-classic indicators TA-Lib lacks (69), every ta_patterns detector (295), and the Studio's own (MA envelopes, previous day/week/month, % offset, % band, distance, bars ago, bars since, Python). A nested picker (category, family, item) shows each entry's outputs; every input can read a price or another feature.
+* **Rules are lettered conditions and a logic line** (`and or xor nand nor xnor not`, brackets required where operators mix), with rule versions for structure search.
+* **Optimisation moved to the Optimise page's variables** (`spec.optimise.variables`, MT5-style start/step/stop or a list), any value: features, rule numbers, risk dials.
+* **Order timing** for intraday bars: entries good for the day, flat by the day's end (approximations, `docs/UPSTREAM.md` issue 20).
+* **The At a glance panel** (sticky, beside the Build form) and **a guide per page** in the sidebar (`help/*.md`).
+* Findings: ta_patterns' flag and pennant detectors look ahead (`docs/UPSTREAM.md` P1; left out of the catalogue). vectorbtX has no market-on-close or expiring orders (issue 20, a feature request). The RSI templates now trade less: TA-Lib's RSI is Wilder's, smoother than vectorbt's simple one.
+* `uv run pytest -rs`: 191 passed, 1 skipped (the bash check on Windows); both phase 3 gates and the golden numbers pass (TA-Lib's SMA reproduces them); `selfcheck` passes.
 
 **Done on 13 November 2026:** the Studio side of shared cash (issue 13: spec fields, `call_plan`, the Account tab's picker, per-account results, `vectorisable`), both currencies required on an FX instrument (issue 3), and the golden numbers from vectorbtX's `01_ma_cross_spreadbet_fx.py` (`tests/fixtures/golden/`, which the Studio's template matches exactly on real Yahoo data). Then the bump to `9fa427e`: the golden numbers regenerated on the same prices (`make_golden.py --offline`; only End Value and Total Return moved, by the summed carry), `borrow_rate` in the Build page's instrument grid and in `validate_spec` (equity mode only), the grid's financing column removed, and vectorbtX's warnings shown on the Backtest page. `uv run pytest -rs` gives 151 passed and 1 skipped (the bash installer check on Windows), both phase 3 gates pass, and `selfcheck` passes.
 
@@ -31,19 +40,21 @@ The owner's rule: behaviour that is wrong in vectorbtX gets fixed in vectorbtX a
 
 1. **The redesign** (the owner's call, 13 November 2026). The owner's original vision for the Build page was an fxDreema-style canvas of blocks and links; the implementation plan (section 6) swapped it for stage-by-stage forms, which is what was built. Two parts:
    * **Styling: done on 13 November 2026.** The look lives in `themes/` (one `.toml` per page theme, plus the one stylesheet `studio.css`) and `style.py`; see the invariant "The look lives in one place" below. Five themes: Daylight (default), Midnight, Paper, Nord, Terminal. The Settings page picks one, previews it and makes an editable copy in the user's themes folder. Charts default to "Match the page theme" (`analysis.PAGE_THEME`), and the pipeline diagram takes the theme's colours. Checked in Edge (headless, 1440x900) on Home, Build (with its Pipeline tab), Backtest and Settings in all five themes, and on Data, Optimise, Results and Patterns in Midnight. Not done: page layout (Home is still the plain two-column page); `st.navigation` (icons and sections in the sidebar), which would move the entry point off `app/Home.py`; and the Build preview chart's long title, which runs into its legend in a narrow column whatever the theme (`fig_preview` and `finish`'s legend placement).
-   * **A blocks-and-links canvas** for features and rules, as another view of the same spec (like the Expression view): the spec is already a graph (feature `source` refs, rule trees, the four signal slots). Typed ports (number series vs true/false), so only compilable links can be drawn. Start with a spike: a Streamlit custom component (`streamlit-flow-component` on React Flow, or `barfi` on Rete.js; ⚠️ VERIFY both against Streamlit 1.67) and a round-trip test that a spec goes onto the canvas and back unchanged. Style it from the page theme's tokens (`style.load_theme`), as the pipeline diagram is.
+   * **The Build page's UX: done on 13 November 2026** (above). Next from the owner: ⓘ tooltips on every setting (Streamlit's `help=`), and more points to come.
+   * **A blocks-and-links canvas** for features and rules: the owner asked to judge first whether the logic line and the At a glance panel make it unnecessary. If built, it is another view of the same spec: feature inputs are the links, conditions and logic the rule side. Typed ports (number series vs true/false), so only compilable links can be drawn. Start with a spike: a Streamlit custom component (`streamlit-flow-component` on React Flow, or `barfi` on Rete.js; ⚠️ VERIFY both against Streamlit 1.67) and a round-trip test that a spec goes onto the canvas and back unchanged. Style it from the page theme's tokens (`style.load_theme`), as the pipeline diagram is.
+   * Small follow-ups: the Build preview chart's long title runs into its legend in its column; `st.navigation` for sidebar icons and sections.
 2. **Still open from phase 0:** `data.apply_mapping` against a real MT4/MT5 export, and the installers on a clean machine (`docs/PACKAGING.md`).
 
 ## Layout (one module per concept)
 
 | File | Concept |
 |---|---|
-| `spec.py` | The strategy spec (a plain dict): validate_spec, apply_params, choices, JSON, hashing |
-| `blocks.py` | `BLOCKS`: every feature block's params, compile function and export snippet |
+| `spec.py` | The strategy spec (version 2, a plain dict): validate_spec, tunable_inputs, apply_params, choices, JSON, hashing |
+| `indicators.py`, `indicator_catalogue.json` | The feature catalogue: menu placement and exclusions (dict literals), the generated snapshot, compute and its export source |
 | `compile.py` | compile_signals, compile_weights, export_script (code generation) |
 | `engine.py` | call_plan (pure) and run_backtest, vectorisable, run_vectorised: **the only importer of vectorbtx** |
 | `exit_rules.py` | Numba templates for the time stop, breakeven and step trailing |
-| `expressions.py` | Text to and from the rule tree (whitelisted `ast`, never `eval`) |
+| `expressions.py` | The logic line (a tokenizer and recursive descent, never `eval`), conditions in words, the At a glance summary |
 | `data.py` | Normalise, validate, import, store, load, synthetic data |
 | `store.py` | The SQLite index of datasets, runs and jobs |
 | `config.py` | settings.toml, environment, `OPENSTRATEGY_STUDIO_HOME` |
@@ -52,7 +63,8 @@ The owner's rule: behaviour that is wrong in vectorbtX gets fixed in vectorbtX a
 | `optimise.py` | Spaces (flat or conditional), metrics, backends, walk-forward, stability, DSR, backend comparison |
 | `jobs.py`, `worker.py` | Background jobs (files on disk, a detached process) |
 | `research.py` | Pattern research |
-| `ui.py` | Streamlit helpers: spec-bound widgets, the rule builder, guarded runs |
+| `ui.py` | Streamlit helpers: spec-bound widgets, the feature picker and editor, the rule editor, the glance panel, page help, guarded runs |
+| `help/*.md` | The sidebar guide for each page (packaged, so easy to edit) |
 | `cli.py`, `desktop.py`, `selfcheck.py` | The command line, the webview window, the phase 4 gate |
 | `app/Home.py`, `app/pages/*.py` | Thin pages: no business logic |
 
@@ -70,7 +82,13 @@ UI text: sentence case, plain verbs, and errors that say what to do. No ALL-CAPS
 ## Invariants: do not break these
 
 * **One source of truth.** `st.session_state["spec"]` is the spec. Widgets are seeded from it on every run and write back through `ui.set_value`. Keys come from `ui.key(path)`, which includes a revision number that `ui.replace_spec` bumps.
-* **The compiler never sees optimisation markup.** `apply_params` strips every `{"value", "opt"}` node and resolves every `{"choose", "options"}` node.
+* ⚠️ **A structural change renews every widget.** Adding or removing a condition, a feature or a variable, or switching a kind, calls `ui.renew_widgets` (inside `ui.rerun_after`): Streamlit keeps a keyed widget's own state, so without it the logic line keeps its old text and a reused letter shows (and writes back) a deleted condition's settings. `tests/test_app.py::test_build_steps_edit_the_spec` drives this.
+* **Every value is a literal; ranges live in `optimise.variables` only,** keyed by the value's dotted path. `apply_params` writes a trial's values at those paths, drops `optimise`, and resolves every `{"choose", "options"}`, so the compiler never sees a range. Write variables directly (their keys contain dots), never through `set_path`.
+* **One trading mode per strategy.** `setup.trading` is the vectorbtX mode; instruments carry none (`validate_spec` rejects one), and `engine.instrument_fields` adds it. A universe file keeps its own modes.
+* **Every feature comes from the catalogue.** `indicator_catalogue.json` is generated, never edited: change the dict literals in `indicators.py` and rerun `python -m openstrategy_studio.indicators`; `tests/test_indicators.py` fails when the snapshot and the libraries disagree. Patterns come from ta_patterns only. pandas-ta's `offset` is never shown (a negative one is lookahead).
+* ⚠️ **No catalogue entry looks ahead.** `test_no_entry_looks_ahead` computes every entry on full, truncated and different-future data; a failure goes to `EXCLUDED` with its reason (and upstream when it is a library's bug), never into the menu.
+* **The logic line is parsed, never evaluated,** and brackets are required where two different operators meet. Every condition must appear in it.
+* **Order timing masks signals on their own bar** (good for the day, flat by the day's end): never a shift. They are approximations until vectorbtX has the orders (`docs/UPSTREAM.md` issue 20).
 * **The compiler shifts no signal.** The front door shifts entries, exits, short entries, short exits and the schedule to the next bar's open itself (vectorbtX `16293a2`). A shift in `compile_signals` or `export_script` would delay them two bars.
 * **Always the four-array form.** Never `direction="both"`.
 * **Stops are measured from the fill, pay the spread, and are checked on the entry bar.** vectorbtX's front door sets `stop_entry_price="price"` and `stop_exit_price="stopmarket"` and splits each bar into its open and the rest of the bar whenever a stop or target is active. `call_plan` must not pass either price; vectorbt's own defaults anchor stops at the entry bar's close and fill them with no slippage. The extra exits' callbacks run on the split bars too, through vectorbtX's bar view (called once per bar at the open, with bar indices): ⚠️ keep `exit_rules.py` templates written for whole bars, indexing their own arrays by `c.i`.
@@ -103,7 +121,8 @@ Use plain pytest functions with no classes or mocking frameworks, and no network
 
 ## Known gaps
 
-* The instrument grid cannot grey out individual cells, so it warns about fields a mode rejects instead.
+* The instrument grid shows only the fields the strategy's trading mode accepts; it still cannot grey out single cells.
 * Cap weighting and long/short selection are not offered: there is no market-cap source, and negative weights are unverified.
-* Conditional spaces work with BUTChC and Optuna only; the other backends fix alternatives at their current choice.
+* Conditional spaces work with BUTChC and Optuna only; the other backends fix a rule at its version in use.
+* Only the grid uses a variable's step; the other searchers pick any value in the range (whole numbers for a whole-number setting).
 * The PyInstaller bundle is a spike (`docs/PACKAGING.md`). The first-run installer is the shipped route.

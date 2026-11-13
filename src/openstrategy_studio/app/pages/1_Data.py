@@ -13,6 +13,7 @@ from openstrategy_studio import data as D, store, ui
 from openstrategy_studio.spec import TIMEFRAMES
 
 settings, data_dir = ui.boot("Data")
+ui.page_help("data")
 st.title("Data")
 st.caption("All data is bar data (1 minute to weekly). Tick data is not supported.")
 

@@ -24,11 +24,16 @@ dependencies = [
     "ta_patterns>=1.2.1",
     "butchc>=0.6.1",
     "optuna>=4",
-    "scipy>=1.15",          # rng= replaces seed= in qmc and optimize
+    "scipy>=1.15", # rng= replaces seed= in qmc and optimize
     "plotly-themes>=0.1.0",
     "yfinance",
     "pyarrow",
     "platformdirs",
+    # The indicator catalogue (indicators.py): two of the libraries vectorbt's own `full`
+    # extra names (its third, `ta`, has nothing these two lack). TA-Lib 0.8 ships binary
+    # wheels (no C build) and has 237 functions. Patterns come from ta_patterns only.
+    "ta-lib>=0.8.3",
+    "pandas-ta-classic>=0.9.0",
 ]
 
 [project.optional-dependencies]

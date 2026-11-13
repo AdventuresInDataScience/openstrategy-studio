@@ -1,227 +1,335 @@
-"""The expression editor: text such as ``rsi(14) < 30 and close > ma(200)``.
+"""Text forms of a strategy: a rule's logic line, its conditions in words, and the At a glance summary.
 
-Text is parsed with ast.parse(mode="eval") and walked against a whitelist of
-node types, names and functions; anything else is rejected with a message.
-⚠️ Raw text is NEVER evaluated.
+The logic line combines a rule's lettered conditions, for example
+``(A and (B or C)) and not D``.
 
-It converts to and from the rule tree, so the builder and the text edit one
-spec. An indicator call such as ``ma(200)`` becomes a feature named ``ma_200``
-(added to the spec's features if missing); a feature with such a name is
-written back as the call.
+    and, or, xor, nand, nor, xnor    between two letters (or bracketed groups)
+    not                              in front of a letter or a group
+    ( )                              grouping
 
-Grammar
-    a and b, a or b, not a              all / any / not
-    a > b, a < b, a >= b, a <= b        comparisons (chains become "all")
-    crosses_above(a, b), crosses_below(a, b), between(x, lo, hi)
-    rising(x, n), falling(x, n)
-    x[n]                                the value n bars ago
-    fast, bb.upper, close, 30           a feature, a feature output, a price, a constant
-    ma(50), ema(20), rsi(14), bbands(20).upper, momentum(126) ...
-    pattern("hammer", side="bullish", module="candle", shadow_factor=1.5)
-    session("07:00", "16:00"), weekday(0, 1, 2, 3, 4), month(1, 2, 3)
+⚠️ Brackets are required wherever two different operators meet at one level:
+"A and B or C" is refused, with a message asking which was meant. There are no
+precedence rules to remember (the owner's call: explicit is always better).
+
+One operator repeated chains: ``A and B and C``. Over three or more:
+* xor is true when an odd number are true (as Python's ^ chains), xnor is its
+  opposite,
+* nand is "not all of them", nor is "none of them".
+
+Parsing is a small tokenizer and a recursive descent over the letters and these
+words, so text is never evaluated.
 """
 
-import ast
+import re
 
-from .blocks import BLOCKS, block_defaults
-from .spec import PRICE_FIELDS, value_of
+LOGIC_OPS = ["and", "or", "xor", "nand", "nor", "xnor"]
+LOGIC_WORDS = {"and": "all are true", "or": "any is true", "xor": "an odd number are true",
+               "nand": "not all are true", "nor": "none is true", "xnor": "an even number are true"}
 
-ALIASES = {"sma": ("ma", {"ewm": False}), "ema": ("ma", {"ewm": True})}
-OPERATORS = {ast.Gt: ">", ast.Lt: "<", ast.GtE: ">=", ast.LtE: "<="}
-ALLOWED = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not, ast.USub, ast.Compare, ast.Gt,
-           ast.Lt, ast.GtE, ast.LtE, ast.Call, ast.Name, ast.Load, ast.Constant, ast.Attribute, ast.Subscript,
-           ast.keyword)
-
-
-def _numeric_params(block_name):
-    """The block's numeric parameters in declaration order: the positional arguments of a call."""
-    return [key for key, declaration in BLOCKS[block_name]["params"].items()
-            if declaration["type"] in ("int", "float")]
+OP_WORDS = {">": "is above", "<": "is below", ">=": "is at or above", "<=": "is at or below",
+            "crosses_above": "crosses above", "crosses_below": "crosses below", "between": "is between",
+            "rising": "is rising over", "falling": "is falling over"}
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+TRADING_WORDS = {"equity": "bought outright", "cfd": "CFDs", "spreadbet": "spread bets", "fx_spot": "FX spot"}
 
 
-def auto_name(block_name, params):
-    numbers = [str(value_of(params[key])).replace(".", "_") for key in _numeric_params(block_name) if key in params]
-    prefix = "ema" if block_name == "ma" and value_of(params.get("ewm")) else block_name
-    return "_".join([prefix] + numbers)
+# ---------------------------------------------------------------------------
+# The logic line
+# ---------------------------------------------------------------------------
 
-
-def _constant(node):
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float, str)) \
-            and not isinstance(node.value, bool):
-        return node.value
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant):
-        return -node.operand.value
-    raise ValueError(f"Expected a number or text, found '{ast.unparse(node)}'.")
-
-
-def parse(text, features):
-    """(rule tree, new features to add) from expression text. Raises ValueError on anything unsupported."""
-    try:
-        tree = ast.parse(text.strip(), mode="eval")
-    except SyntaxError as error:
-        raise ValueError(f"That expression does not parse: {error.msg} (column {error.offset}).") from None
-    for node in ast.walk(tree):
-        if not isinstance(node, ALLOWED):
-            raise ValueError(f"'{type(node).__name__}' is not allowed in an expression.")
-    new_features = {}
-
-    def feature_call(call):
-        name = call.func.id
-        block, fixed = ALIASES.get(name, (name, {}))
-        if block not in BLOCKS or block in ("pattern", "python"):
-            raise ValueError(f"'{name}' is not an indicator.")
-        feature = block_defaults(block)
-        feature.update(fixed)
-        for key, argument in zip(_numeric_params(block), call.args):
-            feature[key] = _constant(argument)
-        if len(call.args) > len(_numeric_params(block)):
-            raise ValueError(f"{name}() takes at most {len(_numeric_params(block))} numbers.")
-        for keyword in call.keywords:
-            if keyword.arg not in BLOCKS[block]["params"]:
-                raise ValueError(f"{name}() has no setting '{keyword.arg}'.")
-            feature[keyword.arg] = _constant(keyword.value)
-        feature_name = auto_name(block, feature)
-        existing = features.get(feature_name) or new_features.get(feature_name)
-        if existing is not None and {k: value_of(v) for k, v in existing.items()} != feature:
-            raise ValueError(f"A different feature is already called '{feature_name}'.")
-        if existing is None:
-            new_features[feature_name] = feature
-        return feature_name
-
-    def ref(node):
-        shift = 0
-        if isinstance(node, ast.Subscript):
-            shift = _constant(node.slice)
-            if not isinstance(shift, int) or shift < 0:
-                raise ValueError("x[n] needs a whole number n of bars ago (0 or more).")
-            node = node.value
-        if isinstance(node, (ast.Constant, ast.UnaryOp)):
-            out = {"const": _constant(node)}
-        elif isinstance(node, ast.Name) and node.id in PRICE_FIELDS:
-            out = {"price": node.id}
-        elif isinstance(node, ast.Name):
-            if node.id not in features and node.id not in new_features:
-                raise ValueError(f"There is no feature called '{node.id}'.")
-            out = {"feature": node.id}
-        elif isinstance(node, ast.Attribute):
-            base = node.value
-            name = feature_call(base) if isinstance(base, ast.Call) else getattr(base, "id", None)
-            if name is None or (name not in features and name not in new_features):
-                raise ValueError(f"'{ast.unparse(base)}' is not a feature.")
-            out = {"feature": name, "output": node.attr}
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            out = {"feature": feature_call(node)}
+def _tokens(text):
+    tokens = []
+    for piece in re.findall(r"\(|\)|[A-Za-z]+|\S+", text or ""):
+        if piece in ("(", ")"):
+            tokens.append(piece)
+        elif piece.lower() in LOGIC_OPS or piece.lower() == "not":
+            tokens.append(piece.lower())
+        elif piece.isalpha() and piece.isupper():
+            tokens.append(piece)
         else:
-            raise ValueError(f"'{ast.unparse(node)}' is not a feature, a price or a number.")
-        if shift:
-            out["shift"] = shift
-        return out
+            raise ValueError(f"'{piece}' is not a condition letter, a bracket or one of and, or, xor, nand, nor, "
+                             "xnor, not.")
+    return tokens
 
-    def rule(node):
-        if isinstance(node, ast.BoolOp):
-            return {"all" if isinstance(node.op, ast.And) else "any": [rule(value) for value in node.values]}
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return {"not": rule(node.operand)}
-        if isinstance(node, ast.Compare):
-            parts = []
-            left = node.left
-            for op, right in zip(node.ops, node.comparators):
-                parts.append({"left": ref(left), "op": OPERATORS[type(op)], "right": ref(right)})
-                left = right
-            return parts[0] if len(parts) == 1 else {"all": parts}
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            name = node.func.id
-            args = node.args
-            keywords = {keyword.arg: keyword.value for keyword in node.keywords}
-            if name in ("crosses_above", "crosses_below") and len(args) == 2:
-                return {"left": ref(args[0]), "op": name, "right": ref(args[1])}
-            if name == "between" and len(args) == 3:
-                return {"left": ref(args[0]), "op": "between", "lower": ref(args[1]), "upper": ref(args[2])}
-            if name in ("rising", "falling") and len(args) in (1, 2):
-                return {"left": ref(args[0]), "op": name, "bars": _constant(args[1]) if len(args) == 2 else 1}
-            if name == "pattern" and len(args) == 1:
-                leaf = {"pattern": _constant(args[0]), "module": "candle", "side": "either", "params": {}}
-                for key, value in keywords.items():
-                    if key in ("side", "module"):
-                        leaf[key] = _constant(value)
-                    elif isinstance(value, ast.Constant) and isinstance(value.value, bool):
-                        leaf["params"][key] = value.value
-                    else:
-                        leaf["params"][key] = _constant(value)
-                return leaf
-            if name == "session" and len(args) == 2:
-                return {"filter": "session", "from": _constant(args[0]), "to": _constant(args[1])}
-            if name == "weekday":
-                return {"filter": "weekday", "days": [_constant(arg) for arg in args]}
-            if name == "month":
-                return {"filter": "month", "months": [_constant(arg) for arg in args]}
-            raise ValueError(f"'{name}(...)' is not a condition. Compare it with something, "
-                             "or use crosses_above, between, rising, pattern ...")
-        raise ValueError(f"'{ast.unparse(node)}' is not a condition.")
 
-    return rule(tree.body), new_features
+def parse_logic(text):
+    """The logic line as a tree: a letter, {"not": tree}, or {"op": op, "args": [trees]}.
+
+    Raises ValueError with a message that says what to change.
+    """
+    tokens = _tokens(text)
+    if not tokens:
+        raise ValueError("write which conditions must hold, such as A and B.")
+    position = 0
+
+    def peek():
+        return tokens[position] if position < len(tokens) else None
+
+    def take():
+        nonlocal position
+        position += 1
+        return tokens[position - 1]
+
+    def operand():
+        token = peek()
+        if token is None:
+            raise ValueError("it ends too soon: a letter or a bracket is missing at the end.")
+        if token == "not":
+            take()
+            return {"not": operand()}
+        if token == "(":
+            take()
+            tree = expression()
+            if peek() != ")":
+                raise ValueError("a bracket is opened and never closed.")
+            take()
+            return tree
+        if token in LOGIC_OPS or token == ")":
+            raise ValueError(f"'{token}' needs a letter or a bracketed group before it.")
+        return take()
+
+    def expression():
+        first = operand()
+        args, op = [first], None
+        while peek() in LOGIC_OPS:
+            this = take()
+            if op is not None and this != op:
+                raise ValueError(f"'{op}' and '{this}' meet without brackets. Add brackets to say which comes "
+                                 f"first, for example ({' '.join(['A', op, 'B'])}) {this} C.")
+            op = this
+            args.append(operand())
+        if op is None:
+            return first
+        return {"op": op, "args": args}
+
+    tree = expression()
+    if peek() is not None:
+        token = peek()
+        raise ValueError("a bracket is closed that was never opened." if token == ")"
+                         else f"'{token}' follows without an operator between; add and, or ... before it.")
+    return tree
+
+
+def logic_letters(tree):
+    if isinstance(tree, str):
+        return {tree}
+    if "not" in tree:
+        return logic_letters(tree["not"])
+    found = set()
+    for arg in tree["args"]:
+        found |= logic_letters(arg)
+    return found
+
+
+def logic_text(tree, top=True):
+    """A tree back to text, bracketing every group below the top."""
+    if isinstance(tree, str):
+        return tree
+    if "not" in tree:
+        inner = tree["not"]
+        return "not " + (logic_text(inner, top=False) if isinstance(inner, str) or "not" in inner
+                         else f"({logic_text(inner)})")
+    text = f" {tree['op']} ".join(logic_text(arg, top=False) for arg in tree["args"])
+    return text if top else f"({text})"
+
+
+def next_letter(existing):
+    """The first free condition letter: A ... Z, then AA, AB ..."""
+    index = 0
+    while True:
+        name, value = "", index
+        while True:
+            name = chr(ord("A") + value % 26) + name
+            value = value // 26 - 1
+            if value < 0:
+                break
+        if name not in existing:
+            return name
+        index += 1
+
+
+def append_letter(logic, letter, op="and"):
+    """The logic line with a new condition joined on with `op`."""
+    if not (logic or "").strip():
+        return letter
+    try:
+        tree = parse_logic(logic)
+    except ValueError:
+        return f"{logic} {op} {letter}"
+    if isinstance(tree, dict) and tree.get("op") == op:
+        return f"{logic} {op} {letter}"
+    if isinstance(tree, str) or "not" in tree:
+        return f"{logic} {op} {letter}"
+    return f"({logic}) {op} {letter}"
+
+
+def remove_letter(logic, letter):
+    """The logic line without one condition; "" when nothing is left. A broken line is returned as it was."""
+    try:
+        tree = parse_logic(logic)
+    except ValueError:
+        return logic
+
+    def drop(node):
+        if isinstance(node, str):
+            return None if node == letter else node
+        if "not" in node:
+            inner = drop(node["not"])
+            return None if inner is None else {"not": inner}
+        args = [kept for kept in (drop(arg) for arg in node["args"]) if kept is not None]
+        if not args:
+            return None
+        return args[0] if len(args) == 1 else {"op": node["op"], "args": args}
+
+    kept = drop(tree)
+    return "" if kept is None else logic_text(kept)
 
 
 # ---------------------------------------------------------------------------
-# Rule tree -> text
+# Conditions in words
 # ---------------------------------------------------------------------------
 
-def _ref_text(ref, features):
-    if "const" in ref:
-        text = repr(value_of(ref["const"]))
+def ref_text(ref):
+    if not isinstance(ref, dict):
+        return "?"
+    if "feature" in ref:
+        text = ref["feature"] + (f".{ref['output']}" if ref.get("output") else "")
     elif "price" in ref:
         text = ref["price"]
     else:
-        name = ref["feature"]
-        feature = features.get(name)
-        text = name
-        if feature is not None and feature.get("block") in BLOCKS and name == auto_name(feature["block"], feature):
-            # Written back as the call it came from.
-            block = feature["block"]
-            numbers = ", ".join(repr(value_of(feature[key])) for key in _numeric_params(block) if key in feature)
-            call = "ema" if block == "ma" and value_of(feature.get("ewm")) else block
-            text = f"{call}({numbers})"
-        if ref.get("output"):
-            text += f".{ref['output']}"
-    if ref.get("shift"):
-        text += f"[{int(value_of(ref['shift']))}]"
-    return text
+        value = ref.get("const")
+        text = f"{value:g}" if isinstance(value, float) else str(value)
+    shift = int(ref.get("shift", 0) or 0)
+    return f"{text} {shift} bar{'s' if shift != 1 else ''} ago" if shift else text
 
 
-def to_text(node, features, top=True):
-    """Expression text for a rule tree (the inverse of parse, up to feature naming)."""
-    if node is None:
-        return ""
-    if "choose" in node:
-        raise ValueError("Alternatives have no text form; edit them in the builder.")
-    for key, joiner in (("all", " and "), ("any", " or ")):
-        if key in node:
-            parts = [to_text(child, features, top=False) for child in node[key]]
-            text = joiner.join(parts)
-            return text if top or len(parts) == 1 else f"({text})"
-    if "not" in node:
-        return f"not {to_text(node['not'], features, top=False)}"
-    if "pattern" in node:
-        extras = [f"side={node.get('side', 'either')!r}", f"module={node.get('module', 'candle')!r}"]
-        extras += [f"{key}={value_of(value)!r}" for key, value in (node.get("params") or {}).items()]
-        return f"pattern({node['pattern']!r}, {', '.join(extras)})"
-    if "filter" in node:
-        kind = node["filter"]
-        if kind == "session":
-            return f"session({node['from']!r}, {node['to']!r})"
+def condition_text(condition):
+    """One condition in words: 'fast crosses above slow', 'hammer appears (bullish)'."""
+    if "pattern" in condition:
+        side = condition.get("side", "either")
+        return f"{condition['pattern']} appears" + ("" if side == "either" else f" ({side})")
+    if "filter" in condition:
+        kind = condition["filter"]
         if kind == "weekday":
-            return f"weekday({', '.join(map(str, node['days']))})"
+            return "on " + ", ".join(DAY_NAMES[day] for day in condition.get("days", []))
         if kind == "month":
-            return f"month({', '.join(map(str, node['months']))})"
-        raise ValueError("The higher-timeframe filter has no text form; edit it in the rule builder.")
-    op = node["op"]
-    left = _ref_text(node["left"], features)
-    if node.get("shift"):
-        raise ValueError("A whole-condition shift has no text form; shift the values instead (x[1]).")
-    if op in ("crosses_above", "crosses_below"):
-        return f"{op}({left}, {_ref_text(node['right'], features)})"
+            return "in " + ", ".join(MONTH_NAMES[month - 1] for month in condition.get("months", []))
+        if kind == "session":
+            return f"between {condition.get('from')} and {condition.get('to')} UTC"
+        comparison = {key: condition[key] for key in ("left", "op", "right", "lower", "upper", "bars")
+                      if key in condition}
+        return f"on {condition.get('timeframe')} bars, {condition_text(comparison)}"
+    op = condition.get("op")
+    left = ref_text(condition.get("left"))
     if op == "between":
-        return f"between({left}, {_ref_text(node['lower'], features)}, {_ref_text(node['upper'], features)})"
+        return f"{left} is between {ref_text(condition.get('lower'))} and {ref_text(condition.get('upper'))}"
     if op in ("rising", "falling"):
-        return f"{op}({left}, {int(value_of(node.get('bars', 1)))})"
-    return f"{left} {op} {_ref_text(node['right'], features)}"
+        bars = condition.get("bars", 1)
+        return f"{left} {OP_WORDS[op]} {bars} bar{'s' if bars != 1 else ''}"
+    return f"{left} {OP_WORDS.get(op, op)} {ref_text(condition.get('right'))}"
+
+
+# ---------------------------------------------------------------------------
+# At a glance
+# ---------------------------------------------------------------------------
+
+def _number(value):
+    if isinstance(value, float):
+        return f"{value:,.4g}"
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
+def _rule_rows(label, rule):
+    rows = []
+    if rule is None:
+        return rows
+    if "choose" in rule and "options" in rule:
+        rows.append((label, f"version {rule['choose']} of {', '.join(rule['options'])}"))
+        rule = rule["options"][rule["choose"]]
+    else:
+        rows.append((label, rule.get("logic") or "(no logic line)"))
+    for letter, condition in (rule.get("conditions") or {}).items():
+        rows.append((f"  {letter}", condition_text(condition)))
+    return rows
+
+
+def summary(spec):
+    """The strategy as (label, text) rows, for the Build page's At a glance panel."""
+    from .indicators import describe
+    from .spec import SLOT_LABELS, strategy_kind, trading_mode, variables
+
+    rows = []
+    data = spec.get("data") or {}
+    rows.append(("Market", f"{', '.join(data.get('symbols') or [])} · {data.get('timeframe')} · "
+                           f"{data.get('start')} to {data.get('end')}"))
+    kind = strategy_kind(spec)
+    rows.append(("Trades", f"{'on signals' if kind == 'signals' else 'a portfolio'}, "
+                           f"{TRADING_WORDS.get(trading_mode(spec), trading_mode(spec))}"))
+    for name, feature in (spec.get("features") or {}).items():
+        rows.append(("Feature", f"{name} = {describe(feature)}"))
+    if kind == "signals":
+        for slot, label in SLOT_LABELS.items():
+            rows += _rule_rows(label, (spec.get("rules") or {}).get(slot))
+        risk = spec.get("risk") or {}
+        parts = []
+        for key, value in (risk.get("sizing") or {}).items():
+            parts.append({"risk_pct": f"risk {value:.2%} a trade" if isinstance(value, (int, float)) else str(value),
+                          "risk_amount": f"risk {_number(value)} a trade", "stake": f"stake {_number(value)}",
+                          "notional": f"positions of {_number(value)}", "size": f"size {_number(value)}"}[key])
+        stop = risk.get("stop") or {}
+        if stop.get("kind") in ("fixed", "trailing"):
+            parts.append(f"{stop['kind']} stop {_number(stop['points'])} pts")
+        if risk.get("target"):
+            parts.append(f"target {_number(risk['target']['points'])} pts")
+        exits = risk.get("exits") or {}
+        if exits.get("time_bars") is not None:
+            parts.append(f"out after {exits['time_bars']} bars")
+        if exits.get("breakeven_points") is not None:
+            parts.append(f"breakeven at {_number(exits['breakeven_points'])} pts")
+        if exits.get("step_points") is not None:
+            parts.append(f"step {_number(exits['step_points'])} pts")
+        orders = risk.get("orders") or {}
+        if orders.get("good_for_day"):
+            parts.append("entries good for the day")
+        if orders.get("flat_by_day_end"):
+            parts.append("flat by the day's end")
+        rows.append(("Risk", " · ".join(parts) or "no sizing set"))
+    else:
+        selection = spec.get("selection")
+        if selection:
+            how = (f"{selection.get('mode', 'top')} {selection.get('top_n')}" if selection.get("mode", "top")
+                   in ("top", "bottom") else f"score at least {selection.get('min_score')}")
+            rows.append(("Selection", f"{how} by {ref_text(selection.get('score'))}"))
+        weighting = spec.get("weighting") or {}
+        rows.append(("Weighting", str(weighting.get("scheme"))))
+        schedule = spec.get("schedule") or {}
+        rebalance = schedule.get("rebalance")
+        if rebalance == "calendar":
+            calendar = schedule.get("calendar") or {}
+            text = f"every {calendar.get('freq')} ({calendar.get('on', 'first')} day)"
+            if schedule.get("threshold") is not None:
+                text += f" {schedule.get('combine', 'and')} drift over {schedule['threshold']}"
+        else:
+            text = {"never": "never (buy and hold)", "every_bar": "every bar"}.get(rebalance, str(rebalance))
+        rows.append(("Rebalance", text))
+    account = spec.get("account") or {}
+    text = f"{_number(account.get('init_cash'))}"
+    if account.get("base_currency"):
+        text += f" in {account['base_currency']}"
+    if account.get("rates"):
+        text += f" · rates: {account['rates'].get('source')}"
+    if account.get("cash") == "shared" and kind == "signals":
+        text += " · one shared account"
+    rows.append(("Account", text))
+    found = variables(spec)
+    if found:
+        rows.append(("Optimise", f"{len(found)} variable{'s' if len(found) != 1 else ''}"))
+        for path, variable in found.items():
+            span = (", ".join(map(_number, variable["values"])) if "values" in variable else
+                    f"{_number(variable.get('start'))} to {_number(variable.get('stop'))}"
+                    + (f" step {_number(variable['step'])}" if variable.get("step") else ""))
+            rows.append(("  ", f"{path.replace('features.', '').replace('.params', '')}: {span}"))
+    return rows

@@ -24,6 +24,11 @@ from openstrategy_studio import engine, exit_rules as X
 from openstrategy_studio.compile import export_script
 from openstrategy_studio.spec import apply_params, validate_spec
 
+
+def one(condition):
+    """A rule of one condition: the shape every rule slot takes (conditions and a logic line)."""
+    return {"conditions": {"A": condition}, "logic": "A"}
+
 NAN = float("nan")
 
 
@@ -197,7 +202,9 @@ def test_call_plan_wiring(ma_spec):
 
 
 def test_optimisable_exit_settings(ma_spec):
-    spec = exits_spec(ma_spec, time_bars={"value": 10, "opt": {"min": 5, "max": 40, "int": True}})
+    spec = exits_spec(ma_spec, time_bars=10)
+    spec["optimise"]["variables"]["risk.exits.time_bars"] = {"start": 5, "stop": 40, "step": 5}
+    assert validate_spec(spec) == []
     assert X.exit_settings(apply_params(spec, {"risk.exits.time_bars": 25}))["time_bars"] == 25.0
 
 
@@ -226,12 +233,12 @@ def gate_spec(exits, stop_points, side="long"):
     # tests/test_engine.py::test_spread_is_paid_on_every_fill.
     code = "out = close * 0.0\nout.iloc[0] = 1.0\nreturn out"
     rules = {"long_entry": None, "long_exit": None, "short_entry": None, "short_exit": None}
-    rules[f"{side}_entry"] = {"left": {"feature": "pulse"}, "op": ">", "right": {"const": 0.5}}
-    return {"version": 1, "name": "gate", "data": {"symbols": ["X"], "timeframe": "1d", "start": "2000-01-01",
-                                                    "end": "2100-01-01"},
-            "instruments": {"X": {"mode": "equity", "point_size": 1.0, "quote_currency": "USD", "cost_currency": "USD",
+    rules[f"{side}_entry"] = one({"left": {"feature": "pulse"}, "op": ">", "right": {"const": 0.5}})
+    return {"version": 2, "name": "gate", "setup": {"kind": "signals", "trading": "equity"},
+            "data": {"symbols": ["X"], "timeframe": "1d", "start": "2000-01-01", "end": "2100-01-01"},
+            "instruments": {"X": {"point_size": 1.0, "quote_currency": "USD", "cost_currency": "USD",
                                   "spread_points": 0.0}},
-            "features": {"pulse": {"block": "python", "code": code}}, "rules": rules,
+            "features": {"pulse": {"indicator": "studio:python", "inputs": {}, "params": {"code": code}}}, "rules": rules,
             "risk": {"sizing": {"size": 1}, "stop": {"kind": "fixed", "points": stop_points}, "exits": exits},
             "account": {"init_cash": 10_000, "freq": "D"}}
 
