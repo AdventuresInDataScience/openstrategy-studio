@@ -347,9 +347,19 @@ with form:
                    "transforms, computed on every bar. Each output is a line you can use, such as bb.upperband.")
         for feature_name, item in list(features.items()):
             entry = indicators.catalogue().get(item.get("indicator"))
-            title = f"{feature_name}: {entry['label'] if entry else item.get('indicator')} · {indicators.describe(item)}"
-            with st.expander(title):
+            described = indicators.describe(item)
+            title = f"{feature_name}: {entry['label'] if entry else item.get('indicator')} · {described}"
+            # Keyed by name, so the panel stays open while its title changes (a setting edited,
+            # the type swapped); a renamed one opens under its new name (ui.feature_editor).
+            with st.expander(title, key=f"feature-panel:{feature_name}",
+                             expanded=feature_name == st.session_state.get("renamed_feature")):
                 ui.feature_editor(feature_name, item, features)
+            # The title is drawn before the inputs and settings inside write their new values
+            # back, so after an edit it would show the old ones until the next click. When an
+            # edit changed what it says, draw the page again: once, as the second pass finds
+            # them equal. (Renames, swaps and deletes already redraw through ui.rerun_after.)
+            if feature_name in features and indicators.describe(features[feature_name]) != described:
+                st.rerun()
         st.markdown("**Add a feature**")
         ui.feature_picker(features)
 

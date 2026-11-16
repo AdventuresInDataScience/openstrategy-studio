@@ -7,14 +7,16 @@ Work through the steps left to right. The **At a glance** panel on the right sho
 
 **2. Features.** The lines and signals your rules compare. **Add a feature** in three steps: a category (Indicator, Statistical, Price levels, Candlestick, Chart pattern, Transform, Custom), a family (Moving averages, Momentum ...), then the item. Its outputs are listed before you add it; each becomes a line you can use, such as `bb.upperband`.
 
+- Rename a feature in its **Name** box at any time; the rules, other features and optimise variables that use it follow.
 - Every input can read a price or another feature: an EMA of an RSI, or bands around an EMA.
 - *Transform* holds the adjustments: offset a line by a percentage, a band either side of it, the distance between two lines, a line some bars ago, bars since a signal. "Crosses within 5% of the EMA" is a 5% band around the EMA, compared in a rule.
 - On an SMA, EMA or other single-type average, **Let the optimiser pick the type** swaps it for the *Moving average* entry at the same type (the same numbers), so the Optimise page can try SMA against EMA and others.
 
-**3. Rules** (signals). Each rule is a list of lettered conditions and a **logic line** that combines them:
+**3. Rules** (signals). Each rule is a list of named conditions and a **logic line** that combines them:
 
 - A condition compares two lines (*fast crosses above slow*), checks that a pattern appears, or (entries only) filters by weekday, month, session or a higher timeframe.
-- The logic line uses `and`, `or`, `xor`, `nand`, `nor`, `xnor` and `not`, with brackets: `(A and (B or C)) and not D`. Brackets are needed wherever two different words meet, so the line always says exactly what you mean.
+- New conditions are named A, B, C ...; type a name of your own in a condition's **Name** box (letters, digits and underscores, such as `trend` or `rsi_low`) and the logic line follows.
+- The logic line uses `and`, `or`, `xor`, `nand`, `nor`, `xnor` and `not`, with brackets: `(A and (B or C)) and not D`, or `trend and not overbought`. Brackets are needed wherever two different words meet, so the line always says exactly what you mean. Names match exactly, capitals included.
 - **Make versions of this rule** keeps several versions; the optimiser can choose between them.
 
 **3. Portfolio** (portfolios). Optionally pick assets by a score, choose the weighting, and how often to go back to the target weights: never (buy and hold), every bar, or on a calendar, optionally only when the weights have drifted.

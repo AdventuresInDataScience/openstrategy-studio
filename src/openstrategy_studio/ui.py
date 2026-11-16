@@ -25,9 +25,10 @@ from pathlib import Path
 import streamlit as st
 
 from . import config, data as data_module, indicators, style
-from .expressions import LOGIC_WORDS, append_letter, condition_text, next_letter, parse_logic, remove_letter, summary
-from .spec import (COMPARISON_OPS, PATTERN_SIDES, PRICE_FIELDS, TIMEFRAME_MINUTES, default_spec, get_path,
-                   is_choice, set_path)
+from .expressions import (LOGIC_WORDS, append_letter, condition_name_problem, condition_text, next_letter, parse_logic,
+                          remove_letter, summary)
+from .spec import (COMPARISON_OPS, PATTERN_SIDES, PRICE_FIELDS, TIMEFRAME_MINUTES, default_spec, feature_name_problem,
+                   get_path, is_choice, rename_condition, rename_feature, set_path)
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
@@ -406,17 +407,32 @@ def feature_picker(features):
                                     "underscores, starting with a letter.")
         right.write("")
         if right.button("Add feature", type="primary", key="pick:add"):
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name in PRICE_FIELDS:
-                st.error("Use letters, digits and underscores for the name, starting with a letter, and not a price "
-                         "name such as close.")
-            elif name in features:
-                st.error(f"There is already a feature called {name}.")
+            problem = feature_name_problem(name, set(features))
+            if problem:
+                st.error(problem)
             else:
                 rerun_after(lambda: features.__setitem__(name, indicators.new_feature(picked)))
 
 
 def feature_editor(name, feature, features):
-    """One feature's inputs and settings, its outputs, and a delete button."""
+    """One feature's name, inputs and settings, its outputs, and a delete button."""
+    typed = st.columns([1, 2])[0].text_input(
+        "Name", value=name, key=key(f"features.{name}", ":name"),
+        help="How the rules and other features refer to it, such as fast or rsi: letters, digits and underscores, "
+             "starting with a letter. Renaming it renames every use too: the rules, features that read it, the "
+             "selection score, the entry priority and the Optimise page's variables.")
+    if typed.strip() != name:
+        problem = feature_name_problem(typed.strip(), set(features) - {name})
+        if problem:
+            # A refused name stays in the box with the reason under it; nothing changes.
+            st.error(problem)
+        else:
+            def rename():
+                rename_feature(current(), name, typed.strip())
+                # Its panel is keyed by name, so it would come back closed: the Build page opens it.
+                st.session_state["renamed_feature"] = typed.strip()
+            # A structural change: every widget key under the old name must be renewed.
+            rerun_after(rename)
     item = indicators.catalogue().get(feature.get("indicator"))
     if item is None:
         st.error(f"{name} uses an unknown indicator ({feature.get('indicator')}). Delete it and add it again.")
@@ -590,22 +606,28 @@ def _filter_condition(path, node, features, timeframe):
         _comparison_condition(path, node, features)
 
 
-def condition_editor(path, letter, node, features, timeframe, entry, on_remove):
-    """One lettered condition: what kind it is, its settings, and a remove button."""
+def condition_editor(path, name, node, features, timeframe, entry, on_remove, on_rename):
+    """One named condition: its name, what kind it is, its settings, and a remove button.
+
+    on_rename(new) renames it (and reruns), or returns why it cannot.
+    """
     with st.container(border=True):
         kinds = ["comparison", "pattern"] + (["filter"] if entry else [])
         kind = "pattern" if "pattern" in node else "filter" if "filter" in node else "comparison"
         names = {"comparison": "Compare two lines", "pattern": "A pattern appears", "filter": "Only when (filter)"}
-        head = st.columns([1, 5, 2])
-        # The kind box has no label of its own (it reads as the condition's title), so its
-        # ⓘ sits on the letter.
-        head[0].markdown(f"### {letter}", help=f"Condition {letter}: use the letter in the logic line below. "
-                                                "Compare two lines, a pattern appearing, or (in entry rules "
-                                                "only) a filter on the day, month, session or a higher "
-                                                "timeframe.")
+        head = st.columns([2, 4, 2], vertical_alignment="bottom")
+        typed = head[0].text_input("Name", value=name, key=key(path, ":name"),
+                                   help="What the logic line calls this condition, such as trend or rsi_low: "
+                                        "letters, digits and underscores, starting with a letter. Renaming it "
+                                        "renames it in the logic line and in the Optimise page's variables too.")
         chosen = head[1].selectbox("Kind", kinds, index=kinds.index(kind) if kind in kinds else 0,
-                                   format_func=names.get, key=key(path, ":kind"), label_visibility="collapsed")
+                                   format_func=names.get, key=key(path, ":kind"),
+                                   help="Compare two lines, a pattern appearing, or (in entry rules only) a filter "
+                                        "on the day, month, session or a higher timeframe.")
         head[2].button("Remove", key=key(path, ":remove"), on_click=on_remove)
+        if typed.strip() != name:
+            # A refused name stays in the box with the reason under it, as a broken logic line does.
+            st.error(on_rename(typed.strip()))
         if chosen != kind:
             set_value(path, new_condition(chosen, features))
             renew_widgets()
@@ -628,7 +650,15 @@ def _rule_body(path, rule, features, timeframe, entry):
             rule["logic"] = remove_letter(rule.get("logic", ""), letter)
             save_draft()
             renew_widgets()
-        condition_editor(f"{path}.conditions.{letter}", letter, conditions[letter], features, timeframe, entry, remove)
+
+        def rename(new, letter=letter):
+            problem = condition_name_problem(new, set(conditions) - {letter})
+            if problem:
+                return problem
+            # A structural change: every widget key under the old name must be renewed.
+            rerun_after(lambda: rename_condition(current(), path, letter, new))
+        condition_editor(f"{path}.conditions.{letter}", letter, conditions[letter], features, timeframe, entry, remove,
+                         rename)
     buttons = st.columns(4)
     adds = [("comparison", "Add a comparison"), ("pattern", "Add a pattern")] + ([("filter", "Add a filter")]
                                                                                   if entry else [])
@@ -636,16 +666,18 @@ def _rule_body(path, rule, features, timeframe, entry):
                                   label_visibility="collapsed", format_func=lambda op: f"join with {op}")
     for column, (kind, label) in zip(buttons, adds):
         if column.button(label, key=key(path, f":add:{kind}"),
-                         help="Adds a lettered condition and joins it to the logic line with the word chosen on "
-                              "the right (and, or). Edit the logic line for anything else."):
+                         help="Adds a condition, named with the next free letter (rename it in its Name box), and "
+                              "joins it to the logic line with the word chosen on the right (and, or). Edit the "
+                              "logic line for anything else."):
             def add(kind=kind):
                 letter = next_letter(set(conditions))
                 conditions[letter] = new_condition(kind, features)
                 rule["logic"] = append_letter(rule.get("logic", ""), letter, joiner)
             rerun_after(add)
     logic = st.text_input("Logic", value=rule.get("logic", ""), key=key(path, ":logic"),
-                          help="Combine the letters with and, or, xor, nand, nor, xnor and not, using brackets: "
-                               "(A and (B or C)) and not D. Brackets are needed wherever two different words meet.")
+                          help="Combine the conditions by name with and, or, xor, nand, nor, xnor and not, using "
+                               "brackets: (A and (B or C)) and not D, or trend and not overbought. Names match "
+                               "exactly, capitals included. Brackets are needed wherever two different words meet.")
     if logic != rule.get("logic"):
         set_value(f"{path}.logic", logic)
     try:

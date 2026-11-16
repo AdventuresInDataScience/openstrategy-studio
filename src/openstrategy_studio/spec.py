@@ -34,6 +34,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 from importlib import resources
 from pathlib import Path
 
@@ -251,6 +252,63 @@ def ref_feature(ref):
     return ref["feature"] if isinstance(ref, dict) and "feature" in ref else None
 
 
+def feature_name_problem(name, taken):
+    """Why `name` cannot name a feature when `taken` are the others; None if it can.
+
+    One rule for the picker, the feature card's Name box and validate_spec. A price name
+    is refused because the input pickers list prices and features side by side.
+    """
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name or "") or name in PRICE_FIELDS:
+        return (f"'{name}' cannot name a feature: use letters, digits and underscores, starting with a letter, and "
+                "not a price name such as close.")
+    if name in taken:
+        return f"There is already a feature called {name}; pick another name."
+    return None
+
+
+def rename_feature(spec, old, new):
+    """Call feature `old` `new`, in place, along with everything that refers to it.
+
+    The feature keeps its place in the list. References follow wherever they sit: other
+    features' inputs, the rules' conditions (in every version of a rule, higher-timeframe
+    filters included), pattern conditions, the selection score and the entry priority.
+    So do the optimise variables of its settings, whose keys hold its name
+    (features.fast.params.timeperiod). The caller checks the new name first
+    (feature_name_problem).
+    """
+    features = spec["features"]
+    kept = list(features.items())
+    features.clear()
+    for name, feature in kept:
+        features[new if name == old else name] = feature
+    # A reference is a dict naming the feature ({"feature": name, "output"?, "shift"?}); a
+    # pattern condition names its pattern feature ({"pattern": name, "side"}). The whole
+    # spec is walked so a reference in a new place is not missed. Settings ("params") are
+    # values, not references, and the optimise variables are keyed by path (below).
+    stack = [value for key, value in spec.items() if key != "optimise"]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        if node.get("feature") == old:
+            node["feature"] = new
+        if node.get("pattern") == old:
+            node["pattern"] = new
+        for key, value in node.items():
+            if key != "params":
+                stack.append(value)
+    found = (spec.get("optimise") or {}).get("variables")
+    if found:
+        before, after = f"features.{old}.", f"features.{new}."
+        kept = list(found.items())
+        found.clear()
+        for path, variable in kept:
+            found[after + path[len(before):] if path.startswith(before) else path] = variable
+
+
 def feature_dependencies(features):
     """{feature: set of features its inputs read}."""
     deps = {}
@@ -440,6 +498,33 @@ def apply_params(spec, params=None):
     return resolve_choices(out)
 
 
+def rename_condition(spec, rule_path, old, new):
+    """Call condition `old` of the rule at `rule_path` `new`, in place.
+
+    The condition keeps its place in the list, the logic line is rewritten to match (the
+    rest of its text as written), and so are the optimise variables of the values inside
+    it, whose keys hold the condition's name (rules.long_entry.conditions.A.op). Without
+    that the variables would be orphaned. The caller checks the new name first
+    (expressions.condition_name_problem).
+    """
+    from .expressions import rename_in_logic
+
+    rule = get_path(spec, rule_path)
+    conditions = rule["conditions"]
+    kept = list(conditions.items())
+    conditions.clear()
+    for name, condition in kept:
+        conditions[new if name == old else name] = condition
+    rule["logic"] = rename_in_logic(rule.get("logic", ""), old, new)
+    found = (spec.get("optimise") or {}).get("variables")
+    if found:
+        before, after = f"{rule_path}.conditions.{old}.", f"{rule_path}.conditions.{new}."
+        kept = list(found.items())
+        found.clear()
+        for path, variable in kept:
+            found[after + path[len(before):] if path.startswith(before) else path] = variable
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -542,8 +627,8 @@ def _check_condition(problems, where, node, features, timeframe, entry):
 
 
 def _check_rule(problems, where, rule, features, timeframe, entry):
-    """One rule: lettered conditions and a logic line that uses every one of them."""
-    from .expressions import logic_letters, parse_logic
+    """One rule: named conditions and a logic line that uses every one of them."""
+    from .expressions import condition_name_problem, logic_names, parse_logic
 
     if not isinstance(rule, dict) or not isinstance(rule.get("conditions"), dict):
         problems.append(f"{where}: a rule needs conditions and a logic line.")
@@ -552,21 +637,26 @@ def _check_rule(problems, where, rule, features, timeframe, entry):
     if not conditions:
         problems.append(f"{where}: add at least one condition.")
         return
-    for letter, condition in conditions.items():
-        if not (letter.isalpha() and letter.isupper()):
-            problems.append(f"{where}: name conditions with capital letters (A, B ... AA), not '{letter}'.")
-        _check_condition(problems, f"{where} › {letter}", condition, features, timeframe, entry)
+    for name, condition in conditions.items():
+        # Unique already (they are dict keys); the shape and the operator words are checked here.
+        problem = condition_name_problem(name, set())
+        if problem:
+            problems.append(f"{where}: {problem}")
+        _check_condition(problems, f"{where} › {name}", condition, features, timeframe, entry)
     try:
         tree = parse_logic(rule.get("logic", ""))
     except ValueError as error:
         problems.append(f"{where} logic: {error}")
         return
-    used = logic_letters(tree)
+    used = logic_names(tree)
     missing = sorted(used - set(conditions))
     unused = sorted(set(conditions) - used)
     if missing:
+        # Names match exactly, so "a" for condition A is the likeliest slip: say so.
+        near = [f"{name} is not {other}" for name in missing for other in conditions if other.lower() == name.lower()]
         problems.append(f"{where} logic mentions {', '.join(missing)}, which {'is' if len(missing) == 1 else 'are'} "
-                        "not a condition.")
+                        "not a condition." + (f" Names match exactly, capitals included: {', '.join(near)}."
+                                              if near else ""))
     if unused:
         problems.append(f"{where}: condition {', '.join(unused)} {'is' if len(unused) == 1 else 'are'} not in the "
                         "logic line; add it there or delete it.")
@@ -577,9 +667,9 @@ def _check_features(problems, features):
 
     for name, feature in features.items():
         where = f"Feature '{name}'"
-        if not name.isidentifier() or name in PRICE_FIELDS:
-            problems.append(f"{where}: use letters, digits and underscores, starting with a letter, and not a price "
-                            "name such as close.")
+        problem = feature_name_problem(name, set())       # unique already: they are dict keys
+        if problem:
+            problems.append(f"{where}: {problem}")
         item = catalogue().get((feature or {}).get("indicator"))
         if item is None:
             problems.append(f"{where} uses an unknown indicator '{(feature or {}).get('indicator')}'.")

@@ -95,11 +95,52 @@ def test_logic_line_problems(ma_spec):
     rule["conditions"]["C"] = {"left": {"price": "close"}, "op": "<", "right": {"const": 2.0}}
     for logic, text in (("A and B or C", "meet without brackets"), ("A and (B", "never closed"),
                         ("A and D and B and C", "D, which is not a condition"), ("A and B", "C is not in the logic"),
-                        ("A B C", "follows without an operator"), ("A and 3", "not a condition letter")):
+                        ("A B C", "follows without an operator"), ("A and 3", "not a condition name"),
+                        ("a and B and C", "capitals included: a is not A")):
         rule["logic"] = logic
         says(S.validate_spec(spec), text)
     rule["logic"] = "(A and B) or not C"
     assert S.validate_spec(spec) == []
+    # A condition's name follows the same rules as the Build page's Name box.
+    rule["conditions"]["not"] = rule["conditions"].pop("C")
+    rule["logic"] = "(A and B) or not not"
+    says(S.validate_spec(spec), "would read as an operator")
+
+
+def test_renaming_a_condition_carries_the_logic_and_the_variables(ma_spec, ohlcv):
+    """Renamed in place: the same position, the logic line and the optimise variables follow, and
+    the strategy computes exactly what it did."""
+    pytest.importorskip("vectorbt")
+    import pandas as pd
+
+    from openstrategy_studio import compile as C
+
+    spec = copy.deepcopy(ma_spec)
+    rule = spec["rules"]["long_entry"]
+    rule["conditions"]["B"] = {"left": {"price": "close"}, "op": ">", "right": {"const": 1.0}}
+    rule["logic"] = "(A)  and B"
+    spec["optimise"]["variables"]["rules.long_entry.conditions.A.op"] = {"values": ["crosses_above", "crosses_below"]}
+    spec["optimise"]["variables"]["rules.long_entry.conditions.B.right.const"] = {"start": 0.5, "stop": 1.5}
+    before = copy.deepcopy(spec)
+    S.rename_condition(spec, "rules.long_entry", "A", "trend")
+    rule = spec["rules"]["long_entry"]
+    assert list(rule["conditions"]) == ["trend", "B"] and rule["logic"] == "(trend)  and B"
+    assert rule["conditions"]["trend"] == before["rules"]["long_entry"]["conditions"]["A"]
+    assert list(spec["optimise"]["variables"]) == [
+        "features.fast.params.timeperiod", "features.slow.params.timeperiod",
+        "rules.long_entry.conditions.trend.op", "rules.long_entry.conditions.B.right.const"]
+    # Only that rule: the exit's own condition A is untouched.
+    assert spec["rules"]["long_exit"] == before["rules"]["long_exit"]
+    assert S.validate_spec(spec) == []
+    params = {"rules.long_entry.conditions.trend.op": "crosses_below"}
+    renamed = C.compile_signals(S.apply_params(spec, params), ohlcv)
+    original = C.compile_signals(S.apply_params(before, {"rules.long_entry.conditions.A.op": "crosses_below"}), ohlcv)
+    pd.testing.assert_frame_equal(renamed["entries"], original["entries"])
+    # Inside a version of a rule too.
+    search = S.load_template("structure_search")
+    S.rename_condition(search, "rules.long_entry.options.reversion", "A", "oversold")
+    assert S.validate_spec(search) == []
+    assert "rules.long_entry.options.reversion.conditions.oversold.right.const" in search["optimise"]["variables"]
 
 
 def test_pattern_condition_needs_a_pattern_feature(ma_spec):
@@ -240,3 +281,68 @@ def test_feature_order_respects_dependencies():
     features = {"b": {"indicator": "talib:RSI", "inputs": {"close": {"feature": "a"}}},
                 "a": {"indicator": "talib:SMA", "inputs": {"close": "close"}}}
     assert S.feature_order(features) == ["a", "b"]
+
+
+def test_feature_names_are_checked():
+    assert S.feature_name_problem("fast", {"slow"}) is None and S.feature_name_problem("ema_2", set()) is None
+    for bad in ("", "2x", "_x", "my ema", "a-b", "é", "close", "volume"):
+        assert "cannot name a feature" in S.feature_name_problem(bad, set()), bad
+    assert "already a feature called slow" in S.feature_name_problem("slow", {"slow"})
+    spec = S.load_template("ma_cross")
+    spec["features"]["_fast"] = spec["features"].pop("fast")
+    says(S.validate_spec(spec), "cannot name a feature")
+
+
+def _compiled(spec):
+    """What a spec computes, on synthetic data for its own symbols: its signals, or its weights."""
+    from openstrategy_studio import compile as C
+    from conftest import make_ohlcv
+
+    data = make_ohlcv(300, tuple(spec["data"]["symbols"]), seed=4, base=100.0)
+    applied = S.apply_params(spec)
+    if S.strategy_kind(applied) == "signals":
+        return C.compile_signals(applied, data)
+    return C.compile_weights(applied, data)
+
+
+def test_renaming_a_feature_carries_every_reference():
+    """Every feature of every template, renamed: nothing refers to the old name, the spec is valid,
+    the feature keeps its place, and the strategy computes exactly what it did. Between them the
+    templates hold pattern conditions, a selection score, an entry priority, versions of a rule
+    and shifted references; a chained input and a higher-timeframe filter are added here."""
+    pytest.importorskip("vectorbt")
+    import json
+
+    import pandas as pd
+
+    for template in S.list_templates():
+        base = S.load_template(template)
+        if base.get("features") and S.strategy_kind(base) == "signals":
+            first = next(iter(base["features"]))
+            # A feature that reads another, and a weekly filter on that feature (entries only).
+            base["features"]["chained"] = {"indicator": "talib:EMA", "inputs": {"close": {"feature": first}},
+                                           "params": {"timeperiod": 5}}
+            entry = base["rules"]["long_entry"]
+            rule = entry["options"][entry["choose"]] if S.is_choice(entry) else entry
+            rule["conditions"]["Z"] = {"filter": "higher_timeframe", "timeframe": "1w",
+                                       "left": {"feature": first}, "op": ">", "right": {"feature": "chained"}}
+            rule["logic"] = f"({rule['logic']}) or Z"
+        assert S.validate_spec(base) == [], template
+        before = _compiled(base)
+        for old in list(base.get("features") or {}):
+            spec = json.loads(json.dumps(base))
+            new = f"{old}_renamed"
+            S.rename_feature(spec, old, new)
+            order = [new if name == old else name for name in base["features"]]
+            assert list(spec["features"]) == order, (template, old)
+            text = json.dumps({key: value for key, value in spec.items() if key != "optimise"})
+            assert f'"feature": "{old}"' not in text and f'"pattern": "{old}"' not in text, (template, old)
+            for path in base["optimise"]["variables"]:
+                moved = path.replace(f"features.{old}.", f"features.{new}.", 1) if path.startswith(f"features.{old}.") \
+                    else path
+                assert moved in spec["optimise"]["variables"], (template, old, path)
+            assert S.validate_spec(spec) == [], (template, old, S.validate_spec(spec))
+            after = _compiled(spec)
+            for name, frame in before.items():
+                if isinstance(frame, pd.DataFrame):
+                    pd.testing.assert_frame_equal(after[name], frame, obj=f"{template} {old} {name}")

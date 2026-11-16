@@ -266,3 +266,86 @@ def test_a_comparison_is_added_as_a_variable_in_words(tmp_path, monkeypatch):
     assert values.value == ["crosses_above", "crosses_below"]
     assert not app.exception, [item.value for item in app.exception]
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_a_condition_is_renamed_in_its_name_box(tmp_path, monkeypatch):
+    """A good name renames the condition, its logic line and its optimise variables; a bad one
+    stays in the box with the reason, and the spec is left alone."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = load_template("ma_cross")
+    spec["optimise"]["variables"]["rules.long_entry.conditions.A.op"] = {"values": ["crosses_above", "crosses_below"]}
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = spec
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.text_input(key=current_key(app, "rules.long_entry.conditions.A:name")).set_value("trend").run()
+    assert not app.exception, [item.value for item in app.exception]
+    rule = app.session_state["spec"]["rules"]["long_entry"]
+    assert list(rule["conditions"]) == ["trend"] and rule["logic"] == "trend"
+    assert app.text_input(key=current_key(app, "rules.long_entry:logic")).value == "trend"
+    assert "rules.long_entry.conditions.trend.op" in app.session_state["spec"]["optimise"]["variables"]
+    assert app.session_state["spec"]["rules"]["long_exit"]["logic"] == "A"      # another rule keeps its own A
+    # An operator word, or a name the rule already has, is refused with the reason.
+    settled = copy.deepcopy(app.session_state["spec"])
+    app.text_input(key=current_key(app, "rules.long_entry.conditions.trend:name")).set_value("and").run()
+    assert any("would read as an operator" in item.value for item in app.error)
+    assert app.session_state["spec"] == settled
+    app.text_input(key=current_key(app, "rules.long_entry.conditions.trend:name")).set_value("trend").run()
+    app.button(key=current_key(app, "rules.long_entry:add:comparison")).click().run()
+    assert app.session_state["spec"]["rules"]["long_entry"]["logic"] == "trend and A"
+    app.text_input(key=current_key(app, "rules.long_entry.conditions.A:name")).set_value("trend").run()
+    assert any("already has a condition called trend" in item.value for item in app.error)
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_a_feature_is_renamed_in_its_name_box(tmp_path, monkeypatch):
+    """A good name renames the feature, the rules that read it and its optimise variables; a bad one
+    stays in the box with the reason, and the spec is left alone."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.text_input(key=current_key(app, "features.fast:name")).set_value("quick").run()
+    assert not app.exception, [item.value for item in app.exception]
+    spec = app.session_state["spec"]
+    assert list(spec["features"]) == ["quick", "slow"]
+    assert spec["rules"]["long_entry"]["conditions"]["A"]["left"] == {"feature": "quick"}
+    assert spec["rules"]["long_exit"]["conditions"]["A"]["left"] == {"feature": "quick"}
+    assert list(spec["optimise"]["variables"]) == ["features.quick.params.timeperiod", "features.slow.params.timeperiod"]
+    # The rule editor reads the new name too.
+    assert app.text_input(key=current_key(app, "features.quick:name")).value == "quick"
+    settled = copy.deepcopy(spec)
+    for bad, reason in (("close", "cannot name a feature"), ("slow", "already a feature called slow")):
+        app.text_input(key=current_key(app, "features.quick:name")).set_value(bad).run()
+        assert any(reason in item.value for item in app.error), (bad, [item.value for item in app.error])
+        assert app.session_state["spec"] == settled
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_a_feature_panel_title_shows_an_edit_at_once(tmp_path, monkeypatch):
+    """The panel's title is drawn before the settings inside save their new values; after an edit it
+    must show the new value straight away, not one click later."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.number_input(key=current_key(app, "features.fast.params.timeperiod")).set_value(60).run()
+    assert not app.exception, [item.value for item in app.exception]
+    labels = [panel.label for panel in app.expander]
+    assert "fast: Simple Moving Average · SMA(close, 60)" in labels, labels
+    # An input too: the slow average applied to the open instead of the close.
+    app.selectbox(key=current_key(app, "features.slow.inputs.close")).set_value("open").run()
+    labels = [panel.label for panel in app.expander]
+    assert "slow: Simple Moving Average · SMA(open, 200)" in labels, labels
+    assert app.session_state["spec"]["features"]["slow"]["inputs"]["close"] == "open"
+    assert not app.exception, [item.value for item in app.exception]

@@ -1,10 +1,11 @@
 """Text forms of a strategy: a rule's logic line, its conditions in words, and the At a glance summary.
 
-The logic line combines a rule's lettered conditions, for example
-``(A and (B or C)) and not D``.
+The logic line combines a rule's named conditions, for example
+``(A and (B or C)) and not D``. New conditions take the next free letter; once renamed
+the line reads in their names: ``trend and not overbought``.
 
-    and, or, xor, nand, nor, xnor    between two letters (or bracketed groups)
-    not                              in front of a letter or a group
+    and, or, xor, nand, nor, xnor    between two conditions (or bracketed groups)
+    not                              in front of a condition or a group
     ( )                              grouping
 
 ⚠️ Brackets are required wherever two different operators meet at one level:
@@ -16,7 +17,7 @@ One operator repeated chains: ``A and B and C``. Over three or more:
   opposite,
 * nand is "not all of them", nor is "none of them".
 
-Parsing is a small tokenizer and a recursive descent over the letters and these
+Parsing is a small tokenizer and a recursive descent over the names and these
 words, so text is never evaluated.
 """
 
@@ -25,6 +26,11 @@ import re
 LOGIC_OPS = ["and", "or", "xor", "nand", "nor", "xnor"]
 LOGIC_WORDS = {"and": "all are true", "or": "any is true", "xor": "an odd number are true",
                "nand": "not all are true", "nor": "none is true", "xnor": "an even number are true"}
+# Words no condition may be called, in any case: the logic line reads them as operators.
+RESERVED_NAMES = LOGIC_OPS + ["not"]
+# A condition's name: a letter, then letters, digits or underscores (A, B ... by default; trend
+# or rsi_low once renamed). Matched exactly, capitals included, so "a" is not "A".
+NAME_PATTERN = r"[A-Za-z][A-Za-z0-9_]*"
 
 OP_WORDS = {">": "is above", "<": "is below", ">=": "is at or above", "<=": "is at or below",
             "crosses_above": "crosses above", "crosses_below": "crosses below", "between": "is between",
@@ -40,21 +46,33 @@ TRADING_WORDS = {"equity": "bought outright", "cfd": "CFDs", "spreadbet": "sprea
 
 def _tokens(text):
     tokens = []
-    for piece in re.findall(r"\(|\)|[A-Za-z]+|\S+", text or ""):
+    for piece in re.findall(rf"\(|\)|{NAME_PATTERN}|\S+", text or ""):
         if piece in ("(", ")"):
             tokens.append(piece)
-        elif piece.lower() in LOGIC_OPS or piece.lower() == "not":
+        elif piece.lower() in RESERVED_NAMES:
             tokens.append(piece.lower())
-        elif piece.isalpha() and piece.isupper():
+        elif re.fullmatch(NAME_PATTERN, piece):
             tokens.append(piece)
         else:
-            raise ValueError(f"'{piece}' is not a condition letter, a bracket or one of and, or, xor, nand, nor, "
+            raise ValueError(f"'{piece}' is not a condition name, a bracket or one of and, or, xor, nand, nor, "
                              "xnor, not.")
     return tokens
 
 
+def condition_name_problem(name, taken):
+    """Why `name` cannot name a condition in a rule whose other conditions are `taken`; None if it can."""
+    if not re.fullmatch(NAME_PATTERN, name or ""):
+        return (f"'{name}' cannot name a condition: use letters, digits and underscores, starting with a letter, "
+                "such as trend or rsi_low.")
+    if name.lower() in RESERVED_NAMES:
+        return f"'{name}' would read as an operator in the logic line; pick another name."
+    if name in taken:
+        return f"This rule already has a condition called {name}; pick another name."
+    return None
+
+
 def parse_logic(text):
-    """The logic line as a tree: a letter, {"not": tree}, or {"op": op, "args": [trees]}.
+    """The logic line as a tree: a condition's name, {"not": tree}, or {"op": op, "args": [trees]}.
 
     Raises ValueError with a message that says what to change.
     """
@@ -74,7 +92,7 @@ def parse_logic(text):
     def operand():
         token = peek()
         if token is None:
-            raise ValueError("it ends too soon: a letter or a bracket is missing at the end.")
+            raise ValueError("it ends too soon: a condition or a bracket is missing at the end.")
         if token == "not":
             take()
             return {"not": operand()}
@@ -86,7 +104,7 @@ def parse_logic(text):
             take()
             return tree
         if token in LOGIC_OPS or token == ")":
-            raise ValueError(f"'{token}' needs a letter or a bracketed group before it.")
+            raise ValueError(f"'{token}' needs a condition or a bracketed group before it.")
         return take()
 
     def expression():
@@ -111,14 +129,15 @@ def parse_logic(text):
     return tree
 
 
-def logic_letters(tree):
+def logic_names(tree):
+    """The conditions a parsed logic line uses."""
     if isinstance(tree, str):
         return {tree}
     if "not" in tree:
-        return logic_letters(tree["not"])
+        return logic_names(tree["not"])
     found = set()
     for arg in tree["args"]:
-        found |= logic_letters(arg)
+        found |= logic_names(arg)
     return found
 
 
@@ -184,6 +203,15 @@ def remove_letter(logic, letter):
 
     kept = drop(tree)
     return "" if kept is None else logic_text(kept)
+
+
+def rename_in_logic(logic, old, new):
+    """The logic line with condition `old` called `new`, and the rest exactly as written.
+
+    Only whole names are replaced (renaming A leaves AA alone), and a broken line is
+    renamed too, so the user's half-typed text keeps up with the conditions.
+    """
+    return re.sub(NAME_PATTERN, lambda match: new if match.group(0) == old else match.group(0), logic or "")
 
 
 # ---------------------------------------------------------------------------

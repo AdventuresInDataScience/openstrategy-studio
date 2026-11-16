@@ -5,8 +5,9 @@ import pandas as pd
 import pytest
 
 from openstrategy_studio import compile as C
-from openstrategy_studio.expressions import (append_letter, condition_text, logic_letters, logic_text, next_letter,
-                                             parse_logic, remove_letter, summary)
+from openstrategy_studio.expressions import (append_letter, condition_name_problem, condition_text, logic_names,
+                                             logic_text, next_letter, parse_logic, remove_letter, rename_in_logic,
+                                             summary)
 
 
 def test_parse_shapes():
@@ -16,13 +17,43 @@ def test_parse_shapes():
     assert parse_logic("(A and (B or C)) and not D") == {
         "op": "and", "args": [{"op": "and", "args": ["A", {"op": "or", "args": ["B", "C"]}]}, {"not": "D"}]}
     assert parse_logic("a XOR b".replace("a", "A").replace("b", "B")) == {"op": "xor", "args": ["A", "B"]}
-    assert logic_letters(parse_logic("(A nand B) nor not C")) == {"A", "B", "C"}
+    assert logic_names(parse_logic("(A nand B) nor not C")) == {"A", "B", "C"}
+
+
+def test_conditions_can_have_names():
+    """Renamed conditions read in the logic line; the operator words still read as operators."""
+    assert parse_logic("trend and not (rsi_low or Gap2)") == {
+        "op": "and", "args": ["trend", {"not": {"op": "or", "args": ["rsi_low", "Gap2"]}}]}
+    assert parse_logic("trend AND Not x") == {"op": "and", "args": ["trend", {"not": "x"}]}
+    assert logic_names(parse_logic("(trend xor A) nor rsi_low")) == {"trend", "A", "rsi_low"}
+    assert logic_text(parse_logic("(trend or B) and not rsi_low")) == "(trend or B) and not rsi_low"
+
+
+def test_condition_names_are_checked():
+    assert condition_name_problem("trend", {"A"}) is None
+    assert condition_name_problem("rsi_low2", set()) is None
+    for bad in ("", "2x", "_x", "rsi low", "a-b", "é"):
+        assert "letters, digits and underscores" in condition_name_problem(bad, set()), bad
+    for word in ("and", "NOT", "Xnor"):
+        assert "operator" in condition_name_problem(word, set()), word
+    assert "already has a condition called B" in condition_name_problem("B", {"A", "B"})
+
+
+def test_renaming_rewrites_only_that_name():
+    assert rename_in_logic("(A and AA) or not A", "A", "trend") == "(trend and AA) or not trend"
+    # The rest stays as written, brackets and spacing included; a half-typed line is renamed too.
+    assert rename_in_logic("((B))  and   A", "B", "gap") == "((gap))  and   A"
+    assert rename_in_logic("A and (B", "B", "gap") == "A and (gap"
+    assert rename_in_logic("BA and B", "B", "x") == "BA and x"
 
 
 @pytest.mark.parametrize("text, message", [
     ("", "write which conditions"), ("A and B or C", "meet without brackets"), ("(A and B", "never closed"),
-    ("A and B)", "closed that was never opened"), ("A and", "ends too soon"), ("and A", "needs a letter"),
-    ("A B", "follows without an operator"), ("A & B", "not a condition letter"), ("eval(A)", "not a condition letter"),
+    ("A and B)", "closed that was never opened"), ("A and", "ends too soon"), ("and A", "needs a condition"),
+    ("A B", "follows without an operator"), ("A & B", "not a condition name"), ("A and 3", "not a condition name"),
+    ("A and _x", "not a condition name"),
+    # Never evaluated: a call reads as a name and a bracket with no operator between, and is refused.
+    ("eval(A)", "follows without an operator"), ("__import__('os')", "not a condition name"),
 ])
 def test_parse_refuses_with_a_message(text, message):
     with pytest.raises(ValueError, match=message):
