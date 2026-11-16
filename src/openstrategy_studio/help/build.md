@@ -9,6 +9,7 @@ Work through the steps left to right. The **At a glance** panel on the right sho
 
 - Every input can read a price or another feature: an EMA of an RSI, or bands around an EMA.
 - *Transform* holds the adjustments: offset a line by a percentage, a band either side of it, the distance between two lines, a line some bars ago, bars since a signal. "Crosses within 5% of the EMA" is a 5% band around the EMA, compared in a rule.
+- On an SMA, EMA or other single-type average, **Let the optimiser pick the type** swaps it for the *Moving average* entry at the same type (the same numbers), so the Optimise page can try SMA against EMA and others.
 
 **3. Rules** (signals). Each rule is a list of lettered conditions and a **logic line** that combines them:
 

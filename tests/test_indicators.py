@@ -210,3 +210,22 @@ def test_every_setting_has_a_tooltip():
         assert set(described) <= used.get(source, set()), (source, sorted(set(described) - used.get(source, set())))
     assert I.param_help("talib:SMA", "timeperiod") == ("How many bars it looks back over. SMA (TA-Lib) takes it as "
                                                        "`timeperiod`. Default: 30.")
+
+
+def test_moving_average_reproduces_each_single_type_average():
+    """The feature card swaps these for talib:MA at the same type (SAME_AS_MA), so the
+    optimiser can pick the type. The swap keeps the inputs and the period, so it must give
+    exactly the same numbers, through compute() as the compiler calls it."""
+    pytest.importorskip("talib")
+    data = I._sample_data(n=400)
+    every_type = I.entry("talib:MA")["params"]["matype"]["options"]
+    for indicator, kind in I.SAME_AS_MA.items():
+        item = I.entry(indicator)
+        assert kind in every_type, indicator
+        assert list(item["params"]) == ["timeperiod"] and item["outputs"] == ["real"], indicator
+        assert item["inputs"] == I.entry("talib:MA")["inputs"], indicator
+        for period in (2, 9, 50):
+            own = I.compute({"indicator": indicator, "params": {"timeperiod": period}}, [data["close"]], data)
+            ma = I.compute({"indicator": "talib:MA", "params": {"timeperiod": period, "matype": kind}},
+                           [data["close"]], data)
+            np.testing.assert_array_equal(own["real"].to_numpy(), ma["real"].to_numpy(), err_msg=f"{indicator} {period}")

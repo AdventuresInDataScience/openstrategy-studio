@@ -6,7 +6,8 @@ import pandas as pd
 import pytest
 
 from openstrategy_studio import compile as C, optimise as O
-from openstrategy_studio.spec import apply_params, collect_choices, load_template, resolve_choices, validate_spec
+from openstrategy_studio.spec import (apply_params, collect_choices, load_template, resolve_choices, tunable_inputs,
+                                     validate_spec)
 
 INSIDE = "rules.long_entry.options.reversion.conditions.A.right.const"
 
@@ -128,3 +129,55 @@ def test_butchc_searches_a_conditional_space():
 
     O.run_butchc(CONDITIONAL, evaluate_batch, 80, "maximize", 0, {"batch": 4})
     assert max(seen, key=conditional_objective)["family"] == "b"
+
+
+# --- a rule's comparison as a variable ---------------------------------------------------
+
+OP = "rules.long_entry.conditions.A.op"
+
+
+def test_a_comparison_is_a_variable_within_its_group(ma_spec):
+    """Crosses above can be swapped for crosses below, above, below ..., never for between
+    (two bounds the condition does not have) or rising (bars instead of a right side)."""
+    rows = {row["path"]: row for row in tunable_inputs(ma_spec)}
+    row = rows[OP]
+    assert row["type"] == "choice" and row["value"] == "crosses_above" and row["group"] == "Rules"
+    assert row["options"] == [">", "<", ">=", "<=", "crosses_above", "crosses_below"]
+    # The Optimise page starts from the comparison and its mirror, and shows them in words.
+    assert row["suggest"] == ["crosses_above", "crosses_below"]
+    assert row["labels"]["crosses_below"] == "crosses below" and row["labels"][">"] == "is above"
+    applied = apply_params(ma_spec, {OP: "crosses_below"})
+    assert applied["rules"]["long_entry"]["conditions"]["A"]["op"] == "crosses_below"
+    # A value from another group is refused when the spec is checked, not part-way through a job.
+    spec = copy.deepcopy(ma_spec)
+    spec["optimise"]["variables"][OP] = {"values": ["crosses_above", "rising"]}
+    assert any(OP in problem and "every value must be one of" in problem for problem in validate_spec(spec))
+    # Rising swaps with falling only; between with nothing.
+    spec["optimise"]["variables"].pop(OP)
+    spec["rules"]["long_entry"]["conditions"]["A"] = {"left": {"feature": "fast"}, "op": "rising", "bars": 3}
+    rows = {row["path"]: row for row in tunable_inputs(spec)}
+    assert rows[OP]["options"] == ["rising", "falling"] and rows[OP]["suggest"] == ["rising", "falling"]
+    spec["rules"]["long_entry"]["conditions"]["A"] = {"left": {"feature": "fast"}, "op": "between",
+                                                     "lower": {"const": 1.0}, "upper": {"const": 2.0}}
+    assert OP not in {row["path"] for row in tunable_inputs(spec)}
+
+
+def test_a_swapped_comparison_compiles_like_the_written_one(ma_spec, ohlcv):
+    pytest.importorskip("vectorbt")
+    swapped = apply_params(ma_spec, {OP: "crosses_below"})
+    direct = copy.deepcopy(ma_spec)
+    direct.pop("optimise")
+    direct["rules"]["long_entry"]["conditions"]["A"]["op"] = "crosses_below"
+    entries = C.compile_signals(swapped, ohlcv)["entries"]
+    pd.testing.assert_frame_equal(entries, C.compile_signals(direct, ohlcv)["entries"])
+    assert not entries.equals(C.compile_signals(apply_params(ma_spec), ohlcv)["entries"])
+
+
+def test_a_comparison_variable_keeps_the_space_flat(ma_spec):
+    """One choice with no settings of its own: every backend searches it, the grid included."""
+    spec = copy.deepcopy(ma_spec)
+    spec["optimise"]["variables"][OP] = {"values": ["crosses_above", "crosses_below"]}
+    assert validate_spec(spec) == []
+    space = O.build_space(spec)
+    assert space[OP] == {"values": ["crosses_above", "crosses_below"]} and not O.is_conditional(space)
+    assert O.grid_size(space) == 2 * O.grid_size(O.build_space(ma_spec))

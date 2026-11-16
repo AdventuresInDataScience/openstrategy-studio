@@ -1,4 +1,6 @@
-**1. Choose the variables.** Add each value you want searched: a feature's setting (the EMA's period), a number in a rule (RSI below 30), a risk dial (the stop distance, the take profit, the bars a trade is held, the size), a portfolio setting, or which version of a rule to use.
+**1. Choose the variables.** Add each value you want searched: a feature's setting (the EMA's period, or a moving average's type), a number in a rule (RSI below 30), a rule's comparison (crosses above or crosses below), a risk dial (the stop distance, the take profit, the bars a trade is held, the size), a portfolio setting, or which version of a rule to use.
+
+A comparison swaps only with those that read the same sides: above, below, at or above, at or below and the two crosses with each other, and rising with falling (between swaps with nothing). Letting the optimiser pick the direction is choosing the idea after seeing the data, so judge it on held-back history or walk-forward.
 
 For each, give **a range** (start, step, stop) or **a list of values**. The grid tries every step; the other searchers pick any value in the range, whole numbers for a whole-number setting. The count under each, and the total, show how big a full grid is.
 

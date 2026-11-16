@@ -41,3 +41,29 @@ def test_vectorised_equals_one_by_one(ma_spec, ohlcv):
         for key in ("objective", "total_return", "n_trades", "max_drawdown"):
             assert together[key] == pytest.approx(single[key], nan_ok=True), (params, key)
     assert np.isfinite(O.grid_size(space))
+
+
+def test_vectorised_equals_one_by_one_when_the_structure_varies(ma_spec, ohlcv):
+    """A rule's comparison and a moving average's type are text, not numbers; trials that
+    differ only in them must still match the same trials run one by one."""
+    pytest.importorskip("vectorbtx")
+    spec = copy.deepcopy(ma_spec)
+    spec["features"]["fast"] = {"indicator": "talib:MA", "inputs": {"close": "close"},
+                                "params": {"timeperiod": 30, "matype": "SMA"}}
+    op = "rules.long_entry.conditions.A.op"
+    kind = "features.fast.params.matype"
+    spec["optimise"]["variables"] = {op: {"values": ["crosses_above", ">"]}, kind: {"values": ["SMA", "EMA"]}}
+    space = O.build_space(spec)
+    assert engine.vectorisable(spec, space) == (True, "")
+    params_list = [{op: comparison, kind: average} for comparison in ("crosses_above", ">") for average in ("SMA", "EMA")]
+    trials = engine.run_vectorised(spec, ohlcv, params_list)
+    job = {"metric": "sharpe", "constraints": {}}
+    seen = set()
+    for params, pf in zip(params_list, trials):
+        alone = engine.run_backtest(spec, ohlcv, params=params)["pf"]
+        together = O.score(pf, job, params)
+        single = O.score(alone, job, params)
+        for key in ("objective", "total_return", "n_trades", "max_drawdown"):
+            assert together[key] == pytest.approx(single[key], nan_ok=True), (params, key)
+        seen.add((single["n_trades"], round(single["total_return"], 9)))
+    assert len(seen) > 1          # the swaps do change the trades

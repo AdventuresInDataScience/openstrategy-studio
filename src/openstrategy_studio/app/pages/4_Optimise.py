@@ -38,9 +38,13 @@ found = (spec.get("optimise") or {}).get("variables") or {}
 
 
 def default_variable(row):
-    """A starting range around the current value: half to double it, ten steps."""
+    """A starting range around the current value: half to double it, ten steps.
+
+    A choice starts from its suggestion where it has one (a comparison and its mirror),
+    else every option.
+    """
     if row["type"] == "choice":
-        return {"values": list(row["options"])}
+        return {"values": list(row.get("suggest") or row["options"])}
     value = row["value"] if isinstance(row["value"], (int, float)) and row["value"] else 1
     start, stop = (value / 2, value * 2) if value > 0 else (value * 2, value / 2)
     if row["type"] == "int":
@@ -55,12 +59,17 @@ def write_variables():
     ui.save_draft()
 
 
+def shown(row, value):
+    """How a value reads: in words where the row has them (crosses above, not crosses_above)."""
+    return (row.get("labels") or {}).get(value, value)
+
+
 candidates = [row for row in rows if row["path"] not in found]
 if candidates:
     left, right = st.columns([5, 1])
     groups = sorted({row["group"] for row in candidates}, key=["Features", "Rules", "Risk", "Portfolio"].index)
     picked = left.selectbox("Add a variable", candidates,
-                            format_func=lambda row: f"{row['group']}: {row['label']} (now {row['value']})",
+                            format_func=lambda row: f"{row['group']}: {row['label']} (now {shown(row, row['value'])})",
                             key=ui.key("optimise", ":add"),
                             help=f"Every value of the strategy that can vary: {', '.join(groups).lower()}.")
     right.write("")
@@ -87,7 +96,7 @@ for path, variable in list(found.items()):
             continue
         head = st.columns([4, 2, 1])
         # The search radio beside it has no label of its own, so its ⓘ sits on the name.
-        head[0].markdown(f"**{row['label']}**  \n<small>{row['group']} · now {row['value']}</small>",
+        head[0].markdown(f"**{row['label']}**  \n<small>{row['group']} · now {shown(row, row['value'])}</small>",
                          unsafe_allow_html=True,
                          help="A range: start, step and stop (the grid tries every step; other searchers any value "
                               "in between). These values: a list to try, and nothing else.")
@@ -130,6 +139,7 @@ for path, variable in list(found.items()):
                 chosen = st.multiselect("Values to try", row["options"], default=[value for value in variable["values"]
                                                                                    if value in row["options"]],
                                         key=ui.key(f"opt:{path}", ":values"),
+                                        format_func=lambda value, row=row: str(shown(row, value)),
                                         help="The choices the optimiser may pick between.")
                 new = {"values": chosen}
             else:

@@ -64,6 +64,14 @@ EXIT_KEYS = ["time_bars", "breakeven_points", "step_points"]     # the numba exi
 # Order timing for intraday strategies (docs/UPSTREAM.md issue 20 explains the approximations).
 ORDER_KEYS = ["good_for_day", "flat_by_day_end"]
 COMPARISON_OPS = [">", "<", ">=", "<=", "crosses_above", "crosses_below", "between", "rising", "falling"]
+# Comparisons that read the same operands, so the optimiser can swap one for another in its
+# group (crosses above for crosses below, say) and the condition needs nothing new. The first
+# group reads a left and a right side, the second a left side and bars; between reads two
+# bounds, so it swaps with nothing.
+OP_GROUPS = [[">", "<", ">=", "<=", "crosses_above", "crosses_below"], ["rising", "falling"]]
+# Each comparison's mirror: what the Optimise page suggests trying beside it.
+OPPOSITE_OP = {">": "<", "<": ">", ">=": "<=", "<=": ">=", "crosses_above": "crosses_below",
+               "crosses_below": "crosses_above", "rising": "falling", "falling": "rising"}
 FILTER_KINDS = ["session", "weekday", "month", "higher_timeframe"]
 PATTERN_SIDES = ["bullish", "bearish", "either"]
 RULE_SLOTS = ["long_entry", "long_exit", "short_entry", "short_exit"]
@@ -288,9 +296,27 @@ SLOT_LABELS = {"long_entry": "Long entry", "long_exit": "Long exit", "short_entr
 
 
 def _rule_inputs(out, prefix, rule, where):
-    """The numbers inside one rule's conditions: constants, bars, and bars ago."""
+    """The values inside one rule's conditions: the comparison, constants, bars, and bars ago.
+
+    The comparison is offered within its group of OP_GROUPS only (the same operands), so a
+    trial never leaves a condition missing a side. A higher-timeframe filter's comparison
+    counts too. Its row carries "labels" (the words the Build page uses) and "suggest"
+    (the comparison and its mirror, the Optimise page's starting list).
+    """
+    from .expressions import OP_WORDS
+
     for letter, condition in (rule.get("conditions") or {}).items():
         base = f"{prefix}.conditions.{letter}"
+        op = condition.get("op")
+        group = None
+        for candidates in OP_GROUPS:
+            if op in candidates:
+                group = candidates
+        if group:
+            out.append({"path": f"{base}.op", "group": "Rules", "type": "choice", "value": op,
+                        "options": list(group), "suggest": [op, OPPOSITE_OP[op]],
+                        "labels": {name: OP_WORDS[name] for name in group},
+                        "label": f"{where} › {letter} › the comparison"})
         for side in ("left", "right", "lower", "upper"):
             ref = condition.get(side)
             if isinstance(ref, dict) and "const" in ref:
@@ -307,7 +333,8 @@ def _rule_inputs(out, prefix, rule, where):
 def tunable_inputs(spec):
     """Every value the optimiser can vary, in the order the Optimise page lists them.
 
-    [{"path", "group", "label", "type": "int" | "float" | "choice", "value", "options"?}].
+    [{"path", "group", "label", "type": "int" | "float" | "choice", "value", "options"?,
+      "labels"? (how each option reads), "suggest"? (a choice's starting list)}].
     Risk dials (stop, target, size, time stop, breakeven, trailing step) are here
     beside the features' parameters and the rules' numbers.
     """

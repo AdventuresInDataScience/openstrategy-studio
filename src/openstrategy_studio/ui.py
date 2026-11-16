@@ -437,6 +437,23 @@ def feature_editor(name, feature, features):
                 param_input(f"features.{name}.params.{param}", declaration, label=param.replace("_", " "),
                             help=indicators.param_help(item["id"], param))
         st.caption(f"Outputs: {', '.join(f'{name}.{output}' for output in item['outputs'])}")
+        # A single-type average (SMA, EMA ...) can become the Moving average entry at the same
+        # type, which gives the same numbers, so its type can be optimised like any setting.
+        kind = indicators.SAME_AS_MA.get(item["id"])
+        if kind:
+            tries = [kind] + [other for other in ("SMA", "EMA") if other != kind]
+            if st.button("Let the optimiser pick the type", key=key(f"features.{name}", ":any_type"),
+                         help=f"Swaps this {kind} for the Moving average entry set to {kind}, which gives exactly "
+                              "the same numbers, and adds its type to the Optimise page's variables with "
+                              f"{' and '.join(tries)} to try (add others there). The period, the inputs and the "
+                              "rules stay as they are."):
+                def swap():
+                    feature["indicator"] = "talib:MA"
+                    feature.setdefault("params", {})["matype"] = kind
+                    # Written directly, not through set_path: the variable's key holds dots.
+                    found = current().setdefault("optimise", {}).setdefault("variables", {})
+                    found.setdefault(f"features.{name}.params.matype", {"values": tries})
+                rerun_after(swap)
     if st.button("Delete feature", key=key(f"features.{name}", ":delete")):
         rerun_after(lambda: features.pop(name))
 

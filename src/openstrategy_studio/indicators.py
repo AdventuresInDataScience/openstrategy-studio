@@ -54,6 +54,16 @@ PRICE_FIELDS = ["open", "high", "low", "close", "volume"]
 # smoothing at all; DEFAULT is the function's own choice.
 TALIB_MA_TYPES = ["SMA", "EMA", "WMA", "DEMA", "TEMA", "TRIMA", "KAMA", "MAMA", "T3", "HMA", "NONE", "DEFAULT",
                   "ZLEMA", "RMA", "VIDYA", "ALMA"]
+# The single-type averages that TA-Lib's Moving average (talib:MA) reproduces exactly at
+# that matype: the same input, the same one setting (timeperiod) and the same numbers
+# (tests/test_indicators.py checks each). A feature using one can be swapped for talib:MA so
+# the optimiser can pick the type (the feature card's "Let the optimiser pick the type").
+# Left out: T3 and ALMA (they match only with their extra settings at the defaults, which
+# the swap would silently drop), VIDYA (its own cmoperiod differs from MA's) and MAMA
+# (two outputs and no timeperiod).
+SAME_AS_MA = {"talib:SMA": "SMA", "talib:EMA": "EMA", "talib:WMA": "WMA", "talib:DEMA": "DEMA",
+              "talib:TEMA": "TEMA", "talib:TRIMA": "TRIMA", "talib:KAMA": "KAMA", "talib:HMA": "HMA",
+              "talib:ZLEMA": "ZLEMA", "talib:RMA": "RMA"}
 # pandas-ta's moving averages, by the name its mamode parameters take.
 # ⚠️ VERIFY on a pandas-ta-classic bump: read from pandas_ta_classic.ma's own list.
 PANDAS_TA_MA_TYPES = ["sma", "ema", "dema", "tema", "wma", "hma", "rma", "fwma", "pwma", "sinwma", "swma", "t3",

@@ -217,3 +217,52 @@ def test_optimise_variables_are_added_and_changed(tmp_path, monkeypatch):
     app.radio(key=current_key(app, "opt:risk.stop.points:how")).set_value("list").run()
     assert app.session_state["spec"]["optimise"]["variables"]["risk.stop.points"]["values"][:2] == [30.0, 39.0]
     assert not app.exception, [item.value for item in app.exception]
+
+
+def test_an_average_can_hand_its_type_to_the_optimiser(tmp_path, monkeypatch):
+    """The feature card's button swaps an SMA for the Moving average entry at SMA and adds its type to
+    the variables; the period, its variable and the rules are untouched."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio.spec import validate_spec
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    before = load_template("ma_cross")
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = copy.deepcopy(before)
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.button(key=current_key(app, "features.fast:any_type")).click().run()
+    assert not app.exception, [item.value for item in app.exception]
+    spec = app.session_state["spec"]
+    assert spec["features"]["fast"] == {"indicator": "talib:MA", "inputs": {"close": "close"},
+                                        "params": {"timeperiod": 50, "matype": "SMA"}}
+    assert spec["features"]["slow"] == before["features"]["slow"] and spec["rules"] == before["rules"]
+    variables = spec["optimise"]["variables"]
+    assert variables["features.fast.params.matype"] == {"values": ["SMA", "EMA"]}
+    assert variables["features.fast.params.timeperiod"] == before["optimise"]["variables"]["features.fast.params.timeperiod"]
+    assert validate_spec(spec) == []
+    # The Moving average entry has no such button: its type is already a setting.
+    assert not [button for button in app.button if button.key == current_key(app, "features.fast:any_type")]
+
+
+def test_a_comparison_is_added_as_a_variable_in_words(tmp_path, monkeypatch):
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    picker = app.selectbox(key=current_key(app, "optimise:add"))
+    wanted = "Rules: Long entry › A › the comparison (now crosses above)"
+    assert wanted in picker.options, picker.options
+    picker.select_index(picker.options.index(wanted)).run()
+    app.button(key=current_key(app, "optimise:add:go")).click().run()
+    path = "rules.long_entry.conditions.A.op"
+    assert app.session_state["spec"]["optimise"]["variables"][path] == {"values": ["crosses_above", "crosses_below"]}
+    values = app.multiselect(key=current_key(app, f"opt:{path}:values"))
+    assert "crosses below" in values.options and "is at or above" in values.options
+    assert values.value == ["crosses_above", "crosses_below"]
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
