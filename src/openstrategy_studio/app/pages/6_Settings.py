@@ -69,8 +69,11 @@ st.subheader("FRED rates")
 if os.environ.get("FRED_API_KEY") and not settings.get("fred_api_key"):
     st.write("Using the FRED_API_KEY environment variable.")
 draft["fred_api_key"] = st.text_input("FRED API key", value=settings.get("fred_api_key") or "", type="password",
-                                      help="Free from the St. Louis Fed. Prefer the FRED_API_KEY environment variable "
-                                           "or a .env file in the data folder.")
+                                      help="Interest-rate history for holding costs, when a strategy's Account tab "
+                                           "picks FRED. The key is free from the St. Louis Fed "
+                                           "(fred.stlouisfed.org/docs/api/api_key.html). A key here is used instead "
+                                           "of the FRED_API_KEY environment variable or a .env file, from the moment "
+                                           "you save; clearing it takes effect at the next start.")
 if draft["fred_api_key"]:
     st.warning("The key will be stored in settings.toml. Keep that file out of version control.")
 

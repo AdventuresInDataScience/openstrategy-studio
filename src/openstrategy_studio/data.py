@@ -175,6 +175,7 @@ def validate_ohlcv(frame, timeframe, spike_multiple=10.0, gap_days=None):
 def download_yahoo(symbol, timeframe, start=None, end=None):
     """One symbol from Yahoo via vectorbt's YFData, as a raw frame (not yet normalised).
 
+    start and end are dates (or anything pd.Timestamp reads); both are included.
     Daily history is deep. Intraday history is limited to recent windows (the
     limit varies by interval). auto_adjust=False keeps the raw close beside
     "Adj Close", so the loader can choose per instrument mode.
@@ -185,6 +186,16 @@ def download_yahoo(symbol, timeframe, start=None, end=None):
     """
     import vectorbt as vbt
 
+    # st.date_input gives a datetime.date, which vectorbt 1.1.0's to_tzaware_datetime does
+    # not accept: it handles str, numbers, pd.Timestamp and datetime, and a date falls
+    # through to `.tzinfo`, which a date lacks (AttributeError). A naive Timestamp is read
+    # in local time, as yfinance expects.
+    if start is not None:
+        start = pd.Timestamp(start)
+    if end is not None:
+        # ⚠️ yfinance's end is exclusive (its history() docstring, 1.8.0): without the
+        # extra day the "To" date the page asks for would be silently left out.
+        end = pd.Timestamp(end) + pd.Timedelta(days=1)
     data = vbt.YFData.download(symbol, start=start, end=end, interval=YAHOO_INTERVALS[timeframe],
                                auto_adjust=False)
     frame = data.get()

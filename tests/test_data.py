@@ -1,5 +1,7 @@
 """Test 10: data normalisation, validation and loading."""
 
+import types
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -122,3 +124,30 @@ def test_combined_lse_and_us_load_common_days(tmp_path):
 def test_missing_dataset_message(tmp_path):
     with pytest.raises(ValueError, match="Import it on the Data page"):
         D.load_dataset(tmp_path, "NOPE", "1d")
+
+
+def test_yahoo_download_takes_the_pages_dates(monkeypatch):
+    """The Data page passes datetime.date (st.date_input); vectorbt's own date parsing must
+    accept it, and the "To" date must be included (yfinance's end is exclusive).
+
+    No network: yfinance.Ticker is replaced, so vectorbt's YFData runs its real date
+    handling and then gets a canned frame.
+    """
+    pytest.importorskip("vectorbt")
+    yfinance = pytest.importorskip("yfinance")
+    from datetime import date
+
+    asked = {}
+
+    def fake_ticker(symbol, **kwargs):
+        def history(period=None, start=None, end=None, **kwargs):
+            asked.update(start=start, end=end)
+            return raw_frame(n=3).assign(**{"Adj Close": 10.0})
+        return types.SimpleNamespace(history=history)
+
+    monkeypatch.setattr(yfinance, "Ticker", fake_ticker)
+    frame = D.download_yahoo("SPY", "1d", date(2024, 1, 2), date(2024, 1, 5))
+    assert {"Open", "High", "Low", "Close", "Adj Close"} <= set(frame.columns)
+    # Local midnight on each side; the end is the day after the "To" date.
+    assert asked["start"].replace(tzinfo=None) == pd.Timestamp("2024-01-02")
+    assert asked["end"].replace(tzinfo=None) == pd.Timestamp("2024-01-06")
