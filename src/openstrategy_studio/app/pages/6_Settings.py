@@ -53,9 +53,14 @@ draft["data_dir"] = st.text_input("Data folder", value=settings.get("data_dir") 
                                   help="Every price file, strategy, run and job lives here. Blank uses the default.")
 row = st.columns(3)
 draft["workers"] = int(row[0].number_input("Worker processes for optimisation", min_value=1,
-                                           value=int(settings.get("workers", 1)), step=1))
+                                           value=int(settings.get("workers", 1)), step=1,
+                                           help="The number a new optimisation starts with; the Optimise page can "
+                                                "change it per job. Up to your CPU's core count is faster."))
 draft["spike_multiple"] = float(row[1].number_input("Flag bars wider than this many median ranges", min_value=2.0,
-                                                    value=float(settings.get("spike_multiple", 10.0)), step=1.0))
+                                                    value=float(settings.get("spike_multiple", 10.0)), step=1.0,
+                                                    help="On import, a bar whose high-low range, or whose opening "
+                                                         "gap, is more than this many times the median bar range is "
+                                                         "listed for review. Nothing is changed."))
 draft["offline"] = row[2].toggle("Offline", value=bool(settings.get("offline")),
                                  help="Turns off every download. Stored data still works; FRED falls back to its cache, "
                                       "then to the static rate below.")
@@ -75,15 +80,44 @@ vectorbtx_values = dict(settings["vectorbtx"])
 roundings = [None, "floor", "nearest", "ceil"]
 rounding = st.selectbox("Size rounding", roundings,
                         index=roundings.index(vectorbtx_values.get("rounding")) if vectorbtx_values.get("rounding") in roundings else 0,
-                        format_func=lambda value: "Default" if value is None else value)
+                        format_func=lambda value: "Default" if value is None else value,
+                        help="How position sizes are rounded to an instrument's size step, where the instrument "
+                             "sets no rounding of its own: floor (down, vectorbtX's default), nearest or ceil.")
 vectorbtx_values["rounding"] = rounding
 numbers = ["financing_markup", "carry_markup", "fx_markup", "slippage_max", "slippage_coef", "vol_window",
            "static_rate", "triangulation_tolerance"]
 texts = ["triple_day", "end_of_day", "day_count", "fill_policy"]
+# What each does, shown in the table (a cell cannot carry an ⓘ of its own). From vectorbtX's
+# docs/API.md (the settings table) and its code; defaults are vectorbtX's own.
+meanings = {
+    "financing_markup": "The broker's yearly markup over the benchmark rate on financing, always against you "
+                        "(0.03 = 3%). Default 0.03.",
+    "carry_markup": "The broker's yearly fee on FX carry (the tom-next rate), always against you. Default 0.01.",
+    "fx_markup": "The broker's worse-than-market currency conversion, charged as slippage on each fill of a "
+                 "converted instrument (0.005 = 0.5%). Default 0.005.",
+    "slippage_max": "The ceiling on automatic slippage, as a fraction of price. Default 0.005.",
+    "slippage_coef": "The multiplier in automatic slippage: coef x volatility x square root of (size / average "
+                     "volume). Default 1.",
+    "vol_window": "Bars of returns behind the volatility in automatic slippage. Default 20.",
+    "static_rate": "One yearly rate for every currency when FRED cannot be reached (0.05 = 5%). Default: none.",
+    "triangulation_tolerance": "How far an FX rate may stray from the one implied through other pairs before the "
+                               "FX table is rejected. Default 0.0001.",
+    "triple_day": "The weekday charged three nights of holding costs, for the weekend: WED or FRI, say. "
+                  "Default WED.",
+    "end_of_day": "The broker's daily cut-off for holding costs, HH:MM. No effect on daily bars. Default 22:00.",
+    "day_count": "Days in the interest year, 360 or 365. Default 360.",
+    "fill_policy": "Where FX rates have gaps against the prices: ffill_with_warning, ffill, strict (stop with an "
+                   "error) or nan. Default ffill_with_warning.",
+}
 frame = pd.DataFrame({"setting": numbers + texts,
                       "value": [None if vectorbtx_values.get(key) is None else str(vectorbtx_values[key])
-                                for key in numbers + texts]})
-edited = st.data_editor(frame, hide_index=True, disabled=["setting"], width="stretch")
+                                for key in numbers + texts],
+                      "what it does": [meanings[key] for key in numbers + texts]})
+edited = st.data_editor(frame, hide_index=True, disabled=["setting", "what it does"], width="stretch",
+                        column_config={"setting": st.column_config.TextColumn("setting", help="vectorbtX's name."),
+                                       "value": st.column_config.TextColumn(
+                                           "value", help="Your value. Blank keeps vectorbtX's own default."),
+                                       "what it does": st.column_config.TextColumn("what it does", width="large")})
 st.caption("carry_markup is the broker's fee on FX carry and fx_markup its worse-than-market currency "
            "conversion rate; both are charged on every backtest that uses them.")
 for key, value in zip(edited["setting"], edited["value"]):

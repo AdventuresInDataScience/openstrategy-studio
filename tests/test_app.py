@@ -13,8 +13,27 @@ from openstrategy_studio.spec import list_templates, load_template
 
 APP = Path(openstrategy_studio.__file__).parent / "app"
 
+# Every widget kind that holds a setting (buttons are actions, not settings).
+SETTING_WIDGETS = ("text_input", "number_input", "selectbox", "multiselect", "radio", "checkbox", "toggle", "slider",
+                   "select_slider", "date_input", "text_area")
+
+
+def settings_without_a_tooltip(app):
+    """The visible settings on a rendered page that have no ⓘ (help=) beside them.
+
+    A widget whose label is collapsed has nowhere to show an ⓘ, so it is skipped; the
+    heading or name beside it carries one instead (proto LabelVisibility: 0 is VISIBLE).
+    """
+    missing = []
+    for kind in SETTING_WIDGETS:
+        for widget in getattr(app, kind):
+            if widget.proto.label_visibility.value == 0 and not (widget.help or "").strip():
+                missing.append(f"{kind} {widget.label!r}")
+    return missing
+
 
 def test_every_page_loads_with_every_template(tmp_path, monkeypatch):
+    """Every page renders with every template, leaves the spec as it was, and explains every setting."""
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
     monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
@@ -28,6 +47,8 @@ def test_every_page_loads_with_every_template(tmp_path, monkeypatch):
             assert not app.exception, (name, page.name, [item.value for item in app.exception])
             # Rendering must not change the spec (CLAUDE.md): every widget is seeded from it.
             assert app.session_state["spec"] == load_template(name), (name, page.name)
+            # Every setting has an ⓘ tooltip (CLAUDE.md).
+            assert not settings_without_a_tooltip(app), (name, page.name, settings_without_a_tooltip(app))
 
 
 def test_every_account_choice_renders_without_changing_the_spec(tmp_path, monkeypatch):
@@ -51,6 +72,7 @@ def test_every_account_choice_renders_without_changing_the_spec(tmp_path, monkey
         app.run()
         assert not app.exception, (account, [item.value for item in app.exception])
         assert app.session_state["spec"] == spec, account
+        assert not settings_without_a_tooltip(app), (account, settings_without_a_tooltip(app))
 
 
 def test_backtest_page_says_how_the_run_was_funded(tmp_path, monkeypatch):
@@ -77,6 +99,8 @@ def test_backtest_page_says_how_the_run_was_funded(tmp_path, monkeypatch):
         texts = [item.value for item in list(app.info) + list(app.caption)]
         assert any(expected in text for text in texts), (expected, texts)
         assert any(item.value == "**Each symbol**" for item in app.markdown)
+        # The results half of the page (metrics, views, chart theme) explains its settings too.
+        assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
 
 
 def test_the_backtest_page_shows_what_vectorbtx_flagged(tmp_path, monkeypatch):

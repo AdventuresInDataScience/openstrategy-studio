@@ -30,6 +30,43 @@ INSTRUMENT_FIELDS = {
     "commission_min": "number", "spread_points": "number", "slippage": "text", "borrow_rate": "number",
     "rounding": "text", "leverage": "number", "leverage_type": "text", "price_field": "text",
 }
+# The ⓘ on each grid column: what vectorbtX does with the field (its docs/API.md, sections 0, 1, 3 and 6).
+INSTRUMENT_HELP = {
+    "asset_class": "stocks, commodities, fx or index. On CFDs and spread bets it sets the default leverage (5x "
+                   "stocks, 10x commodities and indices, 30x FX), and fx makes the overnight cost carry rather "
+                   "than financing.",
+    "point_size": "The price move worth one point: 0.01 for a price in cents or pence, 0.0001 for most FX pairs "
+                  "(0.01 for yen pairs). Stops, targets and the spread are given in points.",
+    "contract_size": "Units of the underlying in one contract or lot (100000 for a standard FX lot). CFDs and FX "
+                     "spot only: a spread bet's stake is its size.",
+    "increment": "The step a position size moves in (1 share, 0.01 lots). Sizes are rounded to it.",
+    "min_size": "The smallest position allowed, a multiple of the increment. An order that rounds below it is "
+                "not placed.",
+    "allow_fractional": "Buying outright only: allow fractions of a share. The size step drops to 0.000001 unless "
+                        "an increment is given.",
+    "quote_currency": "The currency the price is quoted in: USD for AAPL, and for EURUSD.",
+    "base_currency": "FX only: the pair's first currency (EUR for EURUSD). Carry needs it.",
+    "cost_currency": "The currency of fixed fees (flat, per-unit and minimum commission). Kept apart from the quote "
+                     "currency so a $1 minimum stays $1 when prices are converted.",
+    "commission_pct": "Commission as a fraction of each trade's value (0.001 = 0.1%).",
+    "commission_flat": "A fixed fee on every order, in the cost currency.",
+    "commission_per_unit": "A fee for each share, contract or lot traded, in the cost currency.",
+    "commission_min": "The least commission an order pays, in the cost currency.",
+    "spread_points": "The full gap between bid and ask, in points. Half is paid on each fill, so a round trip "
+                     "pays the whole spread.",
+    "slippage": "Extra cost on each fill, as a fraction of price (0.0005 = 0.05%), or auto: estimated from "
+                "volatility and trade size against volume (needs volume data).",
+    "borrow_rate": "The yearly fee for borrowing what you short (0.005 = 0.5% a year), charged daily on the short's "
+                   "value. Blank: unknown, so a short is charged nothing and the run says so. 0: the borrow is "
+                   "free.",
+    "rounding": "How sizes are rounded to the increment: floor (down, the default), nearest or ceil.",
+    "leverage": "The most this instrument may be leveraged (2 = twice the cash). Blank: the mode's default, 2x "
+                "outright and FX spot, 5x to 30x on CFDs and spread bets by asset class.",
+    "leverage_type": "instrument_level: a cap on each instrument on its own. portfolio_level: one cap on the "
+                     "whole book, applied by scaling a portfolio's target weights.",
+    "price_field": "close, or adj_close: prices adjusted for dividends and splits (the default when buying "
+                   "outright). Needs adj_close in the stored data.",
+}
 KIND_LABELS = {"signals": "Trade on signals", "portfolio": "Hold a portfolio"}
 KIND_HELP = {"signals": "Entry and exit rules decide when to buy and when to sell, long or short.",
              "portfolio": "Target weights across the symbols, rebalanced on a schedule or never. One symbol held "
@@ -105,7 +142,9 @@ def prune_variables():
 templates = list_templates()
 left, right = st.columns([4, 1])
 chosen = left.selectbox("Start from", [None] + list(templates),
-                        format_func=lambda name: "Keep the current strategy" if name is None else templates[name])
+                        format_func=lambda name: "Keep the current strategy" if name is None else templates[name],
+                        help="A ready-made strategy to edit. Starting from one replaces the whole strategy, so "
+                             "save the current one first (Home page) if you want to keep it.")
 right.write("")
 if right.button("Start from this", disabled=chosen is None):
     ui.replace_spec(load_template(chosen))
@@ -127,21 +166,27 @@ with form:
     # --- setup ----------------------------------------------------------------------
     with tabs["Setup"]:
         row = st.columns([2, 3])
-        name = row[0].text_input("Name", value=spec.get("name", ""), key=ui.key("name"))
+        name = row[0].text_input("Name", value=spec.get("name", ""), key=ui.key("name"),
+                                 help="Names the strategy in saved runs, jobs and downloaded files.")
         if name != spec.get("name"):
             ui.set_value("name", name)
         options = sorted(set(stored) | set(symbols))
         picked_symbols = row[1].multiselect("Symbols", options, default=symbols, key=ui.key("data.symbols"),
-                                            help="Import symbols on the Data page first.")
+                                            help="What the strategy trades. Import symbols on the Data page "
+                                                 "first. With several, only the dates they all share are used.")
         row = st.columns(3)
         picked_timeframe = row[0].selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index(timeframe),
-                                            key=ui.key("data.timeframe"), help="Every rule is evaluated once per bar.")
+                                            key=ui.key("data.timeframe"),
+                                            help="The bar size. Every rule is evaluated once per bar. Data stored "
+                                                 "at a finer timeframe is resampled up.")
         # Streamlit limits date pickers to ten years either side unless told otherwise.
         span = {"min_value": date(1970, 1, 1), "max_value": date(2100, 12, 31)}
         start = row[1].date_input("From", value=date.fromisoformat(str(spec["data"]["start"])[:10]),
-                                  key=ui.key("data.start"), **span)
+                                  key=ui.key("data.start"), **span,
+                                  help="The first date of the backtest. Indicators warm up from here, so their "
+                                       "first bars are blank.")
         end = row[2].date_input("To", value=date.fromisoformat(str(spec["data"]["end"])[:10]),
-                                key=ui.key("data.end"), **span)
+                                key=ui.key("data.end"), **span, help="The last date of the backtest.")
         if picked_symbols != symbols:
             def switch_symbols():
                 instruments = spec.setdefault("instruments", {})
@@ -170,10 +215,15 @@ with form:
         left, right = st.columns(2, gap="large")
         picked_kind = left.radio("What are you building?", list(KIND_LABELS), index=list(KIND_LABELS).index(kind),
                                  format_func=KIND_LABELS.get, captions=[KIND_HELP[name] for name in KIND_LABELS],
-                                 key=ui.key("setup.kind"))
+                                 key=ui.key("setup.kind"),
+                                 help="It decides the third tab: Rules or Portfolio. Switching starts that tab, "
+                                      "the Risk tab and the shared-cash settings afresh; features are kept.")
         picked_trading = right.radio("How are you trading it?", TRADING, index=TRADING.index(trading),
                                      format_func=TRADING_LABELS.get, captions=[TRADING_HELP[name] for name in TRADING],
-                                     key=ui.key("setup.trading"))
+                                     key=ui.key("setup.trading"),
+                                     help="One way of trading for every instrument. It decides which costs apply, "
+                                          "which instrument fields are shown below and how sizes are counted. "
+                                          "Switching drops the fields the new way does not use.")
         if picked_kind != kind:
             def switch_kind():
                 spec["setup"]["kind"] = picked_kind
@@ -218,7 +268,9 @@ with form:
             current_file = instruments.get("from_file")
             file = st.selectbox("Universe file", universes,
                                 index=universes.index(current_file) if current_file in universes else 0,
-                                key=ui.key("instruments.from_file"))
+                                key=ui.key("instruments.from_file"),
+                                help="A stored file with one instrument per row, each with its own mode and costs. "
+                                     "It replaces the grid.")
             if instruments != {"from_file": file}:
                 ui.set_value("instruments", {"from_file": file})
         else:
@@ -238,15 +290,23 @@ with form:
                 else:
                     grid[field] = grid[field].map(lambda value: "" if value is None else str(value).lower()
                                                   if isinstance(value, bool) else str(value))
-            config = {"rounding": st.column_config.SelectboxColumn("rounding", options=["", "floor", "nearest", "ceil"]),
-                      "allow_fractional": st.column_config.SelectboxColumn("allow_fractional", options=["", "true", "false"]),
-                      "price_field": st.column_config.SelectboxColumn("price_field", options=["", "close", "adj_close"]),
-                      "slippage": st.column_config.TextColumn("slippage", help="A number, or auto (needs volume)."),
-                      "borrow_rate": st.column_config.NumberColumn(
-                          "borrow_rate", min_value=0.0, format="%.4f",
-                          help="The yearly fee for borrowing what you short (0.005 = 0.5% a year), charged daily on "
-                               "the short's value. Blank: unknown, so a short is charged nothing and the run says "
-                               "so. 0: the borrow is free.")}
+            # Every column gets its ⓘ (INSTRUMENT_HELP); a few also get a list of choices.
+            choices = {"rounding": ["", "floor", "nearest", "ceil"], "allow_fractional": ["", "true", "false"],
+                       "price_field": ["", "close", "adj_close"],
+                       "asset_class": ["", "stocks", "commodities", "fx", "index"],
+                       "leverage_type": ["", "instrument_level", "portfolio_level"]}
+            config = {}
+            for field, kind_name in shown.items():
+                if field in choices:
+                    config[field] = st.column_config.SelectboxColumn(field, options=choices[field],
+                                                                     help=INSTRUMENT_HELP[field])
+                elif field == "borrow_rate":
+                    config[field] = st.column_config.NumberColumn(field, min_value=0.0, format="%.4f",
+                                                                  help=INSTRUMENT_HELP[field])
+                elif kind_name == "number":
+                    config[field] = st.column_config.NumberColumn(field, help=INSTRUMENT_HELP[field])
+                else:
+                    config[field] = st.column_config.TextColumn(field, help=INSTRUMENT_HELP[field])
             st.caption(f"{TRADING_LABELS[trading]}: blank cells use the mode's default, and only the fields this mode "
                        "uses are shown. Costs come only from these fields. Financing on held positions comes from the "
                        "account's rates and the markup on the Settings page.")
@@ -300,7 +360,10 @@ with form:
             row = st.columns([3, 1])
             preset = row[0].selectbox("Preset", [None] + list(PRESETS),
                                       format_func=lambda p: "Choose a preset to replace the rules" if p is None
-                                      else PRESETS[p][0], key=ui.key("rules", ":preset"))
+                                      else PRESETS[p][0], key=ui.key("rules", ":preset"),
+                                      help="A common pair of entry and exit rules, with the features they need. "
+                                           "Applying one replaces all four rules and adds its features (one with "
+                                           "the same name is overwritten).")
             row[1].write("")
             if row[1].button("Apply preset", disabled=preset is None):
                 new = ui.spec_copy()
@@ -309,12 +372,20 @@ with form:
                 new["rules"].update(json.loads(json.dumps(PRESETS[preset][2])))
                 ui.replace_spec(new)
                 st.rerun()
+            slot_help = {
+                "long_entry": "When to buy. Fires on a bar's close; the order fills at the next bar's open.",
+                "long_exit": "When to close a long. Without one, a long is closed only by a stop, a target, an "
+                             "extra exit or an opposite entry.",
+                "short_entry": "When to sell short. Fires on a bar's close; the order fills at the next bar's open.",
+                "short_exit": "When to close a short. Without one, a short is closed only by a stop, a target, an "
+                              "extra exit or an opposite entry.",
+            }
             for slot, label in (("long_entry", "Long entry"), ("long_exit", "Long exit"),
                                 ("short_entry", "Short entry"), ("short_exit", "Short exit")):
                 node = rules.get(slot)
                 st.subheader(label)
                 enabled = st.toggle(f"Use a {label.lower()} rule", value=node is not None,
-                                    key=ui.key(f"rules.{slot}", ":on"))
+                                    key=ui.key(f"rules.{slot}", ":on"), help=slot_help[slot])
                 if enabled and node is None:
                     ui.rerun_after(lambda slot=slot: rules.__setitem__(slot, ui.new_rule(features)))
                 if not enabled and node is not None:
@@ -342,30 +413,43 @@ with form:
                     prune_variables()
                 ui.rerun_after(drop_selection)
             if use_selection:
-                ui.ref_input("selection.score", features, "Rank assets by")
+                ui.ref_input("selection.score", features, "Rank assets by",
+                             help="The score each asset is ranked by on every bar, such as a momentum feature.")
                 ui.param_input("selection.mode", {"type": "choice", "options": SELECTION_MODES, "default": "top"},
-                               label="Keep")
+                               label="Keep", help="Which assets are held: the highest scores, the lowest, or "
+                                                  "every asset above the minimum score.")
                 if spec["selection"].get("mode", "top") in ("top", "bottom"):
-                    ui.param_input("selection.top_n", {"type": "int", "default": 1}, label="How many")
+                    ui.param_input("selection.top_n", {"type": "int", "default": 1}, label="How many",
+                                   help="How many assets to hold at once.")
                 use_floor = st.checkbox("Require a minimum score", value=spec["selection"].get("min_score") is not None,
-                                        key=ui.key("selection.min_score", ":on"))
+                                        key=ui.key("selection.min_score", ":on"),
+                                        help="An asset scoring below the minimum is not held, even if it ranks "
+                                             "high enough. On a bar where none qualifies, the portfolio holds "
+                                             "cash.")
                 if use_floor and spec["selection"].get("min_score") is None:
                     ui.set_value("selection.min_score", 0.0)
                     st.rerun()
                 if use_floor:
-                    ui.param_input("selection.min_score", {"type": "float", "default": 0.0}, label="Minimum score")
+                    ui.param_input("selection.min_score", {"type": "float", "default": 0.0}, label="Minimum score",
+                                   help="An asset is held only while its score is at or above this.")
                 elif spec["selection"].get("min_score") is not None:
                     ui.set_value("selection.min_score", None)
             st.markdown("**Weighting**")
             ui.param_input("weighting.scheme", {"type": "choice", "options": WEIGHT_SCHEMES, "default": "equal"},
-                           label="Scheme")
+                           label="Scheme",
+                           help="How the held assets share the money. equal: the same share each. inverse_vol: "
+                                "more in the calmer assets, by 1 / volatility. price: in proportion to price. "
+                                "fixed: the table below, as given.")
             scheme = spec["weighting"]["scheme"]
             if scheme == "inverse_vol":
-                ui.param_input("weighting.vol_window", {"type": "int", "default": 20}, label="Volatility window (bars)")
+                ui.param_input("weighting.vol_window", {"type": "int", "default": 20}, label="Volatility window (bars)",
+                               help="Bars of returns used to measure each asset's volatility.")
             if scheme == "fixed":
                 table = spec["weighting"].get("table") or {symbol: 1 / len(symbols) for symbol in symbols}
                 frame = pd.DataFrame({"weight": [table.get(symbol, 0.0) for symbol in symbols]}, index=symbols)
-                edited = st.data_editor(frame, key=ui.key("weighting.table"), width="stretch")
+                edited = st.data_editor(frame, key=ui.key("weighting.table"), width="stretch", column_config={
+                    "weight": st.column_config.NumberColumn("weight", help="Each asset's share of the account "
+                                                                           "(0.6 = 60%).")})
                 new_table = {symbol: float(weight) for symbol, weight in edited["weight"].items()}
                 if new_table != spec["weighting"].get("table"):
                     ui.set_value("weighting.table", new_table)
@@ -375,7 +459,9 @@ with form:
             names = {"never": "Never: buy once and hold", "every_bar": "On every bar", "calendar": "On a calendar"}
             rebalance = st.radio("Go back to the target weights", list(names), index=list(names).index(
                 schedule.get("rebalance", "never")), format_func=names.get, horizontal=True,
-                key=ui.key("schedule.rebalance"))
+                key=ui.key("schedule.rebalance"),
+                help="How often the holdings are traded back to their target weights. Between those dates "
+                     "they drift with prices. Every bar trades the most and pays the most in costs.")
             if rebalance != schedule.get("rebalance"):
                 def switch_rebalance():
                     schedule["rebalance"] = rebalance
@@ -390,10 +476,13 @@ with form:
                 row = st.columns(2)
                 with row[0]:
                     ui.param_input("schedule.calendar.freq", {"type": "choice", "options": CALENDAR_FREQS,
-                                                              "default": "M"}, label="Every")
+                                                              "default": "M"}, label="Every",
+                                   help="W week, M month, Q quarter, Y year.")
                 with row[1]:
                     ui.param_input("schedule.calendar.on", {"type": "choice", "options": ["first", "last"],
-                                                            "default": "first"}, label="On the")
+                                                            "default": "first"}, label="On the",
+                                   help="The first or the last bar of each period. The trades fill at the next "
+                                        "bar's open.")
                 use_threshold = st.checkbox("Only when the weights have drifted", value=schedule.get("threshold") is not None,
                                             key=ui.key("schedule.threshold", ":on"),
                                             help="Drift is measured from the last calendar rebalance.")
@@ -402,7 +491,9 @@ with form:
                     st.rerun()
                 if use_threshold:
                     ui.param_input("schedule.threshold", {"type": "float", "default": 0.05},
-                                   label="Tolerance (0.05 = 5%)")
+                                   label="Tolerance (0.05 = 5%)",
+                                   help="How far an asset's weight may drift, relative to its target, before it "
+                                        "counts as drifted: 0.05 lets a 40% target move between 38% and 42%.")
                     ui.param_input("schedule.combine", {"type": "choice", "options": ["and", "or"], "default": "and"},
                                    label="Rebalance when",
                                    help="and: calendar dates where drift is too large. or: calendar dates, plus any "
@@ -410,7 +501,14 @@ with form:
                 elif schedule.get("threshold") is not None:
                     ui.set_value("schedule.threshold", None)
             ui.param_input("schedule.min_trade", {"type": "float", "default": 0.005},
-                           label="Skip trades smaller than (share of value)")
+                           label="Skip trades smaller than (share of value)",
+                           # ⚠️ vectorbtX's to_targets compares each new target with the last one, not with
+                           # the drifted holding, so a small trade back to an unchanged target is still made
+                           # (docs/UPSTREAM.md, issue 21). Reword this when it is fixed.
+                           help="When an asset's target weight changes by less than this (0.005 = 0.5% of the "
+                                "account), it keeps its previous target. ⚠️ The new target is compared with the "
+                                "last one, not with the drifted holding, so a small trade back to an unchanged "
+                                "target is still made.")
 
     # --- risk ------------------------------------------------------------------------
     with tabs["Risk"]:
@@ -424,13 +522,22 @@ with form:
             if used not in labels:
                 labels[used] = "Units (raw size)"
             chosen_sizing = st.radio("Position size", list(labels), index=list(labels).index(used),
-                                     format_func=labels.get, key=ui.key("risk.sizing", ":kind"))
+                                     format_func=labels.get, key=ui.key("risk.sizing", ":kind"),
+                                     help="How big each new position is. The two risk choices size the trade so "
+                                          "that hitting the stop loses that much, so they need a stop.")
             if chosen_sizing != used:
                 def switch_sizing():
                     risk["sizing"] = {chosen_sizing: SIZING_DEFAULTS[chosen_sizing]}
                     prune_variables()
                 ui.rerun_after(switch_sizing)
-            ui.param_input(f"risk.sizing.{used}", {"type": "float", "default": 1.0}, label="Amount")
+            amount_help = {"risk_pct": "The share of starting cash lost if the stop is hit (0.01 = 1%).",
+                           "risk_amount": "The cash lost if the stop is hit, in the account's currency.",
+                           "stake": f"{labels.get('stake', 'Units')}: the instrument's own unit, the same on every "
+                                    "trade.",
+                           "notional": "The position's full value when it opens, the same on every trade.",
+                           "size": "A raw size in the engine's own units."}
+            ui.param_input(f"risk.sizing.{used}", {"type": "float", "default": 1.0}, label="Amount",
+                           help=amount_help.get(used))
             if used == "risk_pct":
                 st.caption("Sized from starting cash, not compounding equity, and from the stop's distance.")
             stop = risk.get("stop") or {"kind": "none"}
@@ -446,8 +553,12 @@ with form:
                     prune_variables()
                 ui.rerun_after(switch_stop)
             if stop_kind != "none":
-                ui.param_input("risk.stop.points", {"type": "float", "default": 50.0}, label="Distance (points)")
-            use_target = st.checkbox("Take profit", value=bool(risk.get("target")), key=ui.key("risk.target", ":on"))
+                ui.param_input("risk.stop.points", {"type": "float", "default": 50.0}, label="Distance (points)",
+                               help="How far from the fill price the stop sits, in points (price distance divided "
+                                    "by the point size). A trailing stop keeps this distance behind the best price "
+                                    "since entry.")
+            use_target = st.checkbox("Take profit", value=bool(risk.get("target")), key=ui.key("risk.target", ":on"),
+                                     help="Close the trade once it has moved a set distance in your favour.")
             if use_target and not risk.get("target"):
                 ui.rerun_after(lambda: risk.__setitem__("target", {"points": 100.0}))
             if not use_target and risk.get("target"):
@@ -456,11 +567,11 @@ with form:
                     prune_variables()
                 ui.rerun_after(drop_target)
             if use_target:
-                ui.param_input("risk.target.points", {"type": "float", "default": 100.0}, label="Distance (points)")
-            budget = st.checkbox("Use a leverage budget", value=bool(risk.get("leverage_budget")),
-                                 key=ui.key("risk.leverage_budget"))
-            if budget != bool(risk.get("leverage_budget")):
-                ui.set_value("risk.leverage_budget", budget)
+                ui.param_input("risk.target.points", {"type": "float", "default": 100.0}, label="Distance (points)",
+                               help="How far from the fill price the target sits, in points. It fills like any "
+                                    "exit, paying the spread.")
+            # No leverage budget here: vectorbtX applies one to a portfolio's weights only.
+            # Each instrument's own leverage (the grid) caps a rule strategy's trades.
 
             st.markdown("**Extra exits**")
             exits = risk.get("exits") or {}
@@ -469,8 +580,21 @@ with form:
                       {"type": "float", "default": 50.0}, "Points in favour"),
                      ("step_points", "Step the stop up as the trade advances", {"type": "float", "default": 25.0},
                       "Step (points)")]
+            # The ⓘ for each: (on the checkbox, on its amount). Favourable moves are measured on
+            # completed bars only (exit_rules.py), so none of them peeks at the current bar.
+            extra_help = {
+                "time_bars": ("Closes a trade that is still open after a set number of bars, at that bar's open.",
+                              "How many bars after the entry bar the trade is closed."),
+                "breakeven_points": ("Once the trade has been this far in your favour, the stop moves to the entry "
+                                     "price, so the trade can no longer lose (before costs and gaps).",
+                                     "How far in your favour, in points, the best price must have gone."),
+                "step_points": ("Each time the best price advances another step from the entry, the stop moves up "
+                                "(down for a short) by one step. It never moves back.",
+                                "The step, in points."),
+            }
             for exit_key, label, declaration, amount in extra:
-                on = st.checkbox(label, value=exits.get(exit_key) is not None, key=ui.key(f"risk.exits.{exit_key}", ":on"))
+                on = st.checkbox(label, value=exits.get(exit_key) is not None, key=ui.key(f"risk.exits.{exit_key}", ":on"),
+                                 help=extra_help[exit_key][0])
                 if on and exits.get(exit_key) is None:
                     ui.rerun_after(lambda exit_key=exit_key, declaration=declaration:
                                    risk.setdefault("exits", {}).__setitem__(exit_key, declaration["default"]))
@@ -480,7 +604,7 @@ with form:
                         prune_variables()
                     ui.rerun_after(drop_exit)
                 if on:
-                    ui.param_input(f"risk.exits.{exit_key}", declaration, label=amount)
+                    ui.param_input(f"risk.exits.{exit_key}", declaration, label=amount, help=extra_help[exit_key][1])
             if any(exits.get(name_) is not None for name_, *_ in extra) and stop_kind != "fixed":
                 st.warning("The extra exits adjust a stop, so they need a fixed stop.")
 
@@ -509,8 +633,12 @@ with form:
                           if rule else "Which of stop and target wins inside one bar has not been confirmed yet.")
                        + " Points are price distances divided by the instrument's point size.")
         if kind != "signals":
+            # call_plan passes the box's value either way (vectorbtX's own default is on).
             budget = st.checkbox("Use a leverage budget", value=bool(risk.get("leverage_budget")),
-                                 key=ui.key("risk.leverage_budget"))
+                                 key=ui.key("risk.leverage_budget"),
+                                 help="Scales the target weights down on any bar where the book's gross exposure "
+                                      "is above the leverage allowed. Only instruments whose leverage_type is "
+                                      "portfolio_level set that limit, so without one this changes nothing.")
             if budget != bool(risk.get("leverage_budget")):
                 ui.set_value("risk.leverage_budget", budget)
 
@@ -519,17 +647,26 @@ with form:
         account = spec.setdefault("account", {})
         row = st.columns(2)
         with row[0]:
-            ui.param_input("account.init_cash", {"type": "float", "default": 10000.0}, label="Starting cash")
+            ui.param_input("account.init_cash", {"type": "float", "default": 10000.0}, label="Starting cash",
+                           help="The account's opening balance, in the reporting currency below (or the "
+                                "instruments' own when none is set). With separate accounts, each symbol starts "
+                                "with this much.")
         with row[1]:
             freqs = sorted(set(FREQ.values()) | {account.get("freq", "D")})
             ui.param_input("account.freq", {"type": "choice", "options": freqs, "default": FREQ[timeframe]},
-                           label="Bar frequency", help="Annualised metrics need this.")
+                           label="Bar frequency",
+                           help="How long one bar is, so annualised figures (Sharpe, yearly return) scale "
+                                "correctly. It follows the timeframe; change it only for unusual data.")
         extra = spec.setdefault("engine_extra", {})
 
         # --- cash across symbols: one account per symbol, or one shared account ---
         random_priority = False
         if kind == "signals" and len(symbols) > 1:
-            st.markdown("**Cash across symbols**")
+            # The radio below has no label of its own, so the heading carries its ⓘ.
+            st.markdown("**Cash across symbols**",
+                        help="Separate accounts: each symbol trades its own copy of the starting cash, and the "
+                             "results add them up. One shared account: every symbol draws on the same cash, so "
+                             "entries can compete for it.")
             cash_each = float(account.get("init_cash", 10000.0) or 0.0)
             models = {"per_instrument": f"Each symbol trades its own copy of the account ({len(symbols)} × "
                                         f"{cash_each:,.0f} = {len(symbols) * cash_each:,.0f} in all)",
@@ -580,11 +717,15 @@ with form:
                     random_priority = True
                     st.caption("Each bar's competing entries are shuffled with the random seed just below.")
                 else:
-                    ui.ref_input("account.entry_priority.score", features, "Rank by")
+                    ui.ref_input("account.entry_priority.score", features, "Rank by",
+                                 help="The value that decides which competing entry is filled first, such as a "
+                                      "momentum or volatility feature.")
                     highest = st.radio("Which goes first", [True, False],
                                        index=0 if priority.get("highest_first", True) else 1,
                                        format_func={True: "The highest value", False: "The lowest value"}.get,
-                                       horizontal=True, key=ui.key("account.entry_priority.highest_first"))
+                                       horizontal=True, key=ui.key("account.entry_priority.highest_first"),
+                                       help="Whether the entry with the highest or the lowest value is filled "
+                                            "first.")
                     if highest != priority.get("highest_first", True):
                         ui.set_value("account.entry_priority.highest_first", highest)
                     st.caption("The value on the bar the entry signal fires, before the fill at the next open.")
@@ -602,7 +743,9 @@ with form:
         seed_text = st.text_input("Random seed (needed for a random entry order)" if random_priority else
                                   "Random seed (optional)",
                                   value="" if extra.get("seed") is None else str(extra["seed"]),
-                                  key=ui.key("engine_extra.seed"))
+                                  key=ui.key("engine_extra.seed"),
+                                  help="A whole number that makes random choices repeat from run to run, such as a "
+                                       "random entry order. Blank: none set.")
         seed = int(seed_text) if seed_text.strip().lstrip("-").isdigit() else None
         if seed != extra.get("seed"):
             if seed is None:
@@ -610,7 +753,10 @@ with form:
             else:
                 ui.set_value("engine_extra.seed", seed)
         base = st.text_input("Report in currency (optional)", value=account.get("base_currency") or "",
-                             key=ui.key("account.base_currency"), help="Leave blank to report in each instrument's currency.")
+                             key=ui.key("account.base_currency"),
+                             help="A three-letter code, such as GBP. Prices are converted into it with the FX "
+                                  "dataset below, paying the broker's conversion markup (Settings). Leave blank to "
+                                  "report in each instrument's currency.")
         if (base or None) != account.get("base_currency"):
             if base:
                 ui.set_value("account.base_currency", base.upper())
@@ -628,7 +774,10 @@ with form:
         source = st.radio("Holding costs from interest rates", ["none", "static", "fred"],
                           index=["none", "static", "fred"].index(rates["source"] if rates else "none"),
                           format_func={"none": "None", "static": "Fixed rates", "fred": "FRED (needs a free key)"}.get,
-                          horizontal=True, key=ui.key("account.rates", ":source"))
+                          horizontal=True, key=ui.key("account.rates", ":source"),
+                          help="The overnight cost of holding a position: financing on borrowed money, and carry "
+                               "on FX. None charges neither. Fixed rates use one yearly rate per currency for the "
+                               "whole period. FRED uses the published overnight rates day by day.")
         if source != (rates["source"] if rates else "none"):
             ui.rerun_after(lambda: account.__setitem__("rates", None if source == "none" else
                                                        {"source": source, "values": {"USD": 0.05}} if source == "static"
@@ -638,7 +787,11 @@ with form:
             values = rates.get("values") or {}
             frame = pd.DataFrame({"currency": list(values.keys()), "rate": list(values.values())})
             edited = st.data_editor(frame, num_rows="dynamic", key=ui.key("account.rates.values"), width="stretch",
-                                    hide_index=True)
+                                    hide_index=True, column_config={
+                                        "currency": st.column_config.TextColumn(
+                                            "currency", help="A three-letter code, such as USD."),
+                                        "rate": st.column_config.NumberColumn(
+                                            "rate", help="The yearly interest rate as a fraction (0.05 = 5%).")})
             new_values = {str(code).strip().upper(): float(rate) for code, rate in zip(edited["currency"], edited["rate"])
                           if isinstance(code, str) and code.strip() and pd.notna(rate)}
             if new_values != values:
@@ -653,7 +806,11 @@ with form:
         opposite = st.selectbox("When an opposite entry arrives", modes,
                                 index=modes.index(current_mode) if current_mode in modes else 0,
                                 format_func=lambda mode: "Library default" if mode is None else mode,
-                                key=ui.key("engine_extra.upon_opposite_entry"))
+                                key=ui.key("engine_extra.upon_opposite_entry"),
+                                help="A long entry while short, or a short entry while long. ignore: keep the "
+                                     "position. close: close it. reverse: close it and open the other way. The "
+                                     "reduce forms differ only when positions add up, which the Studio does not "
+                                     "do. Library default: reversereduce.")
         if opposite != current_mode:
             if opposite is None:
                 ui.delete_key("engine_extra.upon_opposite_entry")
@@ -715,9 +872,12 @@ with form:
                         if "signal" in outputs and not outputs["signal"].to_numpy().any():
                             st.warning(f"Pattern {feature_name} never appears on this data.")
                     row = st.columns([1, 2])
-                    symbol = row[0].selectbox("Symbol", list(frames["close"].columns), key="preview:symbol")
+                    symbol = row[0].selectbox("Symbol", list(frames["close"].columns), key="preview:symbol",
+                                              help="Which symbol's chart to show.")
                     overlays = row[1].multiselect("Overlay", [f"{name_}.{output}" for name_, outputs in computed.items()
-                                                              for output in outputs], key="preview:overlays")
+                                                              for output in outputs], key="preview:overlays",
+                                                  help="Feature lines to draw over the price, to check they look "
+                                                       "right before backtesting.")
                     ui.chart(analysis.fig_preview(frames, computed, compiled, symbol, theme, overlays))
                 else:
                     ui.chart(analysis.fig_weight_preview(compiled["weights"], compiled["schedule"], theme))
@@ -739,7 +899,9 @@ with form:
         # Keyed on the spec's hash: the box re-seeds whenever another step changes the
         # spec, so it can never hold a stale copy that would undo those edits.
         text = st.text_area("Strategy file (JSON)", value=json.dumps(spec, indent=2), height=420,
-                            key=ui.key("json", ":" + spec_hash(spec)))
+                            key=ui.key("json", ":" + spec_hash(spec)),
+                            help="The whole strategy as one file: what the other tabs edit. You can edit it here "
+                                 "too, then press Use the edited file.")
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as error:

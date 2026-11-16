@@ -10,9 +10,9 @@ uv run python -I docs/upstream/vectorbtx_issues.py     # prints PRESENT or FIXED
 
 Run it in vectorbtX's own environment while patching, or copy the checks into vectorbtX's tests. At `ace29e2`, all 13 are present.
 
-## Status (13 November 2026)
+## Status (16 November 2026)
 
-**All 13 are fixed in vectorbtX `16293a2`; issue 14, found with those fixes, in `9f4cf54`; and issues 15 to 19 in `9fa427e`**, which `uv.lock` now pins. 15 was found on `9f4cf54` while building the per-symbol results for shared cash, and 16 to 19 while fixing it (18 is a feature: the borrow fee, a documented gap in vectorbtX's own audit). The script reports 0 of 18 present (exit code 0); against `9f4cf54` it reports 15 to 19 present. vectorbtX carries the same checks in `tests/test_upstream_fixes.py`, `tests/test_borrow.py` and `tests/test_holding_sim.py`. The Studio workarounds below are removed, except where an issue says it can stay:
+**All 13 are fixed in vectorbtX `16293a2`; issue 14, found with those fixes, in `9f4cf54`; and issues 15 to 19 in `9fa427e`**, which `uv.lock` now pins. 15 was found on `9f4cf54` while building the per-symbol results for shared cash, and 16 to 19 while fixing it (18 is a feature: the borrow fee, a documented gap in vectorbtX's own audit). Against `9fa427e` the script now reports **1 of 19 present** (exit code 1): issue 21, found on 16 November 2026, is open. Against `9f4cf54` it reports 15 to 19 present as well. vectorbtX carries the same checks in `tests/test_upstream_fixes.py`, `tests/test_borrow.py` and `tests/test_holding_sim.py`. The Studio workarounds below are removed, except where an issue says it can stay:
 
 | Issue | Studio side now |
 |---|---|
@@ -33,12 +33,13 @@ Run it in vectorbtX's own environment while patching, or copy the checks into ve
 | 17 | Fixed in `9fa427e`; nothing to remove. A portfolio (weights) of shares with rates no longer pays financing on a book it paid for. |
 | 18 | Built (13 November 2026): `borrow_rate` in the Build page's instrument grid (equity mode only; `validate_spec` says so elsewhere), and vectorbtX's warnings now reach the Backtest page (`run_backtest` collects them; `extract_results` keeps them in the run's meta). |
 | 19 | Done: the grid's financing column is gone, and `engine.instrument_fields` drops a per-instrument `financing` value an older spec may hold. |
+| 21 | **Open** (found 16 November 2026 on `9fa427e`): `min_trade` never skips a trade. No workaround; the Build page's tooltip states what happens. |
 
 ## Where each phase 0 finding belongs
 
 | Belongs in | Findings |
 |---|---|
-| **vectorbtX: bugs** | 1 to 12 below. Ten give wrong numbers without an error, one crashes, and one is housekeeping. Later, all fixed: 14, 15, 16 and 17 (wrong numbers), and 19 (a setting accepted in silence and never read). |
+| **vectorbtX: bugs** | 1 to 12 below. Ten give wrong numbers without an error, one crashes, and one is housekeeping. Later, all fixed: 14, 15, 16 and 17 (wrong numbers), and 19 (a setting accepted in silence and never read). Open: 21 (a setting that does not do what it says). |
 | **vectorbtX: required feature** | 13, shared cash with an entry priority. Portfolios need it, and the Studio builds its account options on it. Check 13 in the script is its acceptance test. Later: 18, the borrow fee on a direct short (check 18). |
 | **ta_patterns** | `chart_patterns.BULLISH` and `CHART_PATTERNS` list `double_bottom_ugly`, but the function is `ugly_double_bottom`. |
 | **Environment** (not a library) | On Windows, uv's standalone CPython aborts when `SSLKEYLOGFILE` is set and an HTTPS context is created. vectorbtX's `FREDData` would hit it too. |
@@ -258,6 +259,26 @@ Found while adding "good till the end of the day" to the Studio's Risk step (13 
 * **What is missing.** Every signal fills at the next bar's open. vectorbt 1.1.0's `from_signals` has no limit or stop entry orders and no time in force, and the front door offers neither. So two common intraday rules cannot be modelled exactly: a market-on-close exit (flat at the session's close), and an entry order that lapses at the end of its day.
 * **What the Studio does meanwhile (honest approximations, labelled as such on the Risk step).** "Entries are good for the day only" drops an entry whose fill bar falls on the next day (UTC date). "Close before the end of the day" fires an exit on the bar before each day's last bar, so it fills at the last bar's open, not at the close; entries that would fill on that last bar are dropped. Both are signal masks in `compile_signals`, on the signal bar, so nothing is shifted.
 * **Suggested API.** `exit_at="close"` on an exit signal array (fill at that bar's close, paying the spread), and `entry_expiry="day"` with a session-end time (`end_of_day`, already a vectorbtX setting) for pending entries. The Studio would then replace both masks with the real orders.
+
+### 21. `min_trade` never skips a trade: it compares targets, not holdings (open)
+
+Found on `9fa427e` while writing the Build page's tooltips (16 November 2026).
+
+* **Where.** `construct/rebalance.py:195-212`, `_apply_min_trade`, called by `to_targets` (`:119-121`), which `Portfolio.from_weights` calls (`core/portfolio.py:410-417`) on the front door's weights route (`frontend/backtest.py:336`).
+* **What happens.** On each rebalance bar the function compares the new target with the **previous target** (`change = (row - last).abs()`). Where that change is below `min_trade`, it writes the previous target back (`out.loc[ts, small] = last[small]`). The target is still emitted, not set to NaN, so the engine still trades from wherever the holding has drifted back to it. Check 21: a fixed 60/40 book of fractional shares, rebalanced every 5th bar while A rises 1% a bar, places the same 8 orders with `min_trade=0.5` as with none, including six rebalancing trades of at most 1.19% of the account. Each is far below the threshold, so none should be placed: only the 2 opening buys.
+* **Why it is wrong.** All three descriptions promise skipped trades. The `to_targets` docstring (`:90`) says "suppress rebalance trades whose weight change is below this", `from_weights` (`core/portfolio.py:388`) and the front door (`frontend/backtest.py:125`) say much the same, and `docs/API.md` (`:735`) says it "suppresses trades costing more than the drift they correct", which is a third rule. Someone who sets `min_trade` to save costs gets no saving, and nothing says so.
+* **The consequences.**
+  * Fixed weights, the commonest case, never change, so `min_trade` does nothing at all: every small trade back to the target is made.
+  * Weights that move (inverse volatility, a selection) only have a small target change frozen, and the trade back to the frozen target can be larger than the change. A target moving from 60.0% to 60.4% while the holding has drifted to 63% stays at 60.0%, and the engine trades 3% to reach it.
+  * The drift report records the held-back target change as suppressed (`suppressed.loc[ts, small] = (row - last)[small]`), not the trade that was in fact made.
+* **Fix, a suggestion.** Compare each target with the holding just before the rebalance, and emit NaN (no order for that column) where the gap is below `min_trade`, recording the gap as suppressed drift. The holding is only known exactly inside the simulation, because it depends on fills, costs and rounding, so two options:
+  * **Exact:** do the comparison while simulating, for example in a pre-segment callback that reads each column's position and value and drops the small orders.
+  * **Estimate:** use `drifted_weights(weights, close, schedule=...)` (`construct/schedule.py:99`), which already gives the weights a book drifts to between rebalances, to set the NaNs in `to_targets` ahead of the run. It ignores costs and rounding, so it can disagree with the real holding by a little; document that if you choose it.
+  * Either way, settle which rule `min_trade` means: a weight gap (what the docstrings say) or a cost-benefit test (what `docs/API.md` says), and make the three descriptions agree.
+* **Studio side, until then.** No workaround: it would need the Studio to simulate holdings itself. The Build page's tooltip for "Skip trades smaller than (share of value)" says what actually happens, and its label overstates it. When it is fixed:
+  * reword that tooltip in `app/pages/2_Build.py` and drop its ⚠️ comment;
+  * check `tests/test_portfolio.py::test_min_trade_suppression_shows_in_drift` still holds (it only checks that some drift is recorded);
+  * expect fewer orders, and lower costs, in any portfolio run with `min_trade` set: the `sixty_forty` template sets 0.005. The golden numbers are a rule strategy, so they do not move.
 
 # ta_patterns issues found by OpenStrategy Studio
 

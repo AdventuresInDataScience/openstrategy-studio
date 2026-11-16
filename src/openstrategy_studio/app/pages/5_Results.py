@@ -23,7 +23,8 @@ with optimisation_tab:
         st.write("No optimisations yet. Start one on the Optimise page.")
     else:
         labels = {row.job_id: f"{row.name} ({row.status}, {row.created_at})" for row in listing.itertuples()}
-        job_id = st.selectbox("Job", list(labels), format_func=labels.get)
+        job_id = st.selectbox("Job", list(labels), format_func=labels.get,
+                              help="An optimisation started on the Optimise page, with its status and start time.")
         job_dir = Path(listing.set_index("job_id").loc[job_id, "path"])
         job = jobs.read_job(job_dir)
         progress = jobs.read_progress(job_dir)
@@ -132,19 +133,27 @@ with optimisation_tab:
         params_columns = analysis.param_columns(search)
         if params_columns:
             ui.chart(analysis.fig_convergence(trials, direction, theme))
-            view = st.radio("Explore", ["Pair heatmap", "Parallel coordinates", "One parameter"], horizontal=True)
+            view = st.radio("Explore", ["Pair heatmap", "Parallel coordinates", "One parameter"], horizontal=True,
+                            help="Pair heatmap: the metric over two settings at once. Parallel coordinates: every "
+                                 "trial as a line across all settings. One parameter: the metric against one "
+                                 "setting.")
             if view == "Pair heatmap" and len(params_columns) >= 2:
                 left, right = st.columns(2)
-                x = left.selectbox("Across", params_columns, index=0, format_func=lambda c: c.removeprefix("param:"))
-                y = right.selectbox("Down", params_columns, index=1, format_func=lambda c: c.removeprefix("param:"))
+                x = left.selectbox("Across", params_columns, index=0, format_func=lambda c: c.removeprefix("param:"),
+                                   help="The setting along the horizontal axis.")
+                y = right.selectbox("Down", params_columns, index=1, format_func=lambda c: c.removeprefix("param:"),
+                                    help="The setting along the vertical axis.")
                 ui.chart(analysis.fig_pair_heatmap(trials, x, y, theme))
             elif view == "Parallel coordinates":
                 ui.chart(analysis.fig_parallel(trials, theme))
             else:
-                column = st.selectbox("Parameter", params_columns, format_func=lambda c: c.removeprefix("param:"))
+                column = st.selectbox("Parameter", params_columns, format_func=lambda c: c.removeprefix("param:"),
+                                      help="The setting to plot the metric against.")
                 ui.chart(analysis.fig_param_scatter(trials, column, theme))
             optuna_db = job_dir / "optuna.db"
-            if job["backend"] == "optuna" and optuna_db.exists() and st.checkbox("Show parameter importance"):
+            if job["backend"] == "optuna" and optuna_db.exists() and st.checkbox(
+                    "Show parameter importance",
+                    help="Optuna's estimate of how much each setting moved the metric across the trials."):
                 def importance():
                     import optuna
                     study = optuna.load_study(study_name="job", storage=f"sqlite:///{optuna_db.resolve().as_posix()}")
@@ -170,7 +179,8 @@ with compare_tab:
         st.write("No saved runs yet. Save a run on the Backtest page.")
     else:
         labels = {row.run_id: f"{row.name} ({row.created_at})" for row in runs.itertuples()}
-        chosen = st.multiselect("Runs", list(labels), default=list(labels)[:2], format_func=labels.get)
+        chosen = st.multiselect("Runs", list(labels), default=list(labels)[:2], format_func=labels.get,
+                                help="Saved runs to draw on one chart and list side by side.")
         if chosen:
             curves = []
             table = {}

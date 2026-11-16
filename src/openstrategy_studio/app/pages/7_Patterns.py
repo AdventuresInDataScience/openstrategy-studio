@@ -25,20 +25,32 @@ if not stored:
 
 spec = ui.current()
 row = st.columns([3, 1, 1, 1])
-symbols = row[0].multiselect("Symbols", stored, default=[s for s in spec["data"]["symbols"] if s in stored][:5] or stored[:1])
-timeframe = row[1].selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index(spec["data"]["timeframe"]))
+symbols = row[0].multiselect("Symbols", stored, default=[s for s in spec["data"]["symbols"] if s in stored][:5] or stored[:1],
+                             help="The stored symbols to study. Hits are pooled across them.")
+timeframe = row[1].selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index(spec["data"]["timeframe"]),
+                             help="The bar size the patterns are found on.")
 span = {"min_value": date(1970, 1, 1), "max_value": date(2100, 12, 31)}
-start = row[2].date_input("From", value=date.fromisoformat(str(spec["data"]["start"])[:10]), **span)
-end = row[3].date_input("To", value=date.fromisoformat(str(spec["data"]["end"])[:10]), **span)
+start = row[2].date_input("From", value=date.fromisoformat(str(spec["data"]["start"])[:10]), **span,
+                          help="The first date studied.")
+end = row[3].date_input("To", value=date.fromisoformat(str(spec["data"]["end"])[:10]), **span,
+                        help="The last date studied.")
 
 row = st.columns(4)
 families = row[0].multiselect("Families", ["candle", "chart"], default=["candle", "chart"],
-                              format_func={"candle": "Candlesticks", "chart": "Chart patterns"}.get)
+                              format_func={"candle": "Candlesticks", "chart": "Chart patterns"}.get,
+                              help="Candlesticks span one to a few bars; chart patterns form over many.")
 directions = row[1].multiselect("Directions", ["bullish", "bearish", "directional", "bidirectional", "non_directional"],
                                 default=["bullish", "bearish", "directional", "bidirectional"],
-                                format_func=lambda d: d.replace("_", "-"))
-horizons = row[2].multiselect("Horizons (bars)", [1, 3, 5, 10, 20, 40], default=[1, 5, 10, 20])
-min_hits = row[3].number_input("Ignore patterns with fewer hits than", min_value=2, value=20, step=5)
+                                format_func=lambda d: d.replace("_", "-"),
+                                help="Bullish and bearish point one way. Directional ones point either way, "
+                                     "depending on the hit. Bidirectional chart patterns can break either way. "
+                                     "Non-directional ones (a doji) give no direction, so are judged as longs.")
+horizons = row[2].multiselect("Horizons (bars)", [1, 3, 5, 10, 20, 40], default=[1, 5, 10, 20],
+                              help="Each hit's return runs from the next bar's open (where a trade would fill) to "
+                                   "the close this many bars after the pattern.")
+min_hits = row[3].number_input("Ignore patterns with fewer hits than", min_value=2, value=20, step=5,
+                               help="A pattern seen only a few times says little; below this it is left out of "
+                                    "the table.")
 skip_slow = st.checkbox("Skip the slow head-and-shoulders family", value=True,
                         help="Eight chart detectors scale with the square of the pivot count; they are slow on long histories.")
 
@@ -59,7 +71,8 @@ if not found:
     st.stop()
 
 table = found["table"]
-horizon = st.selectbox("Rank by horizon", found["horizons"], index=min(2, len(found["horizons"]) - 1))
+horizon = st.selectbox("Rank by horizon", found["horizons"], index=min(2, len(found["horizons"]) - 1),
+                       help="The table is sorted by the excess return at this horizon.")
 column = f"excess {horizon}"
 if column not in table:
     st.write("No pattern had enough hits. Lower the minimum, widen the dates or add symbols.")
@@ -81,7 +94,8 @@ ui.table(shown, height=360)
 
 labels = [f"{row.pattern} ({row.module})" for row in ranked.itertuples()]
 if labels:
-    picked = st.selectbox("Look closer at", range(len(labels)), format_func=labels.__getitem__)
+    picked = st.selectbox("Look closer at", range(len(labels)), format_func=labels.__getitem__,
+                          help="Draws the average path after this pattern, with its spread.")
     chosen = ranked.iloc[picked]
     theme, glow = ui.theme_picker(settings, "patterns")
     path = research.event_path(found["frames"], chosen["module"], chosen["pattern"], horizon=max(found["horizons"]))
@@ -90,9 +104,13 @@ if labels:
     st.markdown("**Use it in the current strategy**")
     row = st.columns([2, 2, 1])
     slot = row[0].selectbox("Add to", ["long_entry", "short_entry", "long_exit", "short_exit"],
-                            format_func=lambda s: s.replace("_", " ").capitalize())
+                            format_func=lambda s: s.replace("_", " ").capitalize(),
+                            help="Which rule of the current strategy gets a condition on this pattern, joined with "
+                                 "and.")
     side = row[1].selectbox("Side", ["bullish", "bearish", "either"],
-                            index=0 if chosen["bullish"] >= chosen["bearish"] else 1)
+                            index=0 if chosen["bullish"] >= chosen["bearish"] else 1,
+                            help="bullish: only when the pattern points up. bearish: only when it points down. "
+                                 "either: whichever way it points.")
     row[2].write("")
     portfolio = strategy_kind(spec) == "portfolio"
     if portfolio:

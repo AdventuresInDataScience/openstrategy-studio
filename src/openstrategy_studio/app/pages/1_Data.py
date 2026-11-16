@@ -43,12 +43,16 @@ with yahoo_tab:
     if settings.get("offline"):
         st.info("Offline mode is on (Settings), so downloads are switched off.")
     with st.form("yahoo"):
-        symbols = st.text_input("Symbols, separated by commas", placeholder="EURUSD=X, SPY, VOD.L")
+        symbols = st.text_input("Symbols, separated by commas", placeholder="EURUSD=X, SPY, VOD.L",
+                                help="Yahoo Finance's own symbols: =X for FX pairs (EURUSD=X), a suffix for other "
+                                     "exchanges (.L for London), ^ for indices (^GSPC).")
         columns = st.columns(3)
         timeframe = columns[0].selectbox("Timeframe", list(D.YAHOO_INTERVALS), index=list(D.YAHOO_INTERVALS).index("1d"),
                                          help="Yahoo has no 4h bars: store 1h and the Studio resamples up.")
-        start = columns[1].date_input("From", value=date(2010, 1, 1), min_value=date(1970, 1, 1))
-        end = columns[2].date_input("To", value=date.today(), min_value=date(1970, 1, 1))
+        start = columns[1].date_input("From", value=date(2010, 1, 1), min_value=date(1970, 1, 1),
+                                      help="The first date to download. Yahoo starts later if it has less history.")
+        end = columns[2].date_input("To", value=date.today(), min_value=date(1970, 1, 1),
+                                    help="The last date to download.")
         st.caption("Intraday history on Yahoo only reaches back a limited window, which varies by interval.")
         submitted = st.form_submit_button("Download", disabled=bool(settings.get("offline")))
     if submitted:
@@ -59,12 +63,15 @@ with yahoo_tab:
                 queue(symbol, timeframe, frame, "yahoo")
 
 with file_tab:
-    upload = st.file_uploader("CSV or Parquet file", type=["csv", "txt", "parquet"])
+    upload = st.file_uploader("CSV or Parquet file", type=["csv", "txt", "parquet"],
+                              help="One symbol's bars, one row per bar, such as an MT4 or MT5 history export. You "
+                                   "say which column holds what below.")
     if upload is not None:
         columns = st.columns(3)
         header = columns[0].checkbox("First row holds column names", value=True,
                                      help="MT4/MT5 history exports have no header row.")
-        separator = columns[1].text_input("Separator", value=",")
+        separator = columns[1].text_input("Separator", value=",",
+                                          help="The character between columns, such as a comma or a semicolon.")
         raw = D.read_upload(upload.getvalue(), upload.name, header=header, separator=separator or ",")
         st.write("First rows of the file:")
         ui.table(raw.head(), hide_index=False)
@@ -86,20 +93,33 @@ with file_tab:
         with st.form("mapping"):
             st.write("Which column holds what?")
             row = st.columns(4)
-            date_column = row[0].selectbox("Date (or date and time)", names, index=guess("date", "datetime", "time", "timestamp"))
+            date_column = row[0].selectbox("Date (or date and time)", names, index=guess("date", "datetime", "time", "timestamp"),
+                                           help="The column holding each bar's date, or its date and time together.")
             time_column = row[1].selectbox("Separate time column", optional, index=0,
                                            help="MT4/MT5 exports put the time in its own column.")
-            date_format = row[2].text_input("Date format (optional)", placeholder="%Y.%m.%d %H:%M")
-            symbol = row[3].text_input("Store as symbol", value=upload.name.rsplit(".", 1)[0])
+            date_format = row[2].text_input("Date format (optional)", placeholder="%Y.%m.%d %H:%M",
+                                            help="Only if the dates are not read correctly: the pattern they follow, "
+                                                 "in Python's strftime codes (%Y year, %m month, %d day, %H hour, "
+                                                 "%M minute).")
+            symbol = row[3].text_input("Store as symbol", value=upload.name.rsplit(".", 1)[0],
+                                       help="The name it is stored and picked under, such as EURUSD. Storing again "
+                                            "under the same name and timeframe replaces it.")
             row = st.columns(4)
             mapping = {"date": date_column, "time": time_column, "date_format": date_format or None}
             for column, field in zip(row, ("open", "high", "low", "close")):
-                mapping[field] = column.selectbox(field.capitalize(), names, index=guess(field, field[0]))
+                mapping[field] = column.selectbox(field.capitalize(), names, index=guess(field, field[0]),
+                                                  help=f"The column holding each bar's {field} price.")
             row = st.columns(3)
-            mapping["volume"] = row[0].selectbox("Volume (optional)", optional, index=guess_optional("volume", "vol", "v"))
+            mapping["volume"] = row[0].selectbox("Volume (optional)", optional, index=guess_optional("volume", "vol", "v"),
+                                                 help="Needed for volume indicators and automatic slippage. MT4/MT5 "
+                                                      "tick volume counts price changes, not traded amounts.")
             mapping["adj_close"] = row[1].selectbox("Adjusted close (optional)", optional,
-                                                    index=guess_optional("adj close", "adj_close", "adjusted close"))
-            file_timeframe = row[2].selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index("1d"))
+                                                    index=guess_optional("adj close", "adj_close", "adjusted close"),
+                                                    help="The close adjusted for dividends and splits, if the file "
+                                                         "has one. Buying outright uses it by default.")
+            file_timeframe = row[2].selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index("1d"),
+                                              help="The file's bar size. Strategies on a longer timeframe resample "
+                                                   "it up.")
             read = st.form_submit_button("Check the file")
         if read:
             frame = ui.run_guarded("Reading the file", lambda: D.apply_mapping(raw, mapping, file_timeframe))
@@ -111,7 +131,8 @@ with manage_tab:
         st.write("Nothing stored yet.")
     else:
         labels = [f"{row.symbol} {row.timeframe}" for row in catalogue.itertuples()]
-        picked = st.selectbox("Dataset", range(len(labels)), format_func=labels.__getitem__)
+        picked = st.selectbox("Dataset", range(len(labels)), format_func=labels.__getitem__,
+                              help="A stored symbol at one timeframe.")
         row = catalogue.iloc[picked]
         st.write(f"{row['n_bars']} bars from {row['first_bar']} to {row['last_bar']}, source {row['source']}.")
         refresh, delete = st.columns(2)
@@ -122,7 +143,9 @@ with manage_tab:
             if new is not None:
                 fresh, _ = D.normalise_ohlcv(new, row["timeframe"])
                 queue(row["symbol"], row["timeframe"], D.merge_refresh(old, fresh), "yahoo")
-        confirm = delete.checkbox("I want to delete this dataset")
+        confirm = delete.checkbox("I want to delete this dataset",
+                                  help="Unlocks the Delete button. Deleting removes the stored bars; it cannot be "
+                                       "undone.")
         if delete.button("Delete", disabled=not confirm):
             D.delete_dataset(data_dir, row["symbol"], row["timeframe"])
             st.rerun()
@@ -130,7 +153,9 @@ with manage_tab:
 with universe_tab:
     st.write("A universe file lists instruments, one per row, for portfolios with many symbols "
              "(the spreadsheet schema is in vectorbtX's docs/API.md, section 2).")
-    universe = st.file_uploader("Universe file", type=["csv", "xlsx"], key="universe")
+    universe = st.file_uploader("Universe file", type=["csv", "xlsx"], key="universe",
+                                help="A spreadsheet with one instrument per row: its mode, point size, costs and "
+                                     "so on, in vectorbtX's column names.")
     if universe is not None and st.button("Store universe file"):
         (data_dir / "universes" / universe.name).write_bytes(universe.getvalue())
         st.success(f"Stored {universe.name}. Pick it on the Build page, Instruments tab.")

@@ -222,7 +222,9 @@ def theme_picker(settings, prefix):
     default = settings.get("default_theme", analysis.PAGE_THEME)
     left, right = st.columns([3, 1])
     theme = left.selectbox("Chart theme", options, index=options.index(default) if default in options else 0,
-                           format_func=labels.get, key=f"{prefix}:theme")
+                           format_func=labels.get, key=f"{prefix}:theme",
+                           help="The colours and fonts of the charts on this page. Match the page theme follows the "
+                                "page's own colours; the default is set on the Settings page.")
     glow = right.checkbox("Glow", value=theme in analysis.GLOW_THEMES, key=f"{prefix}:glow",
                           help="Adds a glow to line charts; suits star wars, cyberpunk and synthwave.")
     return theme, glow
@@ -295,7 +297,10 @@ def _output_label(features, option):
 
 
 def input_select(path, features, own_name, label):
-    """A feature input: a price field or another feature's output."""
+    """A feature input: a price field or another feature's output.
+
+    Its tooltip says what can be picked; the entry's own description sits above the inputs.
+    """
     node = _get(path, "close")
     options = list(PRICE_FIELDS) + _output_options(features, exclude=own_name)
     if isinstance(node, dict):
@@ -305,20 +310,28 @@ def input_select(path, features, own_name, label):
     else:
         current_label = node
     chosen = st.selectbox(label, options, index=options.index(current_label) if current_label in options else 0,
-                          key=key(path), format_func=lambda option: _output_label(features, option))
+                          key=key(path), format_func=lambda option: _output_label(features, option),
+                          help="The line this is computed on: a price, or another feature's output, so features "
+                               "can be chained (an RSI of an EMA).")
     new = chosen if chosen in PRICE_FIELDS else dict(zip(("feature", "output"), chosen.split(".", 1)))
     if new != node:
         set_value(path, new)
 
 
-def ref_input(path, features, label, allow_const=True):
-    """One side of a comparison: a feature output, a price, or a number."""
+def ref_input(path, features, label, allow_const=True, help=None):
+    """One side of a comparison: a feature output, a price, or a number.
+
+    `help` is the tooltip on the first box, which says what this side is for; it defaults
+    to what the three kinds are.
+    """
     ref = _get(path, {"price": "close"})
     kinds = (["feature"] if features else []) + ["price"] + (["const"] if allow_const else [])
     names = {"feature": "Feature", "price": "Price", "const": "Number"}
     kind = next((name for name in ("feature", "price", "const") if name in ref), "price")
     chosen = st.selectbox(label, kinds, index=kinds.index(kind) if kind in kinds else 0, format_func=names.get,
-                          key=key(path, ":kind"))
+                          key=key(path, ":kind"),
+                          help=help or "A feature's output, a price, or a fixed number. Pick which, then which one "
+                                       "in the box below.")
     if chosen != kind:
         first = _output_options(features)[:1]
         set_value(path, dict(zip(("feature", "output"), first[0].split(".", 1))) if chosen == "feature" and first
@@ -341,7 +354,8 @@ def ref_input(path, features, label, allow_const=True):
         new = {"price": st.selectbox("Which", PRICE_FIELDS, index=PRICE_FIELDS.index(ref.get("price", "close")),
                                      key=key(path, ":price"), label_visibility="collapsed")}
     else:
-        param_input(f"{path}.const", {"type": "float", "default": 0.0}, label="Value")
+        param_input(f"{path}.const", {"type": "float", "default": 0.0}, label="Value",
+                    help="A fixed number, such as 30 for an RSI level. It can be optimised on the Optimise page.")
         return
     shift = st.number_input("Bars ago", min_value=0, step=1, value=int(ref.get("shift", 0) or 0),
                             key=key(path, ":shift"), help="0 is the current bar. History only: it never moves a "
@@ -361,14 +375,19 @@ def feature_picker(features):
     menu = indicators.menu()
     columns = st.columns(3)
     # Plain keys, not spec-bound: the picker remembers where you were between adds.
-    category = columns[0].selectbox("Category", list(menu), key="pick:category")
+    category = columns[0].selectbox("Category", list(menu), key="pick:category",
+                                    help="Indicators, statistics, price levels, candlestick and chart patterns, "
+                                         "transforms of other lines, and your own Python code.")
     families = menu[category]
     family = columns[1].selectbox("Family", list(families), key=f"pick:family:{category}",
-                                  format_func=lambda name: f"{name} ({len(families[name])})")
+                                  format_func=lambda name: f"{name} ({len(families[name])})",
+                                  help="A group within the category. The number is how many it holds.")
     ids = families[family]
     picked = columns[2].selectbox("Indicator" if category in ("Indicator", "Statistical") else "Item", ids,
                                   format_func=lambda item_id: indicators.entry(item_id)["label"],
-                                  key=f"pick:item:{category}:{family}")
+                                  key=f"pick:item:{category}:{family}",
+                                  help="The one to add. Its description, outputs and the prices it reads show "
+                                       "below; its settings can be changed once it is added.")
     item = indicators.entry(picked)
     with st.container(border=True):
         st.markdown(f"**{item['label']}**  \n" + (item.get("description") or "")[:240])
@@ -382,7 +401,9 @@ def feature_picker(features):
             suggestion, number = f"{stem}_{number}", number + 1
         left, right = st.columns([3, 1])
         # Keyed on the suggestion too, so it moves on (sma, sma_2 ...) once a name is taken.
-        name = left.text_input("Name it", value=suggestion, key=f"pick:name:{picked}:{suggestion}")
+        name = left.text_input("Name it", value=suggestion, key=f"pick:name:{picked}:{suggestion}",
+                               help="How the rules refer to it, such as fast or rsi. Letters, digits and "
+                                    "underscores, starting with a letter.")
         right.write("")
         if right.button("Add feature", type="primary", key="pick:add"):
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name in PRICE_FIELDS:
@@ -413,7 +434,8 @@ def feature_editor(name, feature, features):
         columns = st.columns(3) if params else []
         for index, (param, declaration) in enumerate(params):
             with columns[index % 3]:
-                param_input(f"features.{name}.params.{param}", declaration, label=param.replace("_", " "))
+                param_input(f"features.{name}.params.{param}", declaration, label=param.replace("_", " "),
+                            help=indicators.param_help(item["id"], param))
         st.caption(f"Outputs: {', '.join(f'{name}.{output}' for output in item['outputs'])}")
     if st.button("Delete feature", key=key(f"features.{name}", ":delete")):
         rerun_after(lambda: features.pop(name))
@@ -447,9 +469,13 @@ def _pattern_condition(path, node, features):
         return
     left, right = st.columns(2)
     name = left.selectbox("Pattern", patterns, index=patterns.index(node.get("pattern")) if node.get("pattern")
-                          in patterns else 0, key=key(path, ":pattern"))
+                          in patterns else 0, key=key(path, ":pattern"),
+                          help="One of the pattern features added on the Features tab. It counts on the bar that "
+                               "completes the pattern; the trade fills at the next bar's open.")
     side = right.selectbox("Side", PATTERN_SIDES, index=PATTERN_SIDES.index(node.get("side", "either")),
-                           key=key(path, ":side"))
+                           key=key(path, ":side"),
+                           help="bullish: only when the pattern points up. bearish: only when it points down. "
+                                "either: whichever way it points.")
     if (name, side) != (node.get("pattern"), node.get("side")):
         set_value(path, {"pattern": name, "side": side})
     item = indicators.entry(features[name]["indicator"])
@@ -460,10 +486,14 @@ def _pattern_condition(path, node, features):
 def _comparison_condition(path, node, features):
     columns = st.columns([3, 2, 3])
     with columns[0]:
-        ref_input(f"{path}.left", features, "When")
+        ref_input(f"{path}.left", features, "When",
+                  help="The line being tested: a feature's output or a price.")
     with columns[1]:
         op = st.selectbox("Condition", COMPARISON_OPS, index=COMPARISON_OPS.index(node.get("op", ">")),
-                          format_func=OP_LABELS.get, key=key(path, ":op"))
+                          format_func=OP_LABELS.get, key=key(path, ":op"),
+                          help="Above and below hold on every bar they are true. Crosses fires only on the bar "
+                               "the line moves from one side to the other. Between needs two bounds. Rising and "
+                               "falling compare the line with itself some bars ago.")
         if op != node.get("op"):
             # Keep the condition's own keys (a higher-timeframe filter keeps "filter" and
             # "timeframe"); swap the operands for the new operator's.
@@ -480,12 +510,14 @@ def _comparison_condition(path, node, features):
             st.rerun()
     with columns[2]:
         if op == "between":
-            ref_input(f"{path}.lower", features, "Lower bound")
-            ref_input(f"{path}.upper", features, "Upper bound")
+            ref_input(f"{path}.lower", features, "Lower bound", help="The line must be at or above this.")
+            ref_input(f"{path}.upper", features, "Upper bound", help="The line must be at or below this.")
         elif op in ("rising", "falling"):
-            param_input(f"{path}.bars", {"type": "int", "default": 1}, label="Bars")
+            param_input(f"{path}.bars", {"type": "int", "default": 1}, label="Bars",
+                        help="Compared with its value this many bars ago: rising means higher than then.")
         else:
-            ref_input(f"{path}.right", features, "Than")
+            ref_input(f"{path}.right", features, "Than",
+                      help="What the line is compared with: another feature, a price, or a fixed number.")
 
 
 def _filter_condition(path, node, features, timeframe):
@@ -495,7 +527,10 @@ def _filter_condition(path, node, features, timeframe):
     labels = {"weekday": "Weekdays", "month": "Months", "session": "Trading session (UTC)",
               "higher_timeframe": "Higher timeframe condition"}
     kind = st.selectbox("Filter", kinds, index=kinds.index(node["filter"]) if node["filter"] in kinds else 0,
-                        format_func=labels.get, key=key(path, ":filter"))
+                        format_func=labels.get, key=key(path, ":filter"),
+                        help="Entries are allowed only when this holds: on chosen weekdays or months, inside a "
+                             "time-of-day session (intraday bars only), or while a condition holds on a higher "
+                             "timeframe.")
     if kind != node["filter"]:
         defaults = {"weekday": {"days": [0, 1, 2, 3, 4]}, "month": {"months": list(range(1, 13))},
                     "session": {"from": "07:00", "to": "16:00"},
@@ -506,18 +541,25 @@ def _filter_condition(path, node, features, timeframe):
         st.rerun()
     if kind == "weekday":
         days = st.multiselect("Trade on", list(range(7)), default=node.get("days", []),
-                              format_func=DAY_NAMES.__getitem__, key=key(path, ":days"))
+                              format_func=DAY_NAMES.__getitem__, key=key(path, ":days"),
+                              help="The weekday of the bar the signal fires on (UTC). The entry fills at the next "
+                                   "bar's open, which may fall on the next day.")
         if days != node.get("days"):
             set_value(f"{path}.days", days)
     elif kind == "month":
         months = st.multiselect("Trade in", list(range(1, 13)), default=node.get("months", []),
-                                format_func=lambda month: MONTH_NAMES[month - 1], key=key(path, ":months"))
+                                format_func=lambda month: MONTH_NAMES[month - 1], key=key(path, ":months"),
+                                help="The month of the bar the signal fires on.")
         if months != node.get("months"):
             set_value(f"{path}.months", months)
     elif kind == "session":
         left, right = st.columns(2)
-        start = left.text_input("From (HH:MM)", value=node.get("from", "07:00"), key=key(path, ":from"))
-        end = right.text_input("To (HH:MM)", value=node.get("to", "16:00"), key=key(path, ":to"))
+        start = left.text_input("From (HH:MM)", value=node.get("from", "07:00"), key=key(path, ":from"),
+                                help="The session's start, in UTC, 24-hour clock: a signal on a bar that starts at "
+                                     "or after it counts.")
+        end = right.text_input("To (HH:MM)", value=node.get("to", "16:00"), key=key(path, ":to"),
+                               help="The session's end, in UTC, 24-hour clock: a bar that starts at it no longer "
+                                    "counts. It may wrap past midnight (22:00 to 02:00).")
         if (start, end) != (node.get("from"), node.get("to")):
             set_value(f"{path}.from", start)
             set_value(f"{path}.to", end)
@@ -538,7 +580,12 @@ def condition_editor(path, letter, node, features, timeframe, entry, on_remove):
         kind = "pattern" if "pattern" in node else "filter" if "filter" in node else "comparison"
         names = {"comparison": "Compare two lines", "pattern": "A pattern appears", "filter": "Only when (filter)"}
         head = st.columns([1, 5, 2])
-        head[0].markdown(f"### {letter}")
+        # The kind box has no label of its own (it reads as the condition's title), so its
+        # ⓘ sits on the letter.
+        head[0].markdown(f"### {letter}", help=f"Condition {letter}: use the letter in the logic line below. "
+                                                "Compare two lines, a pattern appearing, or (in entry rules "
+                                                "only) a filter on the day, month, session or a higher "
+                                                "timeframe.")
         chosen = head[1].selectbox("Kind", kinds, index=kinds.index(kind) if kind in kinds else 0,
                                    format_func=names.get, key=key(path, ":kind"), label_visibility="collapsed")
         head[2].button("Remove", key=key(path, ":remove"), on_click=on_remove)
@@ -571,7 +618,9 @@ def _rule_body(path, rule, features, timeframe, entry):
     joiner = buttons[3].selectbox("Join new with", ["and", "or"], key=key(path, ":join"),
                                   label_visibility="collapsed", format_func=lambda op: f"join with {op}")
     for column, (kind, label) in zip(buttons, adds):
-        if column.button(label, key=key(path, f":add:{kind}")):
+        if column.button(label, key=key(path, f":add:{kind}"),
+                         help="Adds a lettered condition and joins it to the logic line with the word chosen on "
+                              "the right (and, or). Edit the logic line for anything else."):
             def add(kind=kind):
                 letter = next_letter(set(conditions))
                 conditions[letter] = new_condition(kind, features)

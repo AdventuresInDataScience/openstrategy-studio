@@ -460,6 +460,37 @@ def check_financing_field_says_it_is_unused():
         "financing=0.10 is accepted in silence and never read"
 
 
+# ---------------------------------------------------------------------------
+# 21. min_trade never skips a trade
+# ---------------------------------------------------------------------------
+
+def check_min_trade_skips_small_trades():
+    # A rises 1% a bar and B is flat; a fixed 60/40 book of fractional shares, rebalanced every
+    # 5th bar. Each rebalance only trims the drift, about 1% of the account, so min_trade=0.5
+    # ("skip any trade under half the account") should leave the opening purchase alone.
+    n = 21
+    index = pd.bdate_range("2024-01-01", periods=n)
+    close = pd.DataFrame({"A": 100 * 1.01 ** np.arange(n), "B": np.full(n, 100.0)}, index=index)
+    instrument = dict(EQUITY, point_size=0.01, allow_fractional=True)
+    weights = pd.DataFrame({"A": 0.6, "B": 0.4}, index=index)
+    schedule = pd.Series(np.arange(n) % 5 == 0, index=index)
+    counts = {}
+    for min_trade in (None, 0.5):
+        pf = vbt.x.PortfolioBacktest(close=close, open=close, high=close + 0.5, low=close - 0.5,
+                                     instruments={"A": instrument, "B": instrument}, weights=weights,
+                                     schedule=schedule, min_trade=min_trade, init_cash=10_000, freq="D")
+        orders = pf.orders.records_readable
+        value = pd.Series(np.asarray(pf.value()).ravel(), index=index).reindex(orders["Timestamp"]).to_numpy()
+        share = (orders["Size"] * orders["Price"]).abs().to_numpy() / value
+        later = share[(orders["Timestamp"] > orders["Timestamp"].min()).to_numpy()]
+        counts[min_trade] = (len(orders), later)
+    total, later = counts[0.5]
+    present = bool((later < 0.5).any())
+    return present, f"60/40 rebalanced every 5th bar: {counts[None][0]} orders with no min_trade, {total} with " \
+                    f"min_trade=0.5, of which {len(later)} after the opening purchase, each at most " \
+                    f"{later.max() if len(later) else 0:.2%} of the account (should be none)"
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -479,6 +510,7 @@ CHECKS = [
     (17, "Borrowing counted without a loan; the replay path funds no leverage", check_borrowing_without_a_loan),
     (18, "The borrow fee on a direct short (feature)", check_borrow_fee),
     (19, "A per-instrument financing value is ignored in silence", check_financing_field_says_it_is_unused),
+    (21, "min_trade never skips a trade: it compares targets, not holdings", check_min_trade_skips_small_trades),
 ]
 
 

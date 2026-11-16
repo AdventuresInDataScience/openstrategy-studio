@@ -14,9 +14,11 @@ Where they come from
 Two layers
 * The decisions are dict literals in this file: where each indicator sits in the
   menu (TALIB_MENU, PANDAS_TA_MENU), what is left out and why (EXCLUDED), the
-  parameters never shown (HIDDEN_PARAMS) and the Studio's own entries (STUDIO).
+  parameters never shown (HIDDEN_PARAMS), what each setting does (PARAM_HELP, for
+  its ⓘ) and the Studio's own entries (STUDIO).
 * The facts are a generated snapshot, indicator_catalogue.json: each entry's
-  label, inputs, parameters with defaults, and outputs. pandas-ta only reveals its
+  label, inputs, parameters with defaults (and the library's own description of a
+  parameter, where its docstring gives one), and outputs. pandas-ta only reveals its
   outputs by running, which takes up to 2.5 s an indicator, so the picker reads
   the snapshot. `python -m openstrategy_studio.indicators` rewrites it from the
   installed libraries; tests/test_indicators.py regenerates it and compares, and
@@ -156,6 +158,100 @@ EXCLUDED = {
 # pandas-ta hand the work to TA-Lib; the default is kept.
 HIDDEN_PARAMS = {"offset", "talib"}
 
+# What a setting does, for the ⓘ beside it on the Build page (param_help below), by
+# library and parameter name. A name missing here falls back to the description the
+# library's own docstring gives (captured in the snapshot as the declaration's "help"),
+# and every tooltip also says which function takes the value and its default. The
+# Studio's own entries carry their help in STUDIO. Plain words; no claim here that the
+# library's code does not bear out.
+PARAM_HELP = {
+    "talib": {
+        "timeperiod": "How many bars it looks back over.",
+        "fastperiod": "Bars in the fast (shorter) average.",
+        "slowperiod": "Bars in the slow (longer) average.",
+        "signalperiod": "Bars in the signal line's average.",
+        "matype": "The kind of moving average: SMA simple, EMA exponential, WMA weighted, and so on. NONE applies "
+                  "no smoothing.",
+        "fastmatype": "The kind of moving average for the fast line.",
+        "slowmatype": "The kind of moving average for the slow line.",
+        "signalmatype": "The kind of moving average for the signal line.",
+        "slowk_matype": "The kind of moving average that smooths %K.",
+        "slowd_matype": "The kind of moving average that smooths %D.",
+        "fastd_matype": "The kind of moving average that smooths fast %D.",
+        "rocmatype": "The kind of moving average that smooths each rate of change.",
+        "nbdevup": "How many standard deviations above the middle line the upper band sits.",
+        "nbdevdn": "How many standard deviations below the middle line the lower band sits.",
+        "fastk_period": "Bars for %K: where the close sits in the high-low range of this many bars.",
+        "slowk_period": "Bars that smooth %K into slow %K.",
+        "slowd_period": "Bars that smooth slow %K into %D.",
+        "fastd_period": "Bars that smooth %K into fast %D.",
+        "acceleration": "The step the acceleration factor grows by at each new extreme: higher pulls the stop "
+                        "towards price faster.",
+        "maximum": "The largest the acceleration factor can grow to.",
+        "startvalue": "The starting value and direction: 0 finds them itself, above 0 starts long, below 0 starts "
+                      "short.",
+        "offsetonreverse": "A percentage added to the stop when it flips direction.",
+        "accelerationinitlong": "The acceleration factor's starting value for longs.",
+        "accelerationlong": "The step the acceleration factor grows by for longs.",
+        "accelerationmaxlong": "The largest acceleration factor for longs.",
+        "accelerationinitshort": "The acceleration factor's starting value for shorts.",
+        "accelerationshort": "The step the acceleration factor grows by for shorts.",
+        "accelerationmaxshort": "The largest acceleration factor for shorts.",
+        "fastlimit": "The upper limit on MAMA's adaptive smoothing factor.",
+        "slowlimit": "The lower limit on MAMA's adaptive smoothing factor.",
+        "vfactor": "The volume factor, 0 to 1: 0 behaves like an EMA, 1 like a DEMA. 0.7 is usual.",
+        "timeperiod1": "Bars in the shortest of the three periods.",
+        "timeperiod2": "Bars in the middle period.",
+        "timeperiod3": "Bars in the longest period.",
+        "minperiod": "The shortest period the variable average may use.",
+        "maxperiod": "The longest period the variable average may use.",
+        "sigma": "How spread out the Gaussian weights are: larger is smoother.",
+        "offset": "Where in the window the weights peak, 0 to 1: higher follows price more closely, lower is "
+                  "smoother.",
+        "tenkanperiod": "Bars for the conversion line (tenkan-sen).",
+        "kijunperiod": "Bars for the base line (kijun-sen).",
+        "senkoubperiod": "Bars for leading span B (senkou span B).",
+        "atrperiod": "Bars in the Average True Range it uses.",
+    },
+    "pandas_ta": {
+        "length": "How many bars it looks back over.",
+        "mamode": "The kind of moving average it uses: sma simple, ema exponential, wma weighted, and so on.",
+        "fast": "Bars in the fast (shorter) average.",
+        "slow": "Bars in the slow (longer) average.",
+        "signal": "Bars in the signal line's average.",
+        "drift": "The difference period: each bar is compared with the one this many bars before.",
+        "scalar": "A multiplier on the result (100 turns a fraction into a percentage).",
+        # Two whose docstrings repeat another parameter's words (pandas-ta-classic 0.9).
+        "atr_length": "Bars in the Average True Range it uses.",
+        "std": "A multiplier on the standard deviation it divides by.",
+    },
+    "pattern": {
+        "mode": "confirmed fires when the pattern completes, such as a close through its neckline. forming fires "
+                "earlier, as the shape falls into place and before the break: riskier as a trigger.",
+        "window": "How many bars back it looks for the pattern's shape.",
+        "pivot_n": "Bars on each side that confirm a swing high or low. Smaller finds more, smaller swings; larger "
+                   "only broad ones. A swing is only known this many bars after it, so the signal comes no "
+                   "earlier.",
+        "pivot_pct": "The smallest move for a swing to count, as a fraction (0.02 = 2%). Blank: any swing counts.",
+        "tol": "How close counts as equal, as a fraction: of the bar's range for a candlestick (a shadow under "
+               "5% of it counts as none), of price for a chart pattern (two lows within 3% are level).",
+        "doji_thr": "A bar is a doji when its body is smaller than this share of its range (0.1 = 10%).",
+        "body_thr": "The body's size limit, as a share of the bar's range.",
+        "shadow_thr": "The shadow's size limit, as a share of the bar's range.",
+        "shadow_factor": "How many times the body the long shadow must be (2 = twice).",
+        "require_trend": "Fire only after the trend the textbook pattern needs. Off: the shape alone.",
+        "trend_n": "Bars used to judge that prior trend.",
+        "penetration": "How far into the first bar's body the second must close, as a fraction (0.5 = past its "
+                       "midpoint).",
+        "min_separation": "The fewest bars between the pattern's peaks or troughs.",
+        "fib_tol": "How far each leg may stray from its Fibonacci ratio, as a fraction (0.05 = 5%).",
+        "reversal_bars": "Bars within which the failed breakout must reverse.",
+        "reversal_pct": "How far the failed breakout must reverse, as a fraction (0.05 = 5%).",
+        "flat_tol": "How level the flat side must be, as a fraction of price (0.02 = 2%).",
+    },
+}
+SOURCE_NAMES = {"talib": "TA-Lib", "pandas_ta": "pandas-ta", "pattern": "ta_patterns"}
+
 # The candlestick and chart pattern families: (module path in ta_patterns, family label).
 PATTERN_FAMILIES = {
     "candle": [("single", "Single bar"), ("two_bar", "Two bars"), ("three_bar", "Three bars"),
@@ -170,16 +266,21 @@ STUDIO = {
     "studio:envelope": {
         "label": "Moving average envelope", "menu": ["Indicator", "Bands and channels"],
         "inputs": ["close"],
-        "params": {"timeperiod": {"type": "int", "default": 20}, "matype": {"type": "choice", "default": "SMA",
-                                                                            "options": TALIB_MA_TYPES},
-                   "percent": {"type": "float", "default": 2.5}},
+        "params": {"timeperiod": {"type": "int", "default": 20, "help": "Bars in the moving average."},
+                   "matype": {"type": "choice", "default": "SMA", "options": TALIB_MA_TYPES,
+                              "help": "The kind of moving average: SMA simple, EMA exponential, WMA weighted, and "
+                                      "so on."},
+                   "percent": {"type": "float", "default": 2.5,
+                               "help": "How far above and below the average the bands sit, in percent (2.5 = "
+                                       "2.5%)."}},
         "outputs": ["upper", "middle", "lower"],
         "description": "A moving average with bands a fixed percentage above and below it.",
     },
     "studio:previous_period": {
         "label": "Previous day, week or month", "menu": ["Price levels", "Pivots and previous periods"],
         "inputs": [],
-        "params": {"period": {"type": "choice", "default": "day", "options": ["day", "week", "month"]}},
+        "params": {"period": {"type": "choice", "default": "day", "options": ["day", "week", "month"],
+                              "help": "Which period to show: the last completed day, week or calendar month."}},
         "outputs": ["open", "high", "low", "close"],
         "description": "The last completed day's (week's, month's) open, high, low and close, held until the next "
                        "one completes. It never shows a period that is still forming.",
@@ -187,14 +288,16 @@ STUDIO = {
     "studio:offset": {
         "label": "Offset a line by a percentage", "menu": ["Transform", "Offsets and bands"],
         "inputs": ["source"],
-        "params": {"percent": {"type": "float", "default": 5.0}},
+        "params": {"percent": {"type": "float", "default": 5.0,
+                               "help": "How far to move the line, in percent: 5 is 5% above it, -5 is 5% below."}},
         "outputs": ["value"],
         "description": "The line times (1 + percent / 100). Use a negative percent to go below it.",
     },
     "studio:percent_band": {
         "label": "Band a percentage around a line", "menu": ["Transform", "Offsets and bands"],
         "inputs": ["source"],
-        "params": {"percent": {"type": "float", "default": 5.0}},
+        "params": {"percent": {"type": "float", "default": 5.0,
+                               "help": "How far above and below the line the two lines sit, in percent (5 = 5%)."}},
         "outputs": ["upper", "lower"],
         "description": "Two lines, percent above and percent below the input. 'Within 5% of the EMA' is a price "
                        "between the lower and upper lines of a 5% band around the EMA.",
@@ -209,7 +312,8 @@ STUDIO = {
     "studio:bars_ago": {
         "label": "A line some bars ago", "menu": ["Transform", "Offsets and bands"],
         "inputs": ["source"],
-        "params": {"bars": {"type": "int", "default": 1}},
+        "params": {"bars": {"type": "int", "default": 1,
+                            "help": "How many bars back to read the input. 1 is the bar before this one."}},
         "outputs": ["value"],
         "description": "The input's value that many bars back. History only: it never moves a value forward.",
     },
@@ -224,7 +328,10 @@ STUDIO = {
     "studio:python": {
         "label": "Python code", "menu": ["Custom", "Python"],
         "inputs": [],
-        "params": {"code": {"type": "code", "default": "return close.rolling(10).mean()"}},
+        "params": {"code": {"type": "code", "default": "return close.rolling(10).mean()",
+                            "help": "The body of a function given open, high, low, close and volume (frames with "
+                                    "one column per symbol), np and pd. Return a frame shaped like close. ⚠️ Use "
+                                    "only past bars: a shift(-1) or a centred window looks ahead."}},
         "outputs": ["value"],
         "description": "Trusted local code. The function body receives open, high, low, close, volume, np and pd, "
                        "and returns a frame shaped like close.",
@@ -277,6 +384,29 @@ def new_feature(indicator_id):
         if declaration.get("default") is not None:
             feature["params"][name] = declaration["default"]
     return feature
+
+
+def param_help(indicator_id, name):
+    """The ⓘ text for one of an entry's settings: what it does, which function takes it, its default.
+
+    What it does comes from PARAM_HELP, else the library's own words (the declaration's
+    "help", from its docstring or STUDIO). A setting neither describes still says where
+    the value goes, so the library's documentation can be looked up.
+    """
+    item = entry(indicator_id)
+    declaration = item["params"][name]
+    parts = [PARAM_HELP.get(item["source"], {}).get(name) or declaration.get("help") or ""]
+    if item["source"] in SOURCE_NAMES:
+        function = item["function"].split(":")[-1]
+        parts.append(f"{function} ({SOURCE_NAMES[item['source']]}) takes it as `{name}`.")
+    default = declaration.get("default")
+    if declaration["type"] == "code":
+        pass
+    elif default is None:
+        parts.append("Blank uses the library's own default.")
+    else:
+        parts.append(f"Default: {default}.")
+    return " ".join(part for part in parts if part)
 
 
 def describe(feature):
@@ -496,11 +626,16 @@ def _talib_entries():
 
 
 def _pandas_ta_default(function, name, doc, source):
-    """A pandas-ta parameter's real default: most signatures say None and set it in the body."""
+    """A pandas-ta parameter's (type, default, description). Most signatures say None and
+    set the real default in the body; the docstring's `name (type): text. Default: x` line
+    gives all three."""
     import ast
     match = re.search(rf"^\s*{re.escape(name)}\s*\(([^)]*)\):(.*?)(?=^\s*\w+\s*\(|\Z)", doc, re.M | re.S)
-    kind, default = None, None
+    kind, default, words = None, None, ""
     if match:
+        # The description: the text before "Default", in its own paragraph (the last
+        # argument's match runs on into the Kwargs: heading).
+        words = " ".join(re.split(r"Default", match.group(2).split("\n\n")[0])[0].split()).strip()
         kind = match.group(1).split(",")[0].strip().lower()
         found = re.search(r"Default:?\s*(-?[\w.'\"]+)", match.group(2))
         if found:
@@ -516,7 +651,7 @@ def _pandas_ta_default(function, name, doc, source):
                 default = ast.literal_eval(found.group(1).strip().rstrip(")"))
             except (ValueError, SyntaxError):
                 default = None
-    return kind, default
+    return kind, default, words
 
 
 def _pandas_ta_entries(talib_names):
@@ -545,7 +680,7 @@ def _pandas_ta_entries(talib_names):
             for param in factory.param_names:
                 if param in HIDDEN_PARAMS:
                     continue
-                kind, default = _pandas_ta_default(name, param, doc, code)
+                kind, default, words = _pandas_ta_default(name, param, doc, code)
                 if param == "mamode":
                     params[param] = {"type": "choice", "default": default if default in PANDAS_TA_MA_TYPES else None,
                                      "options": PANDAS_TA_MA_TYPES}
@@ -560,6 +695,8 @@ def _pandas_ta_entries(talib_names):
                     # a number left blank, which means "the library's own default".
                     params[param] = {"type": "float", "default": float(default) if isinstance(default, (int, float))
                                      else None}
+                if words:
+                    params[param]["help"] = words
             # Which outputs are numbers: run once on the sample, positionally like compute().
             inputs = list(factory.input_names)
             series = {key: sample[_price_for(key)]["X"] for key in inputs}
@@ -620,6 +757,12 @@ def _pattern_entries():
                         params[key] = {"type": "float", "default": default}
                     else:
                         params[key] = {"type": "str", "default": default}
+                    # Some detectors document their settings numpy-style: "name : type", then
+                    # indented lines saying what it does.
+                    described = re.search(rf"^{re.escape(key)}\s*:[^\n]*\n((?:[ \t]+\S[^\n]*\n?)+)",
+                                          inspect.getdoc(function) or "", re.M)
+                    if described:
+                        params[key]["help"] = " ".join(described.group(1).split())
                 doc = (inspect.getdoc(function) or "").replace("**", "")
                 rows.append({"id": f"pattern:{module}:{name}", "source": "pattern", "function": f"{module}:{name}",
                              "label": name.replace("_", " ").capitalize(),

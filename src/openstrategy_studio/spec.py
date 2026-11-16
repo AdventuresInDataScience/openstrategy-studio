@@ -598,6 +598,10 @@ def _check_risk(problems, spec, kind):
         if used or stop_kind != "none" or risk.get("target") or used_exits or any(orders.values()):
             problems.append("A portfolio is sized by its weights; remove the sizing, stops, target and order settings.")
         return
+    if risk.get("leverage_budget"):
+        # vectorbtX applies it to target weights only: on the signal route it does nothing.
+        problems.append("A leverage budget scales a portfolio's weights, and a rule strategy has none; remove it. "
+                        "Each instrument's leverage still caps its trades.")
     # ⚠️ vectorbtX raises BacktestError for two sizing arguments: catch it here first.
     if len(used) > 1:
         problems.append(f"Choose one way to size positions, not {len(used)} ({', '.join(used)}).")

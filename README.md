@@ -17,6 +17,8 @@ uv run openstrategy-studio selfcheck   # can this machine build, backtest and op
 uv run openstrategy-studio desktop     # the app in its own window (uv sync --extra desktop)
 ```
 
+On Windows, `run.cmd` in the project folder does the same as `uv run openstrategy-studio` with both extras: double-click it, or type `run` in a terminal there. Anything after it is passed on (`run desktop`, `run selfcheck --quick`, `run --port 8600`).
+
 For people who are not developers, the first-run installers in `packaging/installer/` do all of this. They end with a desktop shortcut that works offline. See [`docs/PACKAGING.md`](docs/PACKAGING.md), which also covers Docker and the experimental bundled app.
 
 Notes:
@@ -40,7 +42,7 @@ Notes:
 5. **Results:** see the trials, the best settings with **Apply to the strategy**, convergence, a pair heatmap, parallel coordinates, a re-run check, the deflated Sharpe ratio, walk-forward folds and the backend comparison. You can also compare saved runs.
 6. **Patterns:** see how each of the 300 detectors was followed on your data, then add one to a rule in one click.
 
-Every page has a **How to use this page** guide in the sidebar.
+Every page has a **How to use this page** guide in the sidebar, and every setting has an ⓘ beside it that says what it does.
 
 ## Changing the look
 

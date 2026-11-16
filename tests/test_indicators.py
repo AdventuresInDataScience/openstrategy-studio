@@ -192,3 +192,21 @@ def test_menu_is_complete_and_ordered():
     for wanted in ("talib:KC", "talib:AROON", "studio:envelope", "talib:ICHIMOKU", "pandas_ta:CE", "talib:SUPERTREND"):
         assert wanted in ids
     assert I.outputs("talib:AROON") == ["aroondown", "aroonup"]
+
+
+def test_every_setting_has_a_tooltip():
+    """param_help explains every setting, and every curated description is reachable.
+
+    A PARAM_HELP name that no entry of that library has (a typo, or a parameter a library
+    bump renamed) would never show, so it fails here.
+    """
+    used = {}
+    for item in I.catalogue().values():
+        for name in item["params"]:
+            used.setdefault(item["source"], set()).add(name)
+            text = I.param_help(item["id"], name)
+            assert text.strip(), (item["id"], name)
+    for source, described in I.PARAM_HELP.items():
+        assert set(described) <= used.get(source, set()), (source, sorted(set(described) - used.get(source, set())))
+    assert I.param_help("talib:SMA", "timeperiod") == ("How many bars it looks back over. SMA (TA-Lib) takes it as "
+                                                       "`timeperiod`. Default: 30.")

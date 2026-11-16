@@ -99,6 +99,23 @@ def test_portfolio_plan(momentum_spec):
     assert "entries" not in args and "risk_pct" not in args
 
 
+def test_leverage_budget_is_named_on_portfolios_only(momentum_spec, ma_spec):
+    """The front door defaults leverage_budget to True, so a portfolio names it either way:
+    left out, an unticked box would still apply it. A rule strategy never has one."""
+    from openstrategy_studio.spec import validate_spec
+
+    portfolio = apply_params(momentum_spec)
+    portfolio["risk"] = {}
+    assert engine.call_plan(portfolio)["args"]["leverage_budget"] == ("lit", False)
+    portfolio["risk"]["leverage_budget"] = True
+    assert engine.call_plan(portfolio)["args"]["leverage_budget"] == ("lit", True)
+    rules = apply_params(ma_spec)
+    assert "leverage_budget" not in engine.call_plan(rules)["args"]
+    rules["risk"]["leverage_budget"] = True
+    assert "leverage_budget" not in engine.call_plan(rules)["args"]
+    assert any("leverage budget" in problem for problem in validate_spec(rules))
+
+
 def test_reporting_currency_routes_to_portfolio(ma_spec):
     spec = without_pair(ma_spec)
     spec["account"]["base_currency"] = "GBP"

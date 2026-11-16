@@ -36,21 +36,25 @@ left, right = st.columns(2)
 with left:
     st.subheader("Start a strategy")
     templates = list_templates()
-    chosen = st.selectbox("From a template", list(templates), format_func=templates.get)
+    chosen = st.selectbox("From a template", list(templates), format_func=templates.get,
+                          help="A ready-made strategy to start from. Using one replaces the current strategy.")
     if st.button("Use this template"):
         ui.replace_spec(load_template(chosen))
         st.success(f"Loaded “{templates[chosen]}”. Edit it on the Build page.")
 
     saved = sorted((data_dir / "strategies").glob("*.json"))
     if saved:
-        picked = st.selectbox("A saved strategy", saved, format_func=lambda path: path.stem)
+        picked = st.selectbox("A saved strategy", saved, format_func=lambda path: path.stem,
+                              help="Strategies saved with Save strategy, from the data folder. Opening one replaces "
+                                   "the current strategy.")
         if st.button("Open saved strategy"):
             spec = load_spec(picked)
             ui.replace_spec(spec)
             ui.show_problems(validate_spec(spec), "This file has problems")
             st.success(f"Opened {picked.stem}.")
 
-    upload = st.file_uploader("Or open a strategy file (.json)", type=["json"])
+    upload = st.file_uploader("Or open a strategy file (.json)", type=["json"],
+                              help="A strategy file downloaded from the Build page, from this or another machine.")
     if upload is not None and st.button("Open uploaded file"):
         spec = json.loads(upload.getvalue().decode("utf-8"))
         problems = validate_spec(spec)
@@ -79,7 +83,9 @@ with right:
         ui.show_problems(problems)
     else:
         st.success("Ready to backtest.")
-    name = st.text_input("Save as", value=re.sub(r"[^A-Za-z0-9_-]+", "_", spec.get("name", "strategy")).strip("_"))
+    name = st.text_input("Save as", value=re.sub(r"[^A-Za-z0-9_-]+", "_", spec.get("name", "strategy")).strip("_"),
+                         help="The file name in the data folder's strategies folder. Saving under an existing "
+                              "name replaces that file.")
     if st.button("Save strategy"):
         from openstrategy_studio.spec import save_spec
         save_spec(spec, data_dir / "strategies" / f"{name}.json")

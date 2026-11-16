@@ -21,11 +21,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 5
+    "default": 5,
+    "help": "The short period."
    },
    "atr_length": {
     "type": "int",
-    "default": 15
+    "default": 15,
+    "help": "The short period."
    }
   },
   "outputs": [
@@ -54,15 +56,18 @@
   "params": {
    "fast": {
     "type": "int",
-    "default": 8
+    "default": 8,
+    "help": "Fast MA period."
    },
    "slow": {
     "type": "int",
-    "default": 21
+    "default": 21,
+    "help": "Slow MA period."
    },
    "lookback": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "Lookback period for trend detection."
    },
    "mamode": {
     "type": "choice",
@@ -85,7 +90,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "See ```help(ta.ma)```."
    }
   },
   "outputs": [
@@ -114,19 +120,23 @@
   "params": {
    "fast": {
     "type": "int",
-    "default": 4
+    "default": 4,
+    "help": "Fast MA period."
    },
    "slow": {
     "type": "int",
-    "default": 12
+    "default": 12,
+    "help": "Slow MA period."
    },
    "max_lookback": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "Max lookback period."
    },
    "min_lookback": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "Min lookback period."
    },
    "mamode": {
     "type": "choice",
@@ -149,7 +159,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "See ```help(ta.ma)```."
    }
   },
   "outputs": [
@@ -181,7 +192,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 20
+    "default": 20,
+    "help": "Lookback period."
    }
   },
   "outputs": [
@@ -207,7 +219,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 26
+    "default": 26,
+    "help": "The period."
    },
    "mamode": {
     "type": "choice",
@@ -230,7 +243,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "See ```help(ta.ma)```."
    }
   },
   "outputs": [
@@ -262,15 +276,18 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 26
+    "default": 26,
+    "help": "The period."
    },
    "scalar": {
     "type": "int",
-    "default": 100
+    "default": 100,
+    "help": "How much to magnify."
    },
    "drift": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "The difference period."
    }
   },
   "outputs": [
@@ -303,15 +320,18 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 30
+    "default": 30,
+    "help": "The period."
    },
    "full": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "Use an anchored (expanding) window instead of a rolling one of `length` bars."
    },
    "ddof": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "Delta Degrees of Freedom for the rolling standard deviation. Must be 0 <= ddof < length; ignored when full=True."
    }
   },
   "outputs": [
@@ -344,11 +364,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 22
+    "default": 22,
+    "help": "Lookback period for High/Low and ATR."
    },
    "multiplier": {
     "type": "float",
-    "default": 3.0
+    "default": 3.0,
+    "help": "ATR multiplier."
    },
    "mamode": {
     "type": "choice",
@@ -371,7 +393,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "See ``help(ta.ma)``."
    }
   },
   "outputs": [
@@ -398,11 +421,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 9
+    "default": 9,
+    "help": "The period."
    },
    "scalar": {
     "type": "int",
-    "default": 100
+    "default": 100,
+    "help": "How much to magnify."
    }
   },
   "outputs": [
@@ -436,27 +461,33 @@
   "params": {
    "method": {
     "type": "str",
-    "default": "classic"
+    "default": "classic",
+    "help": "Pivot calculation method. Options: 'classic', 'camarilla', 'fibonacci', 'woodie'."
    },
    "timeframe": {
     "type": "str",
-    "default": "daily"
+    "default": "daily",
+    "help": "Time context for CPR calculation. Options: 'intraday', 'daily', 'weekly', 'monthly'."
    },
    "levels": {
     "type": "str",
-    "default": "standard"
+    "default": "standard",
+    "help": "Which pivot levels to calculate. Options: 'basic' (TC/P/BC), 'standard' (+R1/R2/S1/S2), 'extended' (+R3/R4/S3/S4), 'all'."
    },
    "width_analysis": {
     "type": "bool",
-    "default": true
+    "default": true,
+    "help": "Calculate CPR width metrics."
    },
    "price_position": {
     "type": "bool",
-    "default": true
+    "default": true,
+    "help": "Calculate price position relative to CPR."
    },
    "virgin_cpr": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "Detect virgin (untested) CPR levels."
    }
   },
   "outputs": [
@@ -496,11 +527,13 @@
    },
    "length": {
     "type": "int",
-    "default": 5
+    "default": 5,
+    "help": "It's period."
    },
    "mode": {
     "type": "str",
-    "default": "linear"
+    "default": "linear",
+    "help": "If 'exp' then \"exponential\" decay."
    }
   },
   "outputs": [
@@ -526,23 +559,28 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "It's period."
    },
    "strict": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "If True, checks if the series is continuously decreasing over the period."
    },
    "asint": {
     "type": "bool",
-    "default": true
+    "default": true,
+    "help": "Return 1.0 / 0.0 (float64, NaN until the compared bars exist) instead of booleans (False there)."
    },
    "percent": {
     "type": "float",
-    "default": null
+    "default": null,
+    "help": "Percent as an integer."
    },
    "drift": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "The difference period."
    }
   },
   "outputs": [
@@ -591,7 +629,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "The EMA period."
    }
   },
   "outputs": [
@@ -617,11 +656,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 40
+    "default": 40,
+    "help": "It's max cycle/trend period. Values between 40-48 work like expected with minimum value: 39."
    },
    "bars": {
     "type": "int",
-    "default": 10
+    "default": 10,
+    "help": "Period of low pass filtering."
    }
   },
   "outputs": [
@@ -647,7 +688,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 5
+    "default": 5,
+    "help": "Period."
    }
   },
   "outputs": [
@@ -673,11 +715,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 10
+    "default": 10,
+    "help": "It's period."
    },
    "base": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "Logarithmic Base."
    }
   },
   "outputs": [
@@ -703,11 +747,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 10
+    "default": 10,
+    "help": "It's period."
    },
    "asc": {
     "type": "bool",
-    "default": true
+    "default": true,
+    "help": "True: recent values weigh more. False: older values weigh more."
    }
   },
   "outputs": [
@@ -737,11 +783,13 @@
   "params": {
    "high_length": {
     "type": "int",
-    "default": 13
+    "default": 13,
+    "help": "It's period."
    },
    "low_length": {
     "type": "int",
-    "default": 21
+    "default": 21,
+    "help": "It's period."
    },
    "mamode": {
     "type": "choice",
@@ -764,7 +812,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "See ```help(ta.ma)```."
    }
   },
   "outputs": [
@@ -792,11 +841,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 20
+    "default": 20,
+    "help": "Lookback period for std dev."
    },
    "annualization": {
     "type": "int",
-    "default": 252
+    "default": 252,
+    "help": "Annualization factor."
    }
   },
   "outputs": [
@@ -870,15 +921,18 @@
   "params": {
    "na": {
     "type": "float",
-    "default": 0.2
+    "default": 0.2,
+    "help": "Smoothed series parameter (from 0 to 1)."
    },
    "nb": {
     "type": "float",
-    "default": 0.1
+    "default": 0.1,
+    "help": "Trend parameter (from 0 to 1)."
    },
    "nc": {
     "type": "float",
-    "default": 0.1
+    "default": 0.1,
+    "help": "Seasonality parameter (from 0 to 1)."
    }
   },
   "outputs": [
@@ -904,23 +958,28 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "It's period."
    },
    "strict": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "If True, checks if the series is continuously increasing over the period."
    },
    "asint": {
     "type": "bool",
-    "default": true
+    "default": true,
+    "help": "Return 1.0 / 0.0 (float64, NaN until the compared bars exist) instead of booleans (False there)."
    },
    "percent": {
     "type": "float",
-    "default": null
+    "default": null,
+    "help": "Percent as an integer."
    },
    "drift": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "The difference period."
    }
   },
   "outputs": [
@@ -950,11 +1009,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 20
+    "default": 20,
+    "help": "It's period."
    },
    "rvi_length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "RVI period."
    },
    "scalar": {
     "type": "float",
@@ -962,11 +1023,13 @@
    },
    "refined": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "Use 'refined' calculation."
    },
    "thirds": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "Use 'thirds' calculation."
    },
    "mamode": {
     "type": "choice",
@@ -989,7 +1052,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "See ```help(ta.ma)```."
    }
   },
   "outputs": [
@@ -1015,11 +1079,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 7
+    "default": 7,
+    "help": "Period of calculation."
    },
    "phase": {
     "type": "int",
-    "default": 0
+    "default": 0,
+    "help": "How heavy/light the average is [-100, 100]."
    }
   },
   "outputs": [
@@ -1045,11 +1111,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "It's period."
    },
    "cumulative": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "If True, returns the cumulative returns."
    }
   },
   "outputs": [
@@ -1077,7 +1145,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "Lookback period."
    }
   },
   "outputs": [
@@ -1103,11 +1172,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "It's period."
    },
    "gamma": {
     "type": "float",
-    "default": 0.5
+    "default": 0.5,
+    "help": "Laguerre filter coefficient (0 to 1)."
    }
   },
   "outputs": [
@@ -1133,7 +1204,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 30
+    "default": 30,
+    "help": "It's period."
    }
   },
   "outputs": [
@@ -1159,7 +1231,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 30
+    "default": 30,
+    "help": "Lookback period."
    }
   },
   "outputs": [
@@ -1185,7 +1258,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 10
+    "default": 10,
+    "help": "Initial EMA period."
    }
   },
   "outputs": [
@@ -1216,7 +1290,8 @@
   "params": {
    "period": {
     "type": "int",
-    "default": 5
+    "default": 5,
+    "help": "Lookback period."
    }
   },
   "outputs": [
@@ -1291,7 +1366,8 @@
   "params": {
    "drift": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "The difference period."
    }
   },
   "outputs": [
@@ -1317,11 +1393,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "It's period."
    },
    "cumulative": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "If True, returns the cumulative returns."
    }
   },
   "outputs": [
@@ -1351,7 +1429,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "It's period."
    }
   },
   "outputs": [
@@ -1381,11 +1460,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 10
+    "default": 10,
+    "help": "ATR period."
    },
    "multiplier": {
     "type": "float",
-    "default": 3.0
+    "default": 3.0,
+    "help": "ATR multiplier."
    },
    "mamode": {
     "type": "choice",
@@ -1408,7 +1489,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "Moving average mode."
    }
   },
   "outputs": [
@@ -1434,7 +1516,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "The period."
    }
   },
   "outputs": [
@@ -1462,15 +1545,18 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 12
+    "default": 12,
+    "help": "It's period."
    },
    "scalar": {
     "type": "int",
-    "default": 100
+    "default": 100,
+    "help": "How much to magnify."
    },
    "drift": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "The difference period."
    }
   },
   "outputs": [
@@ -1542,7 +1628,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 10
+    "default": 10,
+    "help": "It's period."
    }
   },
   "outputs": [
@@ -1568,15 +1655,18 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "RSI period."
    },
    "smooth": {
     "type": "int",
-    "default": 5
+    "default": 5,
+    "help": "RSI smoothing period."
    },
    "factor": {
     "type": "float",
-    "default": 4.236
+    "default": 4.236,
+    "help": "QQE Factor."
    },
    "mamode": {
     "type": "choice",
@@ -1599,11 +1689,13 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "See ```help(ta.ma)```."
    },
    "drift": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "The difference period."
    }
   },
   "outputs": [
@@ -1635,11 +1727,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 30
+    "default": 30,
+    "help": "It's period."
    },
    "q": {
     "type": "float",
-    "default": 0.5
+    "default": 0.5,
+    "help": "The quantile."
    }
   },
   "outputs": [
@@ -1665,7 +1759,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "SMA period."
    }
   },
   "outputs": [
@@ -1700,7 +1795,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "It's period."
    }
   },
   "outputs": [
@@ -1732,11 +1828,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "It's period."
    },
    "swma_length": {
     "type": "int",
-    "default": 4
+    "default": 4,
+    "help": "It's period."
    }
   },
   "outputs": [
@@ -1766,7 +1864,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "Lookback period."
    }
   },
   "outputs": [
@@ -1792,7 +1891,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "It's period."
    }
   },
   "outputs": [
@@ -1818,7 +1918,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 30
+    "default": 30,
+    "help": "It's period. Must be > 2, the narrowest window a skew is defined on."
    }
   },
   "outputs": [
@@ -1844,15 +1945,18 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "It's period."
    },
    "as_angle": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "Converts slope to an angle."
    },
    "to_degrees": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "Converts slope angle to degrees."
    }
   },
   "outputs": [
@@ -1884,11 +1988,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 15
+    "default": 15,
+    "help": "Swing high/low lookback period."
    },
    "wick_mult": {
     "type": "float",
-    "default": 1.5
+    "default": 1.5,
+    "help": "Wick-to-body ratio multiplier."
    }
   },
   "outputs": [
@@ -1918,27 +2024,33 @@
   "params": {
    "bb_length": {
     "type": "int",
-    "default": 20
+    "default": 20,
+    "help": "Bollinger Bands period."
    },
    "bb_std": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "Bollinger Bands Std. Dev."
    },
    "kc_length": {
     "type": "int",
-    "default": 20
+    "default": 20,
+    "help": "Keltner Channel period."
    },
    "kc_scalar": {
     "type": "float",
-    "default": 1.5
+    "default": 1.5,
+    "help": "Keltner Channel scalar."
    },
    "mom_length": {
     "type": "int",
-    "default": 12
+    "default": 12,
+    "help": "Momentum Period."
    },
    "mom_smooth": {
     "type": "int",
-    "default": 6
+    "default": 6,
+    "help": "Smoothing Period of Momentum."
    },
    "use_tr": {
     "type": "float",
@@ -1965,7 +2077,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "Only \"ema\" or \"sma\"."
    }
   },
   "outputs": [
@@ -1998,35 +2111,43 @@
   "params": {
    "bb_length": {
     "type": "int",
-    "default": 20
+    "default": 20,
+    "help": "Bollinger Bands period."
    },
    "bb_std": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "Bollinger Bands Std. Dev."
    },
    "kc_length": {
     "type": "int",
-    "default": 20
+    "default": 20,
+    "help": "Keltner Channel period."
    },
    "kc_scalar_wide": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "Keltner Channel scalar for wider channel."
    },
    "kc_scalar_normal": {
     "type": "float",
-    "default": 1.5
+    "default": 1.5,
+    "help": "Keltner Channel scalar for normal channel."
    },
    "kc_scalar_narrow": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "Keltner Channel scalar for narrow channel."
    },
    "mom_length": {
     "type": "int",
-    "default": 12
+    "default": 12,
+    "help": "Momentum Period."
    },
    "mom_smooth": {
     "type": "int",
-    "default": 6
+    "default": 6,
+    "help": "Smoothing Period of Momentum."
    },
    "use_tr": {
     "type": "float",
@@ -2053,7 +2174,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "Only \"ema\" or \"sma\"."
    }
   },
   "outputs": [
@@ -2084,11 +2206,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 10
+    "default": 10,
+    "help": "It's period."
    },
    "poles": {
     "type": "int",
-    "default": 2
+    "default": 2,
+    "help": "The number of poles to use, either 2 or 3."
    }
   },
   "outputs": [
@@ -2114,11 +2238,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "Rolling window period."
    },
    "ddof": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "Degrees of freedom for std."
    }
   },
   "outputs": [
@@ -2144,7 +2270,8 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 10
+    "default": 10,
+    "help": "It's period."
    }
   },
   "outputs": [
@@ -2170,7 +2297,8 @@
   "params": {
    "asint": {
     "type": "bool",
-    "default": false
+    "default": false,
+    "help": "If True, fillnas with 0 and change type to int."
    }
   },
   "outputs": [
@@ -2199,15 +2327,18 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 20
+    "default": 20,
+    "help": "The period."
    },
    "long": {
     "type": "int",
-    "default": null
+    "default": null,
+    "help": "The buy factor"
    },
    "short": {
     "type": "float",
-    "default": null
+    "default": null,
+    "help": "The sell factor"
    },
    "mamode": {
     "type": "choice",
@@ -2230,11 +2361,13 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "See ```help(ta.ma)```."
    },
    "drift": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "The diff period."
    }
   },
   "outputs": [
@@ -2305,19 +2438,23 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 18
+    "default": 18,
+    "help": "TRIX period."
    },
    "signal": {
     "type": "int",
-    "default": 9
+    "default": 9,
+    "help": "Signal line period."
    },
    "scalar": {
     "type": "int",
-    "default": 100
+    "default": 100,
+    "help": "Multiplier."
    },
    "drift": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "The difference period."
    }
   },
   "outputs": [
@@ -2366,11 +2503,13 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "The short period."
    },
    "scalar": {
     "type": "int",
-    "default": 100
+    "default": 100,
+    "help": "A positive float to scale the bands."
    }
   },
   "outputs": [
@@ -2402,15 +2541,18 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 130
+    "default": 130,
+    "help": "The period."
    },
    "coef": {
     "type": "float",
-    "default": 0.2
+    "default": 0.2,
+    "help": "Volatility threshold coefficient (0.2 for day trading, 0.1 for intra-day)."
    },
    "vcoef": {
     "type": "float",
-    "default": 2.5
+    "default": 2.5,
+    "help": "Volume coefficient."
    },
    "mamode": {
     "type": "choice",
@@ -2433,7 +2575,8 @@
      "linreg",
      "midpoint",
      "zlma"
-    ]
+    ],
+    "help": "Moving average mode for smoothing."
    }
   },
   "outputs": [
@@ -2459,11 +2602,13 @@
   "params": {
    "fast": {
     "type": "int",
-    "default": 14
+    "default": 14,
+    "help": "Fast SMA period."
    },
    "slow": {
     "type": "int",
-    "default": 28
+    "default": 28,
+    "help": "Slow SMA period."
    }
   },
   "outputs": [
@@ -2491,15 +2636,18 @@
   "params": {
    "fast": {
     "type": "int",
-    "default": 12
+    "default": 12,
+    "help": "The fast period."
    },
    "slow": {
     "type": "int",
-    "default": 26
+    "default": 26,
+    "help": "The slow period."
    },
    "signal": {
     "type": "int",
-    "default": 9
+    "default": 9,
+    "help": "The signal period."
    }
   },
   "outputs": [
@@ -2527,15 +2675,18 @@
   "params": {
    "length": {
     "type": "int",
-    "default": 30
+    "default": 30,
+    "help": "It's period."
    },
    "std": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "It's period."
    },
    "ddof": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "Delta Degrees of Freedom. The divisor used in the standard deviation is ``length - ddof``; 1 is the sample deviation, 0 the population one. Must be < length."
    }
   },
   "outputs": [
@@ -2849,11 +3000,13 @@
   "params": {
    "penetration": {
     "type": "float",
-    "default": 0.5
+    "default": 0.5,
+    "help": "Fraction of D1's body that D2 must close through. 0.50 → D2 closes below the midpoint (classic textbook definition). 0.30 → looser; 0.70 → stricter (more bearish conviction required)."
    },
    "d1_body_thr": {
     "type": "float",
-    "default": 0.5
+    "default": 0.5,
+    "help": "Minimum body/range ratio for D1 to qualify as a 'substantial' candle."
    }
   },
   "outputs": [
@@ -4004,11 +4157,13 @@
   "params": {
    "penetration": {
     "type": "float",
-    "default": 0.5
+    "default": 0.5,
+    "help": "0.50 → D2 closes above the midpoint (classic definition). 0.30 → looser; 0.70 → stricter."
    },
    "d1_body_thr": {
     "type": "float",
-    "default": 0.5
+    "default": 0.5,
+    "help": "Minimum body/range ratio for D1."
    }
   },
   "outputs": [
@@ -6529,7 +6684,8 @@
     "options": [
      "confirmed",
      "forming"
-    ]
+    ],
+    "help": "confirmed — shape + close above the peak between the two troughs."
    },
    "window": {
     "type": "int",
@@ -6818,7 +6974,8 @@
     "options": [
      "confirmed",
      "forming"
-    ]
+    ],
+    "help": "forming — shape complete, signal fires continuously. confirmed — shape + close below the valley between the two peaks."
    },
    "window": {
     "type": "int",
@@ -6834,11 +6991,13 @@
    },
    "tol": {
     "type": "float",
-    "default": 0.03
+    "default": 0.03,
+    "help": "Max fractional difference between the two peak prices (default 3 %)."
    },
    "min_separation": {
     "type": "int",
-    "default": 5
+    "default": 5,
+    "help": "Minimum bars between the two peaks."
    }
   },
   "outputs": [
@@ -10455,7 +10614,8 @@
   "params": {
    "bars": {
     "type": "int",
-    "default": 1
+    "default": 1,
+    "help": "How many bars back to read the input. 1 is the bar before this one."
    }
   },
   "outputs": [
@@ -10525,7 +10685,8 @@
   "params": {
    "timeperiod": {
     "type": "int",
-    "default": 20
+    "default": 20,
+    "help": "Bars in the moving average."
    },
    "matype": {
     "type": "choice",
@@ -10547,11 +10708,13 @@
      "RMA",
      "VIDYA",
      "ALMA"
-    ]
+    ],
+    "help": "The kind of moving average: SMA simple, EMA exponential, WMA weighted, and so on."
    },
    "percent": {
     "type": "float",
-    "default": 2.5
+    "default": 2.5,
+    "help": "How far above and below the average the bands sit, in percent (2.5 = 2.5%)."
    }
   },
   "outputs": [
@@ -10579,7 +10742,8 @@
   "params": {
    "percent": {
     "type": "float",
-    "default": 5.0
+    "default": 5.0,
+    "help": "How far to move the line, in percent: 5 is 5% above it, -5 is 5% below."
    }
   },
   "outputs": [
@@ -10605,7 +10769,8 @@
   "params": {
    "percent": {
     "type": "float",
-    "default": 5.0
+    "default": 5.0,
+    "help": "How far above and below the line the two lines sit, in percent (5 = 5%)."
    }
   },
   "outputs": [
@@ -10635,7 +10800,8 @@
      "day",
      "week",
      "month"
-    ]
+    ],
+    "help": "Which period to show: the last completed day, week or calendar month."
    }
   },
   "outputs": [
@@ -10660,7 +10826,8 @@
   "params": {
    "code": {
     "type": "code",
-    "default": "return close.rolling(10).mean()"
+    "default": "return close.rolling(10).mean()",
+    "help": "The body of a function given open, high, low, close and volume (frames with one column per symbol), np and pd. Return a frame shaped like close. ⚠️ Use only past bars: a shift(-1) or a centred window looks ahead."
    }
   },
   "outputs": [

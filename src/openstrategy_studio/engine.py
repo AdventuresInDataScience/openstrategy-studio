@@ -385,8 +385,11 @@ def call_plan(spec, data_dir=None):
         args["weights"] = ("var", "weights")
         args["schedule"] = ("var", "schedule")
         args["min_trade"] = ("var", "min_trade")
-    if risk.get("leverage_budget"):
-        args["leverage_budget"] = ("lit", True)
+        # ⚠️ Always named, True or False: the front door defaults leverage_budget to True,
+        # so leaving it out when the box is unticked would still apply the budget. It
+        # exists on the weights route only (the signal route ignores it), so a rule
+        # strategy never passes it, and validate_spec rejects one.
+        args["leverage_budget"] = ("lit", bool(risk.get("leverage_budget")))
 
     # Sizing: exactly one of risk_pct, risk_amount, stake, notional, size.
     # ⚠️ risk_pct sizes off init_cash, not compounding equity.

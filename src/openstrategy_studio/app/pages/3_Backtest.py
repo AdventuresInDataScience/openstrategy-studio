@@ -24,7 +24,9 @@ ui.show_problems(problems)
 trusted = True
 if ui.has_python_block(spec) and st.session_state.get("untrusted_python"):
     trusted = st.checkbox("This strategy came from a file and contains Python code. I have read it on the "
-                          "Build page and trust them to run on this machine.")
+                          "Build page and trust them to run on this machine.",
+                          help="Python features run with your user's full access to this machine. Read the code on "
+                               "the Build page's Features tab before ticking this.")
 
 row = st.columns([1, 2, 2])
 compare = row[1].checkbox("Compare with buy and hold", value=True,
@@ -53,7 +55,9 @@ with st.expander("Open a saved run"):
         st.write("No saved runs yet.")
     else:
         labels = {row.run_id: f"{row.name} ({row.created_at})" for row in runs.itertuples()}
-        run_id = st.selectbox("Run", list(labels), format_func=labels.get)
+        run_id = st.selectbox("Run", list(labels), format_func=labels.get,
+                              help="A saved run, newest first. Opening it shows its results as they were saved, "
+                                   "without running again.")
         open_column, delete_column = st.columns(2)
         if open_column.button("Open run"):
             path = runs.set_index("run_id").loc[run_id, "path"]
@@ -100,7 +104,9 @@ if notes:
 
 # --- stats ----------------------------------------------------------------------------
 tags = {"all": "All metrics", "mt5": "MT5 report", "vectorbtx": "vectorbtX extras"}
-tag = st.radio("Metrics", list(tags), format_func=tags.get, horizontal=True)
+tag = st.radio("Metrics", list(tags), format_func=tags.get, horizontal=True,
+               help="Which statistics the three tables show: all of them, the ones MetaTrader 5's strategy report "
+                    "uses, or the ones vectorbtX adds to vectorbt's own.")
 columns = st.columns(3)
 for column, (table_name, label) in zip(columns, (("portfolio", "Portfolio"), ("trades", "Trades"), ("returns", "Returns"))):
     with column:
@@ -118,7 +124,8 @@ if "per_symbol" in results:
 st.divider()
 names = analysis.available_figures(results)
 row = st.columns([2, 3])
-name = row[0].selectbox("View", names, format_func=lambda key: FIGURES[key]["label"])
+name = row[0].selectbox("View", names, format_func=lambda key: FIGURES[key]["label"],
+                        help="Which chart to draw from this run.")
 with row[1]:
     theme, glow = ui.theme_picker(settings, "backtest")
 options = {}
@@ -126,12 +133,17 @@ if name == "price":
     symbols = results["meta"]["symbols"]
     choices = sorted(results["features"]["feature"].unique()) if "features" in results else []
     left, right = st.columns(2)
-    options["symbol"] = left.selectbox("Symbol", symbols)
-    options["overlays"] = tuple(right.multiselect("Overlay features (pattern hits show as diamonds)", choices))
+    options["symbol"] = left.selectbox("Symbol", symbols, help="Which symbol's prices and trades to show.")
+    options["overlays"] = tuple(right.multiselect("Overlay features (pattern hits show as diamonds)", choices,
+                                                  help="Feature lines to draw over the price."))
 elif name == "rolling":
-    options["window"] = st.slider("Window (bars)", 10, 504, 63)
+    options["window"] = st.slider("Window (bars)", 10, 504, 63,
+                                  help="How many bars each rolling figure is measured over (63 is about a "
+                                       "quarter of daily bars).")
 elif name == "monte_carlo":
-    options["paths"] = st.select_slider("Paths", [100, 250, 500, 1000, 2500], value=500)
+    options["paths"] = st.select_slider("Paths", [100, 250, 500, 1000, 2500], value=500,
+                                        help="How many times the trades are put in a random order to draw the "
+                                             "bands. More gives steadier bands and takes longer.")
 
 # Built only when selected, and cached on (run, view, theme, options).
 cache = st.session_state.setdefault("figures", {})
