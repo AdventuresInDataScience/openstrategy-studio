@@ -74,6 +74,12 @@ OP_GROUPS = [[">", "<", ">=", "<=", "crosses_above", "crosses_below"], ["rising"
 OPPOSITE_OP = {">": "<", "<": ">", ">=": "<=", "<=": ">=", "crosses_above": "crosses_below",
                "crosses_below": "crosses_above", "rising": "falling", "falling": "rising"}
 FILTER_KINDS = ["session", "weekday", "month", "higher_timeframe"]
+# The calendar conditions: the same on every bar of a day, so they take no timing.
+CALENDAR_FILTERS = ["session", "weekday", "month"]
+# A condition's timing, at most one per condition (compile.held): true on each of the last N
+# bars (the current one included), true on any of them, or as it was N bars ago. Each reads
+# history only. On a higher-timeframe condition the bars are the higher timeframe's.
+TIMING_KEYS = ["for_bars", "within_bars", "bars_ago"]
 PATTERN_SIDES = ["bullish", "bearish", "either"]
 RULE_SLOTS = ["long_entry", "long_exit", "short_entry", "short_exit"]
 WEIGHT_SCHEMES = ["equal", "inverse_vol", "price", "fixed"]
@@ -88,7 +94,8 @@ REBALANCE = ["never", "every_bar", "calendar"]
 CASH_MODELS = ["per_instrument", "shared"]
 # Who is filled first when entries compete for a shared account's cash.
 PRIORITY_KINDS = ["symbols", "random", "feature"]
-# What an entry the cash cannot cover does: not placed at all, or filled as far as the cash goes.
+# What an entry the account cannot fund does: not placed at all, or filled as far as the cash
+# (times the leverage) goes. Any rule strategy has it; when_cash_short() below gives the default.
 WHEN_CASH_SHORT = ["skip", "partial"]
 # vectorbt passthroughs that would fight the account's cash model if set in engine_extra.
 CASH_ENGINE_KEYS = ["cash", "cash_sharing", "group_by", "call_seq", "allow_partial", "entry_priority",
@@ -200,6 +207,21 @@ def cash_model(spec):
     if strategy_kind(spec) != "signals" or len(spec["data"]["symbols"]) < 2:
         return None
     return (spec.get("account") or {}).get("cash") or "per_instrument"
+
+
+def when_cash_short(spec):
+    """What a rule strategy's entry does when the account cannot fund all of it: "skip" or "partial".
+
+    The spec's own choice, else the default for its account: "skip" in a shared account
+    (vectorbtX's default there: a risk-sized trade should not shrink unseen) and "partial"
+    otherwise (vectorbt's allow_partial=True, which the templates' numbers were made with).
+    "The account" includes leverage: a trade bigger than cash x leverage is cut down or
+    skipped. None for a portfolio, whose weights are scaled instead.
+    """
+    if strategy_kind(spec) != "signals":
+        return None
+    chosen = (spec.get("account") or {}).get("when_cash_short")
+    return chosen or ("skip" if cash_model(spec) == "shared" else "partial")
 
 
 def is_intraday(spec):
@@ -386,6 +408,12 @@ def _rule_inputs(out, prefix, rule, where):
         if "bars" in condition:
             out.append({"path": f"{base}.bars", "group": "Rules", "type": "int", "value": condition["bars"],
                         "label": f"{where} › {letter} › bars"})
+        timing_words = {"for_bars": "true on each of the last N bars", "within_bars": "true on any of the last N bars",
+                        "bars_ago": "bars ago (whole condition)"}
+        for key in TIMING_KEYS:
+            if condition.get(key):
+                out.append({"path": f"{base}.{key}", "group": "Rules", "type": "int", "value": condition[key],
+                            "label": f"{where} › {letter} › {timing_words[key]}"})
 
 
 def tunable_inputs(spec):
@@ -566,10 +594,24 @@ def _check_ref(problems, where, ref, features, allow_const=True):
         _check_number(problems, f"{where} bars ago", ref["shift"], minimum=0, integer=True)
 
 
-def _check_condition(problems, where, node, features, timeframe, entry):
+def _check_timing(problems, where, node):
+    """A condition's timing (TIMING_KEYS): at most one, a whole number of bars, never on a calendar condition."""
+    given = [key for key in TIMING_KEYS if key in node]
+    if len(given) > 1:
+        problems.append(f"{where}: give one timing, not {len(given)} ({', '.join(given)}).")
+    if given and node.get("filter") in CALENDAR_FILTERS:
+        problems.append(f"{where}: a weekday, month or session condition is the same on every bar of its day, so "
+                        "it takes no timing; remove it.")
+    for key in given:
+        _check_number(problems, f"{where} {key.replace('_', ' ')}", node[key], minimum=1, integer=True)
+
+
+def _check_condition(problems, where, node, features, timeframe):
+    """One condition of any kind. Every kind is allowed in every rule, exits included (see compile_signals)."""
     if not isinstance(node, dict):
         problems.append(f"{where}: a condition must be an object.")
         return
+    _check_timing(problems, where, node)
     if "pattern" in node:
         name = node["pattern"]
         feature = features.get(name)
@@ -582,10 +624,6 @@ def _check_condition(problems, where, node, features, timeframe, entry):
         return
     if "filter" in node:
         kind = node["filter"]
-        # ⚠️ Filters gate entries only. Gating an exit would trap a position open.
-        if not entry:
-            problems.append(f"{where}: filters can only be used in entry rules; filtering an exit would trap "
-                            "positions open.")
         if kind not in FILTER_KINDS:
             problems.append(f"{where}: unknown filter '{kind}'.")
         elif kind == "session":
@@ -608,8 +646,9 @@ def _check_condition(problems, where, node, features, timeframe, entry):
             higher = node.get("timeframe")
             if TIMEFRAME_MINUTES.get(higher, 0) <= TIMEFRAME_MINUTES.get(timeframe, 0):
                 problems.append(f"{where}: the higher timeframe must be above the data's {timeframe}.")
+            # Its timing was checked above, on the node itself; the comparison is checked without it.
             comparison = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars") if key in node}
-            _check_condition(problems, f"{where} condition", comparison, features, timeframe, entry)
+            _check_condition(problems, f"{where} condition", comparison, features, timeframe)
         return
     # A comparison.
     op = node.get("op")
@@ -626,7 +665,7 @@ def _check_condition(problems, where, node, features, timeframe, entry):
         _check_ref(problems, f"{where} right side", node.get("right"), features)
 
 
-def _check_rule(problems, where, rule, features, timeframe, entry):
+def _check_rule(problems, where, rule, features, timeframe):
     """One rule: named conditions and a logic line that uses every one of them."""
     from .expressions import condition_name_problem, logic_names, parse_logic
 
@@ -642,7 +681,7 @@ def _check_rule(problems, where, rule, features, timeframe, entry):
         problem = condition_name_problem(name, set())
         if problem:
             problems.append(f"{where}: {problem}")
-        _check_condition(problems, f"{where} › {name}", condition, features, timeframe, entry)
+        _check_condition(problems, f"{where} › {name}", condition, features, timeframe)
     try:
         tree = parse_logic(rule.get("logic", ""))
     except ValueError as error:
@@ -826,17 +865,19 @@ def _check_cash(problems, spec, kind, features):
         problems.append("Cash must be per_instrument (each symbol trades its own copy of the account) or shared "
                         "(one account for every symbol).")
     if short is not None and short not in WHEN_CASH_SHORT:
-        problems.append("When cash runs short, choose skip (the entry is not placed) or partial (it is filled as far "
-                        "as the cash goes).")
+        problems.append("When a trade is bigger than the account can fund, choose skip (the entry is not placed) or "
+                        "partial (it is filled as far as the cash and leverage go).")
     if kind == "portfolio" and cash == "per_instrument":
         problems.append("A portfolio's weights are shares of one account, so each symbol cannot have its own cash. "
                         "Make the account shared, or remove the cash setting.")
     if kind == "portfolio" and (priority or short):
-        problems.append("The entry priority and the cash-short rule choose between competing entry signals, so only "
-                        "entry and exit rule strategies have them. Remove them.")
-    elif kind == "signals" and cash != "shared" and (priority or short):
-        problems.append("The entry priority and the cash-short rule only apply to a shared account. Make the account "
-                        "shared, or remove them.")
+        problems.append("The entry priority and the rule for trades bigger than the account apply to entry signals, "
+                        "so only entry and exit rule strategies have them. Remove them.")
+    elif kind == "signals" and cash_model(spec) != "shared" and priority:
+        # The cash-short rule applies to any rule strategy (a trade can outgrow its own account's
+        # leverage too); the priority only decides between entries competing for one account.
+        problems.append("The entry priority only applies to a shared account: with an account per symbol, nothing "
+                        "competes. Make the account shared, or remove it.")
     if priority:
         by = priority.get("by")
         symbols = (spec.get("data") or {}).get("symbols") or []
@@ -1018,8 +1059,7 @@ def _validate_resolved(spec):
             problems.append(f"Unknown rule slot: {', '.join(extra)}.")
         for slot in RULE_SLOTS:
             if rules.get(slot):
-                _check_rule(problems, SLOT_LABELS[slot], rules[slot], features, timeframe,
-                            entry=slot.endswith("entry"))
+                _check_rule(problems, SLOT_LABELS[slot], rules[slot], features, timeframe)
         if any(key in spec for key in ("selection", "weighting", "schedule")):
             problems.append("A signal strategy has no portfolio settings; remove selection, weighting and schedule.")
     if kind == "portfolio":

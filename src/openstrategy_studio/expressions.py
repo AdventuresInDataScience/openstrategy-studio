@@ -232,11 +232,22 @@ def ref_text(ref):
     return f"{text} {shift} bar{'s' if shift != 1 else ''} ago" if shift else text
 
 
+def timing_text(condition):
+    """A condition's timing in words (compile.held), "" when it has none."""
+    for key, words in (("for_bars", "on each of the last {} bars"), ("within_bars", "on any of the last {} bars")):
+        if condition.get(key):
+            return ", " + words.format(condition[key])
+    if condition.get("bars_ago"):
+        bars = condition["bars_ago"]
+        return f", {bars} bar{'s' if bars != 1 else ''} ago"
+    return ""
+
+
 def condition_text(condition):
-    """One condition in words: 'fast crosses above slow', 'hammer appears (bullish)'."""
+    """One condition in words: 'fast crosses above slow', 'hammer appears (bullish), on any of the last 3 bars'."""
     if "pattern" in condition:
         side = condition.get("side", "either")
-        return f"{condition['pattern']} appears" + ("" if side == "either" else f" ({side})")
+        return f"{condition['pattern']} appears" + ("" if side == "either" else f" ({side})") + timing_text(condition)
     if "filter" in condition:
         kind = condition["filter"]
         if kind == "weekday":
@@ -247,15 +258,17 @@ def condition_text(condition):
             return f"between {condition.get('from')} and {condition.get('to')} UTC"
         comparison = {key: condition[key] for key in ("left", "op", "right", "lower", "upper", "bars")
                       if key in condition}
-        return f"on {condition.get('timeframe')} bars, {condition_text(comparison)}"
+        return f"on {condition.get('timeframe')} bars, {condition_text(comparison)}{timing_text(condition)}"
     op = condition.get("op")
     left = ref_text(condition.get("left"))
     if op == "between":
-        return f"{left} is between {ref_text(condition.get('lower'))} and {ref_text(condition.get('upper'))}"
-    if op in ("rising", "falling"):
+        text = f"{left} is between {ref_text(condition.get('lower'))} and {ref_text(condition.get('upper'))}"
+    elif op in ("rising", "falling"):
         bars = condition.get("bars", 1)
-        return f"{left} {OP_WORDS[op]} {bars} bar{'s' if bars != 1 else ''}"
-    return f"{left} {OP_WORDS.get(op, op)} {ref_text(condition.get('right'))}"
+        text = f"{left} {OP_WORDS[op]} {bars} bar{'s' if bars != 1 else ''}"
+    else:
+        text = f"{left} {OP_WORDS.get(op, op)} {ref_text(condition.get('right'))}"
+    return text + timing_text(condition)
 
 
 # ---------------------------------------------------------------------------

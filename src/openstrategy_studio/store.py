@@ -10,10 +10,13 @@ from pathlib import Path
 
 import pandas as pd
 
+# A dataset is one NAME at one timeframe. `symbol` holds the name: what strategies pick and the
+# folder the parquet sits in (SPY, SPY_csv, EURUSD_dukascopy). `ticker` is the source's own
+# symbol, which a Yahoo refresh downloads (SPY, EURUSD=X); for an import it is what was typed.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS catalogue (
     symbol TEXT NOT NULL, timeframe TEXT NOT NULL, source TEXT, first_bar TEXT, last_bar TEXT,
-    n_bars INTEGER, adjusted INTEGER, tz TEXT, imported_at TEXT, notes TEXT, path TEXT,
+    n_bars INTEGER, adjusted INTEGER, tz TEXT, imported_at TEXT, notes TEXT, path TEXT, ticker TEXT,
     PRIMARY KEY (symbol, timeframe)
 );
 CREATE TABLE IF NOT EXISTS runs (
@@ -25,7 +28,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 """
 
 CATALOGUE_COLUMNS = ["symbol", "timeframe", "source", "first_bar", "last_bar", "n_bars", "adjusted",
-                     "tz", "imported_at", "notes", "path"]
+                     "tz", "imported_at", "notes", "path", "ticker"]
 
 
 def _connect(data_dir):
@@ -33,6 +36,12 @@ def _connect(data_dir):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.executescript(SCHEMA)
+    # A catalogue made before datasets had a ticker gains the column; its rows read the
+    # name as their ticker (list_datasets), which is what they were downloaded under.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(catalogue)")}
+    if "ticker" not in columns:
+        conn.execute("ALTER TABLE catalogue ADD COLUMN ticker TEXT")
+        conn.commit()
     return conn
 
 
@@ -57,7 +66,9 @@ def upsert_dataset(data_dir, row):
 
 
 def list_datasets(data_dir):
-    return _read(data_dir, "SELECT * FROM catalogue ORDER BY symbol, timeframe")
+    found = _read(data_dir, f"SELECT {', '.join(CATALOGUE_COLUMNS)} FROM catalogue ORDER BY symbol, timeframe")
+    found["ticker"] = found["ticker"].fillna(found["symbol"])
+    return found
 
 
 def get_dataset(data_dir, symbol, timeframe):
@@ -67,6 +78,11 @@ def get_dataset(data_dir, symbol, timeframe):
 
 def delete_dataset(data_dir, symbol, timeframe):
     _write(data_dir, "DELETE FROM catalogue WHERE symbol = ? AND timeframe = ?", (symbol, timeframe))
+
+
+def rename_dataset(data_dir, symbol, timeframe, new, path):
+    _write(data_dir, "UPDATE catalogue SET symbol = ?, path = ? WHERE symbol = ? AND timeframe = ?",
+           (new, str(path), symbol, timeframe))
 
 
 # --- runs --------------------------------------------------------------------

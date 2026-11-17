@@ -10,9 +10,9 @@ uv run python -I docs/upstream/vectorbtx_issues.py     # prints PRESENT or FIXED
 
 Run it in vectorbtX's own environment while patching, or copy the checks into vectorbtX's tests. At `ace29e2`, all 13 are present.
 
-## Status (16 November 2026)
+## Status (17 November 2026)
 
-**All 13 are fixed in vectorbtX `16293a2`; issue 14, found with those fixes, in `9f4cf54`; and issues 15 to 19 in `9fa427e`**, which `uv.lock` now pins. 15 was found on `9f4cf54` while building the per-symbol results for shared cash, and 16 to 19 while fixing it (18 is a feature: the borrow fee, a documented gap in vectorbtX's own audit). Against `9fa427e` the script now reports **1 of 19 present** (exit code 1): issue 21, found on 16 November 2026, is open. Against `9f4cf54` it reports 15 to 19 present as well. vectorbtX carries the same checks in `tests/test_upstream_fixes.py`, `tests/test_borrow.py` and `tests/test_holding_sim.py`. The Studio workarounds below are removed, except where an issue says it can stay:
+**All 13 are fixed in vectorbtX `16293a2`; issue 14, found with those fixes, in `9f4cf54`; and issues 15 to 19 in `9fa427e`**, which `uv.lock` now pins. 15 was found on `9f4cf54` while building the per-symbol results for shared cash, and 16 to 19 while fixing it (18 is a feature: the borrow fee, a documented gap in vectorbtX's own audit). Against `9fa427e` the script now reports **5 of 23 present** (exit code 5): issues 21 (found 16 November 2026) and 22 (found 17 November 2026) are open, and so are 23 (a required feature: risk sizing from the balance or the equity), 24 (unlevered defaults) and 25 (point-size defaults), all asked for by the owner on 17 November 2026. Against `9f4cf54` it reports 15 to 19 present as well. vectorbtX carries the same checks in `tests/test_upstream_fixes.py`, `tests/test_borrow.py` and `tests/test_holding_sim.py`. The Studio workarounds below are removed, except where an issue says it can stay:
 
 | Issue | Studio side now |
 |---|---|
@@ -34,13 +34,17 @@ Run it in vectorbtX's own environment while patching, or copy the checks into ve
 | 18 | Built (13 November 2026): `borrow_rate` in the Build page's instrument grid (equity mode only; `validate_spec` says so elsewhere), and vectorbtX's warnings now reach the Backtest page (`run_backtest` collects them; `extract_results` keeps them in the run's meta). |
 | 19 | Done: the grid's financing column is gone, and `engine.instrument_fields` drops a per-instrument `financing` value an older spec may hold. |
 | 21 | **Open** (found 16 November 2026 on `9fa427e`): `min_trade` never skips a trade. No workaround; the Build page's tooltip states what happens. |
+| 22 | **Open** (found 17 November 2026 on `9fa427e`): the buying-power and minimum-size warnings measure every bar, not the bars an order is placed on. No workaround needed: the Risk tab's trade-size check measures at the entries. |
+| 23 | **Open** (a required feature, 17 November 2026): risk sizing from the balance or the equity. No workaround (it needs sizing inside the simulation); the Risk tab says the risk is a fixed share of the starting cash. |
+| 24 | **Open** (17 November 2026): bought outright and FX spot default to 2x. The Studio names 1x itself (`engine.usual_leverage`), so its runs are right either way. |
+| 25 | **Open** (17 November 2026): an index's point size defaults to 0.01, not 1.0, and a share priced in pence is not recognised. The Studio names the usual point size itself (`engine.usual_point_size`). |
 
 ## Where each phase 0 finding belongs
 
 | Belongs in | Findings |
 |---|---|
-| **vectorbtX: bugs** | 1 to 12 below. Ten give wrong numbers without an error, one crashes, and one is housekeeping. Later, all fixed: 14, 15, 16 and 17 (wrong numbers), and 19 (a setting accepted in silence and never read). Open: 21 (a setting that does not do what it says). |
-| **vectorbtX: required feature** | 13, shared cash with an entry priority. Portfolios need it, and the Studio builds its account options on it. Check 13 in the script is its acceptance test. Later: 18, the borrow fee on a direct short (check 18). |
+| **vectorbtX: bugs** | 1 to 12 below. Ten give wrong numbers without an error, one crashes, and one is housekeeping. Later, all fixed: 14, 15, 16 and 17 (wrong numbers), and 19 (a setting accepted in silence and never read). Open: 21 (a setting that does not do what it says), 22 (warnings that measure bars with no order), 24 (defaults that borrow where nothing should be borrowed) and 25 (point sizes that are not the market's). |
+| **vectorbtX: required feature** | 13, shared cash with an entry priority. Portfolios need it, and the Studio builds its account options on it. Check 13 in the script is its acceptance test. Later: 18, the borrow fee on a direct short (check 18). Open: 23, risk sizing from the balance or the equity (check 23 is its acceptance test). |
 | **ta_patterns** | `chart_patterns.BULLISH` and `CHART_PATTERNS` list `double_bottom_ugly`, but the function is `ugly_double_bottom`. |
 | **Environment** (not a library) | On Windows, uv's standalone CPython aborts when `SSLKEYLOGFILE` is set and an HTTPS context is created. vectorbtX's `FREDData` would hit it too. |
 | **The Studio** (fixed there; no action for you) | A label lookup in `pf.stats(tags="vectorbtx")` for returns metrics, which vectorbtX's docs correctly place in `returns_stats`. Reading `returns_stats(tags="mt5")` returning `None`. Choosing a no-signal front-door call as the benchmark (the 30x funding behind it is issue 7). A Windows file race in job folders, a text-encoding slip, the desktop health check, and two test-harness bugs. Still to add: the instrument grid should require both currencies for an FX instrument. |
@@ -279,6 +283,50 @@ Found on `9fa427e` while writing the Build page's tooltips (16 November 2026).
   * reword that tooltip in `app/pages/2_Build.py` and drop its ⚠️ comment;
   * check `tests/test_portfolio.py::test_min_trade_suppression_shows_in_drift` still holds (it only checks that some drift is recorded);
   * expect fewer orders, and lower costs, in any portfolio run with `min_trade` set: the `sixty_forty` template sets 0.005. The golden numbers are a rule strategy, so they do not move.
+
+### 22. The sizing warnings measure every bar, not the bars an order is placed on (open)
+
+Found on `9fa427e` from the owner's manual test (17 November 2026): a spread bet on SPY, risk-sized with a 100-point stop, two trades in ten years, and a warning that the position "needs 303,845".
+
+* **Where.** `frontend/prepare.py`: `warn_if_cash_constrained` (`:652-708`) and the minimum-size warning in `quantize_engine_size` (`:390-411`), both called from `prepare` (`:586-619`).
+* **What happens.** `resolve_size` returns a size for **every bar** (a risk or stake size is the same on each bar; a notional one moves with the price), whether or not an order is placed there. `warn_if_cash_constrained` then takes `(size.abs() * fill_price).max(axis=0)`, the largest position value over the whole history, and warns when that exceeds `init_cash x leverage`. The minimum-size warning likewise counts "N of M sized bars" over every bar. Neither looks at the entries. Check 22: one entry, filled at 100, then the price rises to 1000 with no further entry. A 300-a-point stake (30,000 at the fill, inside 5x leverage on 10,000) fills in full, yet the run warns that "X needs 300,000 but its leverage funds only 50,000"; a 500 notional buys 5 shares at 100 in full, yet the run warns that "5 of 10 sized bars fall below the minimum tradeable size".
+* **Why it is wrong.** A warning that fires when nothing was cut is noise, and one that names a figure no trade ever reached misleads: in the owner's run the two trades were too big as well, but the 303,845 named is the stake times the highest open in ten years, not either trade. With a rising price, an early, correctly sized trade is reported as cut down. The message also says "these orders will be partially filled", which is only true of orders that exist.
+* **Fix, a suggestion.** Measure on the bars an order is placed: the entries (long and short), shifted to their fill bar as the front door already shifts them (`prepare` has the signals as `strategy`). For a weights strategy, the rebalance bars. Name the largest such trade and its date, and count only those bars in the minimum-size warning ("2 of 2 entries"). With no signals (a sized hold), the first bar.
+* **Studio side, until then.** No workaround needed: the Build page's Risk tab now runs its own trade-size check (`engine.sizing_check`), which uses vectorbtX's `resolve_size` and `quantize_engine_size` but reads the size at each entry's fill bar, and says what to change before the run. The Backtest page shows vectorbtX's warning as it is, with the Studio's hint under it (`analysis.WARNING_HINTS`). When it is fixed, nothing to remove; the warning's figure should then match the Risk tab's.
+
+### 23. Risk sizing from the balance or the equity (a required feature; open)
+
+Asked for by the owner on 17 November 2026, after the manual test run: "sizing as a % of balance or of equity is the standard way to spread bet or trade CFDs".
+
+* **What is missing.** `risk_pct` is a fraction of `init_cash`, worked out before the simulation runs (`frontend/prepare.py:246-336`, `resolve_size`; the ⚠️ in its docstring and at `frontend/backtest.py:186`). So 1% of a 10,000 account risks 100 on every trade for the whole backtest: after the account doubles it still risks 100, and after it halves it still risks 100, now 2% of what is left. No broker, and no spread-bet or CFD trader, sizes that way: the usual rule is a share of the **balance** (cash after closed trades) or of the **equity** (the balance plus the open trades' profit or loss). Over a long run with real drawdowns the two give very different curves, and `init_cash` is neither: it understates compounding when the strategy works and overstates the risk taken after it loses. Check 23: risk 1% over a 10-point stop; the first trade is stopped out for 100, so the second should be 9.9 units from either basis, and is 10 (and `risk_of=` is not accepted).
+* **Why it needs vectorbtX.** The balance and the equity at an entry depend on every fill, cost and stop before it, so they are only known inside the simulation. Sizes cannot be worked out ahead, as `resolve_size` does today; the docstring already says "true compounding risk sizing needs level 3", and the level-3 callback (`holding/callback.py`) only charges holding costs.
+* **Suggested API.** `risk_of="init_cash" | "balance" | "equity"` beside `risk_pct=` (and `risk_amount=` unchanged), the default kept at `"init_cash"` so existing results do not move. Settle in the docs:
+  * **when** it is read: at the close of the signal bar, the last value known when the order is sent (the order fills at the next open), never at the fill;
+  * **balance** = starting cash + closed trades' profit and loss − costs − holding costs charged so far; **equity** = balance + open positions marked at that close;
+  * separate accounts read their own column; a shared account reads the account;
+  * the same rounding, minimum size and buying-power rules as today, and the funded-buying-power warning (issue 22) measured on these sizes;
+  * a `notional_pct=` (a position worth a share of the equity) would come almost for free, and is the other common rule.
+* **Studio side, until then.** No workaround: it would need the Studio to simulate the account itself. The Risk tab says plainly that the risk is a fixed share of the starting cash, the same amount on every trade. When it is built: offer "of the starting cash / the balance / the equity" beside the risk box (`risk.sizing.risk_of` in the spec, through `call_plan` and the export), add it to `engine.sizing_check` (the check can then only estimate the size from the starting cash, and should say so), and add a variable for it on the Optimise page.
+
+### 24. Bought outright and FX spot default to 2x leverage (open)
+
+Asked for by the owner on 17 November 2026: "most portfolios and naked trading are non-margin; spread bets and CFDs standardise at 30x for FX, 10x for indices and commodities and 5x for single stocks." Naked trading means buying the instrument itself, not a spread bet or CFD on it: a share, a gram of gold, a currency. All of those default to no margin, and vectorbtX's own defaults should say so too, not only the Studio's.
+
+* **Where.** `instruments/defaults.py:81-92`, `MAX_LEVERAGE`: `("equity", None): 2.0` and `("fx_spot", None): 2.0`.
+* **What happens.** An instrument bought outright, or an FX spot pair, that names no leverage is funded at twice its cash: a margin account. Owning shares, or holding the currency, borrows nothing, so the default should be 1x; borrowing should be something a user asks for. The spread-bet and CFD rows already match the retail limits the owner gives (check 24 confirms them).
+* **Why it matters.** A blank leverage on an equity strategy silently allows a position twice the account, and the buying-power warning (issue 22) then never fires where a cash account would have refused the trade.
+* **Fix.** `("equity", None): 1.0` and `("fx_spot", None): 1.0`, with the docs saying so; a margin account is then `leverage=2`.
+* **Studio side.** `engine.usual_leverage` already names 1x for both (and for every portfolio), and fills it into the grid and the plan, so Studio runs are unaffected either way. When it is fixed, nothing to remove; `usual_leverage` could then read vectorbtX's table for every mode except the portfolio rule, which stays the Studio's.
+
+### 25. An index's point size defaults to 0.01, and a share priced in pence is not recognised (open)
+
+Asked for by the owner on 17 November 2026 ("default filling for points is also very sensible"), with 24: the defaults should be the market's own conventions.
+
+* **Where.** `instruments/defaults.py`: `MODE_DEFAULTS` gives every mode's `point_size` as 0.01 (0.0001 on FX spot), and `filled()` (`:274`) replaces it with `fx_pip(quote_currency)` for an FX underlying. That part is right, in every mode.
+* **What happens.** An `asset_class="index"` spread bet or CFD that names no point size gets 0.01. Index spread bets and CFDs are quoted in index points: one point is 1.0 (the FTSE 100 at 7,500 moving to 7,501), so a 50-point stop given with the default is a 0.50 move, 100 times tighter than meant, and a stake per point is 100 times larger. A share priced in pence (Yahoo's `.L` quotes, quote currency `GBp`) has the same problem the other way: one point is a penny, 1.0 in a price written in pence, and the default makes it a hundredth of a penny. Check 25: `Instrument(mode="spreadbet", asset_class="index").filled().point_size` is 0.01, and a `GBp` share's is 0.01.
+* **Why it matters.** Like the FX pip (`FX_PIP_BY_QUOTE`, whose own comment says getting it wrong "is silent and large"), the point is a market convention, not a broker setting, so it can be derived. Every stop, target, spread and stake is in points.
+* **Fix, a suggestion.** In `filled()`, beside the FX rule: `asset_class="index"` gives 1.0; a quote currency of `GBp` or `GBX` (pence) gives 1.0 for a share. ⚠️ VERIFY how vectorbtX treats a pence quote elsewhere (FX conversion to GBP divides by 100); if it does not know `GBp` at all, that is part of this. Commodities stay 0.01, documented as broker-specific (spot gold is often quoted in points of 0.1).
+* **Studio side.** `engine.usual_point_size` names these itself, fills them into the grid when the way of trading, an asset class, a quote currency or a symbol changes, and names a blank one in the plan, so Studio runs are unaffected either way. When it is fixed, `usual_point_size` can read `Instrument(...).filled().point_size` instead.
 
 # ta_patterns issues found by OpenStrategy Studio
 

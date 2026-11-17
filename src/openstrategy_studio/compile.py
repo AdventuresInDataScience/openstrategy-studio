@@ -18,7 +18,7 @@ import pandas as pd
 from . import engine, indicators
 from .data import resample_frames
 from .expressions import parse_logic
-from .spec import (PRICE_FIELDS, RESAMPLE_RULE, RULE_SLOTS, apply_params, canonical_json, cash_model,
+from .spec import (PRICE_FIELDS, RESAMPLE_RULE, RULE_SLOTS, TIMING_KEYS, apply_params, canonical_json, cash_model,
                    feature_order, strategy_kind)
 
 # ---------------------------------------------------------------------------
@@ -130,17 +130,37 @@ def _session_mask(index, start, end):
     return (times >= start) | (times < end)      # a session that wraps past midnight
 
 
+def held(mask, node):
+    """A condition's timing (spec.TIMING_KEYS) applied to its boolean frame. History only.
+
+    for_bars N     true on this bar and each of the N - 1 before it ("RSI above 50 for 3 bars")
+    within_bars N  true on at least one of the last N bars, this one included ("crossed within 5 bars")
+    bars_ago N     the condition as it was N bars ago ("a cross 1 bar ago")
+    No timing: the mask as it is. Each window ends at the current bar, so nothing looks ahead
+    (tests/test_lookahead.py checks all three).
+    """
+    if node.get("for_bars"):
+        bars = int(node["for_bars"])
+        # min_periods=bars: until there are N bars of history, "each of the last N" cannot hold.
+        return mask.astype(float).rolling(bars, min_periods=bars).sum().eq(bars)
+    if node.get("within_bars"):
+        return mask.astype(float).rolling(int(node["within_bars"]), min_periods=1).sum().gt(0)
+    if node.get("bars_ago"):
+        return mask.shift(int(node["bars_ago"]), fill_value=False)
+    return mask
+
+
 def evaluate_condition(node, data, features, spec_features, fingerprint):
-    """A boolean DataFrame (shaped like close) for one condition."""
+    """A boolean DataFrame (shaped like close) for one condition, its timing applied (held)."""
     close = data["close"]
     if "pattern" in node:
         signal = features[node["pattern"]]["signal"]
         side = node.get("side", "either")
         if side == "bullish":
-            return signal == 1
+            return held(signal == 1, node)
         if side == "bearish":
-            return signal == -1
-        return signal != 0
+            return held(signal == -1, node)
+        return held(signal != 0, node)
     if "filter" in node:
         kind = node["filter"]
         if kind == "session":
@@ -158,7 +178,10 @@ def evaluate_condition(node, data, features, spec_features, fingerprint):
         higher = resample_frames(data, RESAMPLE_RULE[node["timeframe"]])
         higher_fp = data_fingerprint(higher)
         higher_features = compile_features(spec_features, higher, higher_fp)
-        comparison = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars") if key in node}
+        # The timing goes with the comparison, so it counts HIGHER bars ("for 3 weeks"), and is
+        # applied before the shift to completed bars: it is not applied again below.
+        comparison = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars", *TIMING_KEYS)
+                      if key in node}
         signal = evaluate_condition(comparison, higher, higher_features, spec_features, higher_fp)
         signal = signal.shift(1, fill_value=False)
         signal = signal.astype(float).reindex(close.index, method="ffill")
@@ -200,7 +223,7 @@ def evaluate_condition(node, data, features, spec_features, fingerprint):
             result = left <= right
     # Indicator warm-up periods are NaN, and NaN compares False. fillna keeps the
     # dtype boolean whatever the inputs were.
-    return pd.DataFrame(result).fillna(False).astype(bool)
+    return held(pd.DataFrame(result).fillna(False).astype(bool), node)
 
 
 def evaluate_logic(tree, masks):
@@ -265,9 +288,11 @@ def compile_signals(spec, data):
     # 2. Features, in dependency order.
     features = compile_features(spec_features, data, fingerprint)
 
-    # 3. Rules. A missing rule is all-False. Filters live inside entry rules
-    #    only (validate_spec rejects them in exits), so they gate entries and
-    #    never trap a position open.
+    # 3. Rules. A missing rule is all-False. Every condition kind may sit in any rule,
+    #    exits included (the owner's call, 17 November 2026): a weekday or higher-timeframe
+    #    condition is a condition like any other, joined by the logic line. "A or Friday"
+    #    is a time exit; "A and the week is down" narrows A, as any "and" does. A stop, a
+    #    target and the extra exits close a position whatever an exit rule says.
     rules = spec.get("rules") or {}
     names = {"long_entry": "entries", "long_exit": "exits",
              "short_entry": "short_entries", "short_exit": "short_exits"}
@@ -479,6 +504,17 @@ def day_boundaries(index):
     second_last = np.zeros(len(dates), dtype=bool)
     second_last[:-1] = last[1:] & ~last[:-1]
     return last, second_last
+
+
+def held(mask, for_bars=None, within_bars=None, bars_ago=None):
+    """A condition's timing: true on each of the last N bars, on any of them, or N bars ago."""
+    if for_bars:
+        return mask.astype(float).rolling(for_bars, min_periods=for_bars).sum().eq(for_bars)
+    if within_bars:
+        return mask.astype(float).rolling(within_bars, min_periods=1).sum().gt(0)
+    if bars_ago:
+        return mask.shift(bars_ago, fill_value=False)
+    return mask
 '''
 
 _PRICE_VARS = {"open": "open_", "high": "high", "low": "low", "close": "close", "volume": "volume"}
@@ -530,13 +566,22 @@ def _ref_code(ref, spec_features, frames="P", feats="F"):
     return f"{code}.shift({shift})" if shift else code
 
 
+def _timed_code(code, node):
+    """`code` wrapped in the script's held() when the condition has a timing, as compile.held does."""
+    timing = {key: int(node[key]) for key in TIMING_KEYS if node.get(key)}
+    if not timing:
+        return code
+    return f"held({code}, " + ", ".join(f"{key}={value}" for key, value in timing.items()) + ")"
+
+
 def _condition_code(node, spec_features, frames="P", feats="F"):
     """Python source for one condition, mirroring evaluate_condition exactly."""
     close = f"{frames}['close']"
     if "pattern" in node:
         signal = f"{feats}[{(node['pattern'] + '__signal')!r}]"
         side = node.get("side", "either")
-        return f"({signal} {'== 1' if side == 'bullish' else '== -1' if side == 'bearish' else '!= 0'})"
+        return _timed_code(f"({signal} {'== 1' if side == 'bullish' else '== -1' if side == 'bearish' else '!= 0'})",
+                           node)
     if "filter" in node:
         kind = node["filter"]
         if kind == "session":
@@ -545,7 +590,9 @@ def _condition_code(node, spec_features, frames="P", feats="F"):
             return f"mask_frame({close}.index.day_of_week.isin({list(node['days'])!r}), {close})"
         if kind == "month":
             return f"mask_frame({close}.index.month.isin({list(node['months'])!r}), {close})"
-        comparison = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars") if key in node}
+        # The timing rides on the comparison, counting higher bars (as in evaluate_condition).
+        comparison = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars", *TIMING_KEYS)
+                      if key in node}
         rule = RESAMPLE_RULE[node["timeframe"]]
         inner = _condition_code(comparison, spec_features, "PH", "FH")
         return (f"(lambda PH: (lambda FH: higher_timeframe({inner}, {close}.index))"
@@ -567,7 +614,7 @@ def _condition_code(node, spec_features, frames="P", feats="F"):
     else:
         right = _ref_code(node["right"], spec_features, frames, feats)
         code = f"(full({left}, {close}) {op} {right})"
-    return f"as_bool({code})"
+    return _timed_code(f"as_bool({code})", node)
 
 
 def _logic_code(tree, codes):

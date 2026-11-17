@@ -81,11 +81,55 @@ def test_rules_and_portfolio_settings_do_not_mix(ma_spec, momentum_spec):
     says(S.validate_spec(spec), "has no entry or exit rules")
 
 
-def test_filter_in_exit_is_rejected(ma_spec):
+def test_an_exit_rule_takes_every_condition_kind(ma_spec):
+    """The owner's call (17 November 2026): a weekday or higher-timeframe condition in an exit is a
+    condition like any other. "A or Friday" is a time exit."""
     spec = copy.deepcopy(ma_spec)
-    spec["rules"]["long_exit"]["conditions"]["B"] = {"filter": "weekday", "days": [0]}
-    spec["rules"]["long_exit"]["logic"] = "A and B"
-    says(S.validate_spec(spec), "only be used in entry rules")
+    spec["rules"]["long_exit"]["conditions"]["B"] = {"filter": "weekday", "days": [4]}
+    spec["rules"]["long_exit"]["conditions"]["C"] = {"filter": "higher_timeframe", "timeframe": "1w",
+                                                     "left": {"price": "close"}, "op": "<", "right": {"price": "open"}}
+    spec["rules"]["long_exit"]["logic"] = "A or B or C"
+    assert S.validate_spec(spec) == []
+
+
+def test_a_condition_takes_one_timing_of_whole_bars(ma_spec):
+    spec = copy.deepcopy(ma_spec)
+    condition = spec["rules"]["long_entry"]["conditions"]["A"]
+    for key in S.TIMING_KEYS:
+        condition.update({key: 3})
+        assert S.validate_spec(spec) == [], key
+        del condition[key]
+    condition.update(for_bars=3, within_bars=2)
+    says(S.validate_spec(spec), "give one timing, not 2")
+    condition.pop("within_bars")
+    condition["for_bars"] = 0
+    says(S.validate_spec(spec), "for bars must be at least 1")
+    condition["for_bars"] = 2.5
+    says(S.validate_spec(spec), "for bars must be a whole number")
+    condition.pop("for_bars")
+    spec["rules"]["long_entry"]["conditions"]["B"] = {"filter": "month", "months": [1], "bars_ago": 1}
+    spec["rules"]["long_entry"]["logic"] = "A and B"
+    says(S.validate_spec(spec), "takes no timing")
+    # On a higher timeframe it counts the higher bars, and is checked on the condition itself.
+    spec["rules"]["long_entry"]["conditions"]["B"] = {"filter": "higher_timeframe", "timeframe": "1w", "for_bars": 2,
+                                                      "left": {"price": "close"}, "op": ">", "right": {"price": "open"}}
+    assert S.validate_spec(spec) == []
+    paths = {row["path"] for row in S.tunable_inputs(spec)}
+    assert "rules.long_entry.conditions.B.for_bars" in paths
+
+
+def test_what_a_trade_too_big_to_fund_does(ma_spec, shared_spec):
+    """Any rule strategy chooses skip or partial; the default follows the account."""
+    assert S.when_cash_short(ma_spec) == "partial"
+    single = copy.deepcopy(ma_spec)
+    single["account"]["when_cash_short"] = "skip"
+    assert S.validate_spec(single) == [] and S.when_cash_short(single) == "skip"
+    shared = copy.deepcopy(shared_spec)
+    shared["account"].pop("when_cash_short", None)
+    assert S.when_cash_short(shared) == "skip"
+    # The priority still needs a shared account.
+    single["account"]["entry_priority"] = {"by": "symbols"}
+    says(S.validate_spec(single), "only applies to a shared account")
 
 
 def test_logic_line_problems(ma_spec):
@@ -217,8 +261,8 @@ def test_cash_model(shared_spec, ma_spec, momentum_spec):
 
 def test_cash_settings_are_checked(shared_spec, momentum_spec):
     says(problems_for(shared_spec, account__cash="joint"), "Cash must be per_instrument")
-    says(problems_for(shared_spec, account__when_cash_short="halve"), "When cash runs short")
-    says(problems_for(shared_spec, account__cash="per_instrument"), "only apply to a shared account")
+    says(problems_for(shared_spec, account__when_cash_short="halve"), "When a trade is bigger than the account can fund")
+    says(problems_for(shared_spec, account__cash="per_instrument"), "The entry priority only applies to a shared account")
     says(problems_for(shared_spec, account__entry_priority={"by": "volume"}), "must be by")
     says(problems_for(shared_spec, account__entry_priority={"by": "symbols", "order": ["AAPL", "TSLA"]}),
          "not in the list: TSLA")

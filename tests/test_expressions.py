@@ -110,3 +110,14 @@ def test_summary_covers_every_step(ma_spec):
     assert rows["Long entry"] == "A" and "stop 60 pts" in rows["Risk"] and "rates: static" in rows["Account"]
     assert rows["Optimise"] == "2 variables"
     assert ("Feature", "fast = SMA(close, 50)") in summary(ma_spec)
+
+
+def test_a_conditions_timing_in_words():
+    cross = {"left": {"feature": "fast"}, "op": "crosses_above", "right": {"feature": "slow"}}
+    assert condition_text({**cross, "within_bars": 5}) == "fast crosses above slow, on any of the last 5 bars"
+    assert condition_text({**cross, "for_bars": 3}) == "fast crosses above slow, on each of the last 3 bars"
+    assert condition_text({**cross, "bars_ago": 1}) == "fast crosses above slow, 1 bar ago"
+    assert condition_text({"pattern": "hammer", "side": "bullish", "bars_ago": 2}) == "hammer appears (bullish), 2 bars ago"
+    weekly = {"filter": "higher_timeframe", "timeframe": "1w", "left": {"price": "close"}, "op": ">",
+              "right": {"price": "open"}, "for_bars": 2}
+    assert condition_text(weekly) == "on 1w bars, close is above open, on each of the last 2 bars"

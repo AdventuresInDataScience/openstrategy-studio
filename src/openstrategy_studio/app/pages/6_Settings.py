@@ -56,14 +56,21 @@ draft["workers"] = int(row[0].number_input("Worker processes for optimisation", 
                                            value=int(settings.get("workers", 1)), step=1,
                                            help="The number a new optimisation starts with; the Optimise page can "
                                                 "change it per job. Up to your CPU's core count is faster."))
-draft["spike_multiple"] = float(row[1].number_input("Flag bars wider than this many median ranges", min_value=2.0,
+draft["spike_multiple"] = float(row[1].number_input("Flag moves this many times the usual", min_value=2.0,
                                                     value=float(settings.get("spike_multiple", 10.0)), step=1.0,
-                                                    help="On import, a bar whose high-low range, or whose opening "
-                                                         "gap, is more than this many times the median bar range is "
-                                                         "listed for review. Nothing is changed."))
+                                                    help="The data check on import: a bar whose move from the "
+                                                         "previous close, or whose high-low range, is more than this "
+                                                         "many times the usual one over the 100 bars before it is "
+                                                         "listed for review, as a likely bad price. Nothing is "
+                                                         "changed."))
 draft["offline"] = row[2].toggle("Offline", value=bool(settings.get("offline")),
                                  help="Turns off every download. Stored data still works; FRED falls back to its cache, "
                                       "then to the static rate below.")
+draft["warm_up"] = st.toggle("Prepare the backtest engine at start", value=bool(settings.get("warm_up", True)),
+                             help="The first backtest after a start compiles numba code, which can take a minute. "
+                                  "With this on, the Studio does that in the background as soon as it starts, by "
+                                  "running every template once on made-up prices, so your first run does not wait. "
+                                  "It touches none of your data. Applies at the next start.")
 
 st.subheader("FRED rates")
 if os.environ.get("FRED_API_KEY") and not settings.get("fred_api_key"):

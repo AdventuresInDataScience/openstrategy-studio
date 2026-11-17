@@ -1,6 +1,8 @@
 """Tests 1, 3 and 4 (need vectorbtX installed), plus the pure call plan."""
 
 
+import copy
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -149,13 +151,15 @@ def test_cash_plan(shared_spec):
     spec["account"] = {"init_cash": 10_000, "freq": "D"}
     args = engine.call_plan(spec)["args"]
     assert args["cash"] == ("lit", "per_instrument")
-    assert "entry_priority" not in args and "when_cash_short" not in args
+    # What a trade too big to fund does is named on every rule strategy: separate accounts fill
+    # part of it by default (vectorbt's allow_partial), as before it was named.
+    assert "entry_priority" not in args and args["when_cash_short"] == ("lit", "partial")
     # One symbol is one account either way, and SingleBacktest rejects cash= outright.
     spec["data"]["symbols"] = ["AAPL"]
     spec["instruments"] = {"AAPL": spec["instruments"]["AAPL"]}
     spec["account"]["cash"] = "shared"
     plan = engine.call_plan(spec)
-    assert plan["single"] and "cash" not in plan["args"]
+    assert plan["single"] and "cash" not in plan["args"] and plan["args"]["when_cash_short"] == ("lit", "partial")
 
 
 def competing_spec(account, score=None, symbols=("AAA", "BBB", "CCC")):
@@ -583,3 +587,135 @@ def test_a_per_instrument_financing_value_is_not_passed_on():
     spec = pulse_spec("long_entry", 0, "long_exit", 5)
     spec["instruments"]["X"]["financing"] = 0.10
     assert "financing" not in engine.instrument_fields(spec)["X"]
+
+
+def spy_spread_bet(**risk):
+    """The owner's run (17 November 2026): SPY as a spread bet near 600, risk-sized over a 100-point stop."""
+    from openstrategy_studio.spec import load_template
+
+    spec = load_template("ma_cross")
+    spec.pop("optimise")
+    spec["data"]["symbols"] = ["SPY"]
+    spec["features"]["fast"]["params"]["timeperiod"] = 10
+    spec["features"]["slow"]["params"]["timeperiod"] = 30
+    spec["instruments"] = {"SPY": {"point_size": 0.01}}
+    spec["account"].pop("rates")
+    spec["risk"] = {"sizing": risk or {"risk_pct": 0.05}, "stop": {"kind": "fixed", "points": 100.0}, "target": None}
+    data = make_ohlcv(400, ("SPY",), seed=4, base=600.0)
+    return spec, data
+
+
+def test_a_trade_too_big_to_fund_is_cut_down_or_skipped():
+    """One symbol, one account of 10,000 at 1x: an entry wanting 50,000 fills 10,000 of it, or nothing."""
+    pytest.importorskip("vectorbtx")
+    spec = competing_spec({}, symbols=("AAA",))
+    spec["risk"]["sizing"] = {"notional": 50_000.0}
+    data = flat_bars(["AAA"])
+    assert bought(spec, data)["AAA"] == pytest.approx(100.0)          # 10,000 at 100
+    spec["account"]["when_cash_short"] = "skip"
+    assert bought(spec, data) == {}
+
+
+def test_the_trade_size_check_says_what_the_run_will_do():
+    """engine.sizing_check uses vectorbtX's own sizes, at the entries' fill bars."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio.compile import compile_signals
+
+    spec, data = spy_spread_bet()
+    signals = compile_signals(apply_params(spec), data)
+    entries = signals["entries"] | signals["short_entries"]
+    assert entries.to_numpy().any()
+    (row,) = engine.sizing_check(spec, data, entries)
+    # 5% of 10,000 over a 100-point stop is 5 a point; at a point of 0.01 that is 500 units.
+    assert row["size"] == pytest.approx(5.0) and row["leverage"] == 5.0 and row["funded"] == 50_000
+    assert row["stop_price"] == pytest.approx(1.0) and not row["fits"] and not row["below_minimum"]
+    fill_bars = entries["SPY"].shift(1, fill_value=False).to_numpy()
+    assert row["value"] == pytest.approx(500 * data["open"]["SPY"][fill_bars].max())
+    run = engine.run_backtest(spec, data)
+    assert any("funded buying power" in note for note in run["warnings"])
+    # Enough leverage: the check and the run agree that it fits.
+    spec["instruments"]["SPY"]["leverage"] = 40.0
+    (row,) = engine.sizing_check(spec, data, entries)
+    assert row["fits"] and not any("funded buying power" in note for note in engine.run_backtest(spec, data)["warnings"])
+    # 0.05% instead of 5%: 0.05 a point, under the 1-a-point minimum stake, so nothing is placed.
+    spec, _ = spy_spread_bet(risk_pct=0.0005)
+    (row,) = engine.sizing_check(spec, data, entries)
+    assert row["below_minimum"] and row["asked"] == pytest.approx(0.05) and row["min_size"] == 1.0
+    run = engine.run_backtest(spec, data)
+    assert len(run["pf"].orders.records_readable) == 0
+    assert any("minimum tradeable size" in note for note in run["warnings"])
+
+
+def test_every_hinted_warning_is_matched_by_vectorbtxs_words():
+    """analysis.WARNING_HINTS matches warnings by their wording: a reworded one must fail here."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import analysis
+
+    notes = []
+    for risk in ({"risk_pct": 0.05}, {"risk_pct": 0.0005}):
+        spec, data = spy_spread_bet(**risk)
+        notes += engine.run_backtest(spec, data)["warnings"]
+    hinted = [hint for _, hint in analysis.warning_hints(notes)]
+    assert len(notes) == 2 and all(hinted), notes
+    assert "Risk tab" in hinted[0] and "min_size" in hinted[1]
+
+
+def test_the_warm_up_runs_every_template_without_stored_data(tmp_path, monkeypatch):
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    engine.warm_up()
+    assert not (tmp_path / "data").exists() or not any((tmp_path / "data").rglob("*.parquet"))
+
+
+def test_the_plan_always_names_a_leverage(ma_spec):
+    """A blank leverage is the Studio's usual one, named in the plan (and so in the export)."""
+    from openstrategy_studio.spec import load_template
+
+    assert engine.instrument_fields(ma_spec)["EURUSD=X"]["leverage"] == 30           # its own
+    outright = load_template("rsi_reversion")                                          # SPY, no leverage given
+    assert engine.instrument_fields(outright)["SPY"]["leverage"] == 1.0                 # not vectorbtX's 2x
+    assert engine.call_plan(apply_params(outright))["args"]["leverage"] == ("lit", 1.0)
+    spread_bet, _ = spy_spread_bet()
+    assert engine.instrument_fields(spread_bet)["SPY"]["leverage"] == 5.0
+    assert engine.usual_leverage("spreadbet", "index") == 10.0 and engine.usual_leverage("cfd", "fx") == 30.0
+    assert engine.usual_leverage("spreadbet", "commodities") == 10.0 and engine.usual_leverage("cfd") == 5.0
+    # Unlevered unless it is a spread bet or a CFD traded on signals (the owner's rule).
+    assert engine.usual_leverage("fx_spot") == 1.0 and engine.usual_leverage("equity") == 1.0
+    assert engine.usual_leverage("spreadbet", "fx", kind="portfolio") == 1.0
+    held = load_template("sixty_forty")
+    held["setup"]["trading"] = "spreadbet"
+    assert {fields["leverage"] for fields in engine.instrument_fields(held).values()} == {1.0}
+
+
+def test_a_point_is_named_in_its_markets_words(ma_spec):
+    from openstrategy_studio.spec import load_template
+
+    assert engine.point_meaning(ma_spec) == {"EURUSD=X": "1 pip (0.0001)"}
+    assert engine.point_meaning(load_template("rsi_reversion")) == {"SPY": "1 cent (0.01)"}
+    yen = copy.deepcopy(ma_spec)
+    yen["instruments"]["EURUSD=X"].update(quote_currency="JPY", point_size=0.01)
+    assert engine.point_meaning(yen) == {"EURUSD=X": "1 pip (0.01)"}
+    tenth = copy.deepcopy(ma_spec)
+    tenth["instruments"]["EURUSD=X"]["point_size"] = 0.00001
+    assert engine.point_meaning(tenth) == {"EURUSD=X": "1e-05 of the price, 0.1 of a pip (0.0001)"}
+    index = copy.deepcopy(ma_spec)
+    index["instruments"]["EURUSD=X"] = {"asset_class": "index", "point_size": 1.0}
+    assert engine.point_meaning(index) == {"EURUSD=X": "1 index point (1.0)"}
+
+
+def test_the_usual_point_size_is_the_markets_convention(ma_spec):
+    """A pip on FX (by quote currency, in every way of trading), 1.0 on an index or a share priced in
+    pence, a cent otherwise; and a blank one is named in the plan, so the extra exits agree with it."""
+    assert engine.usual_point_size("spreadbet", "fx", "USD") == 0.0001
+    assert engine.usual_point_size("cfd", "fx", "JPY") == 0.01 and engine.usual_point_size("fx_spot") == 0.0001
+    assert engine.usual_point_size("spreadbet", "index") == 1.0 and engine.usual_point_size("cfd", "index") == 1.0
+    assert engine.usual_point_size("spreadbet", "stocks", "GBp") == 1.0
+    assert engine.usual_point_size("equity") == 0.01 and engine.usual_point_size("spreadbet", "commodities") == 0.01
+    blank = copy.deepcopy(ma_spec)
+    blank["instruments"]["EURUSD=X"].pop("point_size")
+    # ⚠️ The extra exits read point_sizes: it used to fall back to 0.01 here while vectorbtX used the pip.
+    assert engine.instrument_fields(blank)["EURUSD=X"]["point_size"] == 0.0001
+    assert engine.point_sizes(blank, ["EURUSD=X"]) == [0.0001]
+    pence = copy.deepcopy(ma_spec)
+    pence["instruments"]["EURUSD=X"] = {"asset_class": "stocks", "quote_currency": "GBp"}
+    assert engine.point_meaning(pence) == {"EURUSD=X": "1p (1.0: the price is in pence)"}

@@ -6,6 +6,7 @@ Uses streamlit.testing.v1.AppTest (VERIFY the current API on the installed versi
 import copy
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import openstrategy_studio
@@ -136,15 +137,22 @@ def test_account_choices_write_the_spec(tmp_path, monkeypatch):
     app.session_state["spec"] = spec
     app.session_state["spec_rev"] = 0
     app.run()
+    from openstrategy_studio.spec import when_cash_short
+
     app.radio(key=current_key(app, "account.cash")).set_value("shared").run()
     account = app.session_state["spec"]["account"]
-    assert account["cash"] == "shared" and account["when_cash_short"] == "skip"
+    # Left unset, a shared account skips an entry it cannot fund; the Risk tab's radio shows it.
+    assert account["cash"] == "shared" and when_cash_short(app.session_state["spec"]) == "skip"
+    assert app.radio(key=current_key(app, "account.when_cash_short")).value == "skip"
     app.radio(key=current_key(app, "account.entry_priority:by")).set_value("feature").run()
     priority = app.session_state["spec"]["account"]["entry_priority"]
     assert priority == {"by": "feature", "highest_first": True, "score": {"feature": "fast"}}
+    # A choice made on the Risk tab stays when the account changes; the priority does not.
+    app.radio(key=current_key(app, "account.when_cash_short")).set_value("partial").run()
     app.radio(key=current_key(app, "account.cash")).set_value("per_instrument").run()
     account = app.session_state["spec"]["account"]
-    assert account["cash"] == "per_instrument" and "entry_priority" not in account and "when_cash_short" not in account
+    assert account["cash"] == "per_instrument" and "entry_priority" not in account
+    assert account["when_cash_short"] == "partial"
     assert not app.exception
 
 
@@ -175,7 +183,7 @@ def test_build_steps_edit_the_spec(tmp_path, monkeypatch):
     assert app.selectbox(key="pick:family:Indicator").value == "Bands and channels"
     # Rules: a second condition joins the logic line with "and", and the box shows it; a broken
     # line says what is wrong.
-    app.button(key=current_key(app, "rules.long_entry:add:comparison")).click().run()
+    app.button(key=current_key(app, "rules.long_entry:add")).click().run()
     rule = app.session_state["spec"]["rules"]["long_entry"]
     assert set(rule["conditions"]) == {"A", "B"} and rule["logic"] == "A and B"
     assert app.text_input(key=current_key(app, "rules.long_entry:logic")).value == "A and B"
@@ -293,7 +301,7 @@ def test_a_condition_is_renamed_in_its_name_box(tmp_path, monkeypatch):
     assert any("would read as an operator" in item.value for item in app.error)
     assert app.session_state["spec"] == settled
     app.text_input(key=current_key(app, "rules.long_entry.conditions.trend:name")).set_value("trend").run()
-    app.button(key=current_key(app, "rules.long_entry:add:comparison")).click().run()
+    app.button(key=current_key(app, "rules.long_entry:add")).click().run()
     assert app.session_state["spec"]["rules"]["long_entry"]["logic"] == "trend and A"
     app.text_input(key=current_key(app, "rules.long_entry.conditions.A:name")).set_value("trend").run()
     assert any("already has a condition called trend" in item.value for item in app.error)
@@ -348,4 +356,196 @@ def test_a_feature_panel_title_shows_an_edit_at_once(tmp_path, monkeypatch):
     labels = [panel.label for panel in app.expander]
     assert "slow: Simple Moving Average · SMA(open, 200)" in labels, labels
     assert app.session_state["spec"]["features"]["slow"]["inputs"]["close"] == "open"
+    assert not app.exception, [item.value for item in app.exception]
+
+
+def test_conditions_take_every_kind_and_a_timing_in_any_rule(tmp_path, monkeypatch):
+    """One Add condition button; an exit rule takes a calendar condition like any other kind; a
+    condition can hold "on any of the last N bars", and its panel's title says so at once."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio.spec import validate_spec
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.button(key=current_key(app, "rules.long_exit:add")).click().run()
+    rule = app.session_state["spec"]["rules"]["long_exit"]
+    assert set(rule["conditions"]) == {"A", "B"} and rule["logic"] == "A and B"
+    app.selectbox(key=current_key(app, "rules.long_exit.conditions.B:kind")).set_value("calendar").run()
+    assert app.session_state["spec"]["rules"]["long_exit"]["conditions"]["B"] == {"filter": "weekday",
+                                                                                   "days": [0, 1, 2, 3, 4]}
+    app.selectbox(key=current_key(app, "rules.long_exit.conditions.B:kind")).set_value("higher").run()
+    higher = app.session_state["spec"]["rules"]["long_exit"]["conditions"]["B"]
+    assert higher["filter"] == "higher_timeframe" and higher["timeframe"] == "1w"     # the first above 1d
+    assert validate_spec(app.session_state["spec"]) == []
+    # The cross may have happened on any of the last 5 bars.
+    app.selectbox(key=current_key(app, "rules.long_entry.conditions.A:timing")).set_value("within_bars").run()
+    assert app.session_state["spec"]["rules"]["long_entry"]["conditions"]["A"]["within_bars"] == 3
+    app.number_input(key=current_key(app, "rules.long_entry.conditions.A.within_bars")).set_value(5).run()
+    condition = app.session_state["spec"]["rules"]["long_entry"]["conditions"]["A"]
+    assert condition["within_bars"] == 5 and condition["op"] == "crosses_above"
+    labels = [panel.label for panel in app.expander]
+    assert "A · fast crosses above slow, on any of the last 5 bars" in labels, labels
+    assert "Long entry · A" in labels and "Short entry · not used" in labels, labels
+    app.selectbox(key=current_key(app, "rules.long_entry.conditions.A:timing")).set_value("now").run()
+    assert "within_bars" not in app.session_state["spec"]["rules"]["long_entry"]["conditions"]["A"]
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def spread_bet_on_spy(tmp_path):
+    """The owner's run (17 November 2026): SPY as a spread bet, 0.05 of the cash risked over a
+    100-point stop, on stored daily prices near 600."""
+    from openstrategy_studio import config, data as data_module
+
+    data_dir = config.data_dir(config.load_settings())
+    synthetic = data_module.synthetic_ohlcv(["SPY"], n=600, seed=2)
+    frame = pd.DataFrame({field: synthetic[field]["SPY"] * (6 if field != "volume" else 1)
+                          for field in ("open", "high", "low", "close", "volume")})
+    data_module.store_dataset(data_dir, "SPY", "1d", frame, "yahoo")
+    spec = load_template("ma_cross")
+    spec.pop("optimise")
+    spec["data"].update(symbols=["SPY"], start="2018-01-01", end="2021-12-31")
+    spec["features"]["fast"]["params"]["timeperiod"] = 10
+    spec["features"]["slow"]["params"]["timeperiod"] = 30
+    spec["instruments"] = {"SPY": {"point_size": 0.01}}
+    spec["account"].pop("rates")
+    spec["risk"] = {"sizing": {"risk_pct": 0.05}, "stop": {"kind": "fixed", "points": 100.0}, "target": None}
+    return spec
+
+
+def test_the_risk_tab_shows_leverage_and_checks_the_trade_size(tmp_path, monkeypatch):
+    """What 0.05 means in money, the leverage a blank box gives, and the trade the run would cut down."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = spread_bet_on_spy(tmp_path)
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert app.session_state["spec"] == spec
+    assert any(item.value.startswith("0.05 is 5.00% of the starting cash of 10,000: 500.00 lost") for item in app.caption)
+    warned = [item.value for item in app.warning if "leverage funds" in item.value]
+    assert warned and "5x leverage funds 50,000" in warned[0] and "cut it down to 50,000" in warned[0], warned
+    # The stop box says what its points are in price, in the market's words ...
+    assert any("on SPY, 100 points is a price move of 1: a point is 1 cent (0.01)" in item.value for item in app.caption)
+    # ... and a 100-point stop on SPY is a 1.00 move, inside an ordinary bar's range.
+    assert any("will be stopped out within a bar or two" in item.value for item in app.warning)
+    assert app.radio(key=current_key(app, "account.when_cash_short")).value == "partial"
+    # Skipping instead: the warning says so.
+    app.radio(key=current_key(app, "account.when_cash_short")).set_value("skip").run()
+    assert app.session_state["spec"]["account"]["when_cash_short"] == "skip"
+    assert any("The run will skip it" in item.value for item in app.warning)
+    # Enough leverage, and the check is quiet.
+    spec["instruments"]["SPY"]["leverage"] = 50.0
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 7
+    app.run()
+    assert not [item.value for item in app.warning if "leverage funds" in item.value]
+    assert app.session_state["spec"] == spec
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_the_data_page_names_an_import_and_warns_before_replacing_another_source(tmp_path, monkeypatch):
+    testing = pytest.importorskip("streamlit.testing.v1")
+    from conftest import make_ohlcv
+    from openstrategy_studio import config, data as data_module, store
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    data_dir = config.data_dir(config.load_settings())
+    bars = make_ohlcv(300, ("SPY",), base=100.0)
+    frame = pd.DataFrame({field: bars[field]["SPY"] for field in ("open", "high", "low", "close", "volume")})
+    data_module.store_dataset(data_dir, "SPY", "1d", frame, "file:spy.csv")
+    clean, info = data_module.normalise_ohlcv(frame, "1d")
+    item = {"id": "one", "name": "SPY", "ticker": "SPY", "timeframe": "1d", "frame": clean, "info": info,
+            "found": data_module.validate_ohlcv(clean, "1d"), "source": "yahoo"}
+    app = testing.AppTest.from_file(str(APP / "pages" / "1_Data.py"), default_timeout=180)
+    app.session_state["pending_imports"] = [item]
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert any("already stored at 1d from another source (file:spy.csv" in item.value for item in app.warning)
+    assert app.button(key="pending:one:store").disabled
+    app.text_input(key="pending:one:name").set_value("spy").run()
+    assert any("only in capitals" in item.value for item in app.error)
+    app.text_input(key="pending:one:name").set_value("SPY_yahoo").run()
+    app.button(key="pending:one:store").click().run()
+    stored = store.list_datasets(data_dir)
+    assert sorted(zip(stored["symbol"], stored["source"], stored["ticker"])) == [
+        ("SPY", "file:spy.csv", "SPY"), ("SPY_yahoo", "yahoo", "SPY")]
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_leverage_follows_the_way_of_trading_unless_typed_in(tmp_path, monkeypatch):
+    """The usual leverage fills in (1x bought outright, 5x for a stock spread bet, 30x for FX);
+    one typed in by hand stays when the way of trading changes."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = spread_bet_on_spy(tmp_path)
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.radio(key=current_key(app, "setup.trading")).set_value("equity").run()
+    assert app.session_state["spec"]["instruments"]["SPY"]["leverage"] == 1.0
+    app.radio(key=current_key(app, "setup.trading")).set_value("spreadbet").run()
+    assert app.session_state["spec"]["instruments"]["SPY"]["leverage"] == 5.0
+    edited = copy.deepcopy(app.session_state["spec"])
+    edited["instruments"]["SPY"].update(leverage=3.0, asset_class="index")
+    app.session_state["spec"] = edited
+    app.session_state["spec_rev"] = 20
+    app.run()
+    app.radio(key=current_key(app, "setup.trading")).set_value("cfd").run()
+    assert app.session_state["spec"]["instruments"]["SPY"]["leverage"] == 3.0
+    # The Risk tab says where it is set, and what it funds.
+    assert any("leverage column of the instrument grid" in item.value for item in app.caption)
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_a_portfolio_is_unlevered_unless_typed_in(tmp_path, monkeypatch):
+    """A stock spread bet traded on signals is 5x; held in a portfolio, the usual leverage is 1x."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = spread_bet_on_spy(tmp_path)
+    spec["instruments"]["SPY"]["leverage"] = 5.0
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.radio(key=current_key(app, "setup.kind")).set_value("portfolio").run()
+    assert app.session_state["spec"]["instruments"]["SPY"]["leverage"] == 1.0
+    app.radio(key=current_key(app, "setup.kind")).set_value("signals").run()
+    assert app.session_state["spec"]["instruments"]["SPY"]["leverage"] == 5.0
+    assert not app.exception, [item.value for item in app.exception]
+
+
+def test_the_usual_terms_follow_the_way_of_trading(tmp_path, monkeypatch):
+    """EURUSD as a spread bet (30x, a pip) bought as FX spot is 1x and still a pip; back as a CFD it is
+    30x again, still FX though FX spot never named its asset class."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = load_template("ma_cross")
+    del spec["instruments"]["EURUSD=X"]["asset_class"]
+    spec["setup"]["trading"] = "fx_spot"
+    spec["instruments"]["EURUSD=X"].update(leverage=1.0, contract_size=100000.0)
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.radio(key=current_key(app, "setup.trading")).set_value("cfd").run()
+    fields = app.session_state["spec"]["instruments"]["EURUSD=X"]
+    assert fields["asset_class"] == "fx" and fields["leverage"] == 30.0 and fields["point_size"] == 0.0001
+    app.radio(key=current_key(app, "setup.trading")).set_value("equity").run()
+    fields = app.session_state["spec"]["instruments"]["EURUSD=X"]
+    assert fields["leverage"] == 1.0 and fields["point_size"] == 0.0001
+    assert any("on EURUSD=X, 1 pip (0.0001)" in item.value for item in app.caption)
     assert not app.exception, [item.value for item in app.exception]

@@ -103,3 +103,29 @@ def test_export_equivalence_catalogue_logic_and_order_timing(ma_spec):
                                                      "features.slow.params.timeperiod": 20})
     applied = S.apply_params(spec, {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20})
     pd.testing.assert_series_equal(in_app["pf"].stats(), run_exported(applied, data).stats())
+
+
+def test_export_equivalence_timing_and_exit_conditions(ma_spec, ohlcv):
+    """A cross within the last 5 bars, a level held for 3, a weekly comparison for 2 weeks, and an
+    exit on a Friday or a weekly close below its open: the script and the app agree."""
+    pytest.importorskip("vectorbtx")
+    spec = copy.deepcopy(ma_spec)
+    entry = spec["rules"]["long_entry"]
+    entry["conditions"]["A"]["within_bars"] = 5
+    entry["conditions"]["B"] = {"left": {"price": "close"}, "op": ">", "right": {"feature": "slow"}, "for_bars": 3}
+    entry["conditions"]["C"] = {"filter": "higher_timeframe", "timeframe": "1w", "left": {"price": "close"},
+                                "op": ">", "right": {"price": "open"}, "for_bars": 2}
+    entry["logic"] = "A and B and C"
+    exit_ = spec["rules"]["long_exit"]
+    exit_["conditions"]["A"]["bars_ago"] = 1
+    exit_["conditions"]["B"] = {"filter": "weekday", "days": [4]}
+    exit_["conditions"]["C"] = {"filter": "higher_timeframe", "timeframe": "1w", "left": {"price": "close"},
+                                "op": "<", "right": {"price": "open"}}
+    exit_["logic"] = "A or B or C"
+    assert S.validate_spec(spec) == []
+    source = export_script(spec)
+    assert "within_bars=5" in source and "for_bars=3" in source and "bars_ago=1" in source
+    params = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}
+    in_app = engine.run_backtest(spec, ohlcv, params=params)
+    assert in_app["compiled"]["entries"].to_numpy().any() and in_app["compiled"]["exits"].to_numpy().any()
+    pd.testing.assert_series_equal(in_app["pf"].stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())

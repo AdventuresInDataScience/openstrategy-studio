@@ -184,6 +184,68 @@ def test_studio_entries():
     assert previous["high"]["X"].loc[bar] == weekly.loc[week_start - pd.Timedelta(days=7)]
 
 
+def test_price_types_compute_what_their_labels_say():
+    """Each price type's label carries its formula (ENTRY_TEXT); the library must agree with it."""
+    pytest.importorskip("talib")
+    data = I._sample_data(n=60)
+    o, h, l, c = (data[name] for name in ("open", "high", "low", "close"))
+    formulas = {"talib:AVGPRICE": ([o, h, l, c], (o + h + l + c) / 4), "talib:MEDPRICE": ([h, l], (h + l) / 2),
+                "talib:TYPPRICE": ([h, l, c], (h + l + c) / 3), "talib:WCLPRICE": ([h, l, c], (h + l + 2 * c) / 4)}
+    for indicator, (inputs, expected) in formulas.items():
+        got = I.compute({"indicator": indicator, "params": {}}, inputs, data)["real"]
+        np.testing.assert_allclose(got.to_numpy(), expected.to_numpy(), err_msg=indicator)
+        assert "(" in I.entry(indicator)["label"], indicator
+    highest = I.compute({"indicator": "talib:MAX", "params": {"timeperiod": 5}}, [h], data)["real"]["X"]
+    assert highest.iloc[10] == h["X"].iloc[6:11].max()           # this bar included, as its label says
+
+
+def test_highest_high_and_lowest_low():
+    data = I._sample_data(n=80)
+    high, low = data["high"], data["low"]
+    before = I.compute({"indicator": "studio:highest_lowest", "params": {"bars": 10, "include_current": False}},
+                       [high, low], data)
+    with_bar = I.compute({"indicator": "studio:highest_lowest", "params": {"bars": 10, "include_current": True}},
+                         [high, low], data)
+    for bar in (10, 33, 79):
+        assert before["upper"]["X"].iloc[bar] == high["X"].iloc[bar - 10:bar].max()      # the 10 bars BEFORE
+        assert with_bar["upper"]["X"].iloc[bar] == high["X"].iloc[bar - 9:bar + 1].max()  # this bar and 9 before
+        assert before["lower"]["X"].iloc[bar] == low["X"].iloc[bar - 10:bar].min()
+        window = high["X"].iloc[bar - 9:bar + 1].to_numpy()
+        assert with_bar["bars_since_high"]["X"].iloc[bar] == 9 - int(np.flatnonzero(window == window.max())[-1])
+        assert before["bars_since_high"]["X"].iloc[bar] == with_bar["bars_since_high"]["X"].iloc[bar - 1] + 1
+    assert np.isnan(before["upper"]["X"].iloc[9]) and np.isnan(with_bar["upper"]["X"].iloc[8])
+    np.testing.assert_allclose(before["middle"], (before["upper"] + before["lower"]) / 2)
+
+
+def test_pivot_points_come_from_the_previous_period():
+    data = {name: frame for name, frame in I._sample_data(n=60).items()}
+    previous = I.compute({"indicator": "studio:previous_period", "params": {"period": "week"}}, [], data)
+    h, l, c = previous["high"], previous["low"], previous["close"]
+    classic = I.compute({"indicator": "studio:pivots", "params": {"period": "week", "method": "classic"}}, [], data)
+    pivot = (h + l + c) / 3
+    np.testing.assert_allclose(classic["pivot"], pivot)
+    np.testing.assert_allclose(classic["r1"], 2 * pivot - l)
+    np.testing.assert_allclose(classic["s2"], pivot - (h - l))
+    woodie = I.compute({"indicator": "studio:pivots", "params": {"period": "week", "method": "woodie"}}, [], data)
+    np.testing.assert_allclose(woodie["pivot"], (h + l + 2 * c) / 4)
+    camarilla = I.compute({"indicator": "studio:pivots", "params": {"period": "week", "method": "camarilla"}}, [], data)
+    np.testing.assert_allclose(camarilla["r3"], c + (h - l) * 1.1 / 4)
+    fibonacci = I.compute({"indicator": "studio:pivots", "params": {"period": "week", "method": "fibonacci"}}, [], data)
+    np.testing.assert_allclose(fibonacci["s1"], pivot - 0.382 * (h - l))
+
+
+def test_period_so_far():
+    from conftest import make_ohlcv
+    data = make_ohlcv(72, ("X",), freq="1h", seed=2)
+    today = I.compute({"indicator": "studio:period_to_date", "params": {"period": "day"}}, [], data)
+    index = data["close"].index
+    for bar in (0, 5, 30, 71):
+        same_day = (index.normalize() == index[bar].normalize()) & (index <= index[bar])
+        assert today["high"]["X"].iloc[bar] == data["high"]["X"][same_day].max()
+        assert today["low"]["X"].iloc[bar] == data["low"]["X"][same_day].min()
+        assert today["open"]["X"].iloc[bar] == data["open"]["X"][index.normalize() == index[bar].normalize()].iloc[0]
+
+
 def test_menu_is_complete_and_ordered():
     menu = I.menu()
     assert list(menu)[:3] == ["Indicator", "Statistical", "Price levels"]

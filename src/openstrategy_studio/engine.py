@@ -19,12 +19,21 @@ findings (with what changed) are in docs/VERIFY.md. Anything still marked
 """
 
 import importlib.metadata
+import threading
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
-from .spec import SIZING_KEYS, apply_params, cash_model, strategy_kind, trading_mode
+from .spec import SIZING_KEYS, apply_params, cash_model, strategy_kind, trading_mode, when_cash_short
+
+# ⚠️ warnings.catch_warnings swaps process-wide state, so two runs at once (a second
+# browser tab, or the start-up warm-up below beside a user's run) would swap each other's
+# warning lists: one run's notes could vanish, or show on the other. Every front-door call
+# that records warnings holds this lock. Numba holds its own compile lock, so a run that
+# arrives while the warm-up is compiling waits for that code either way.
+RUN_LOCK = threading.Lock()
 
 
 # ⚠️ Which of stop-loss or take-profit wins when one bar's range contains both.
@@ -177,7 +186,17 @@ def instrument_fields(spec):
         fields.pop("financing", None)
         # Blank cells mean "use the mode default". vectorbtX keeps them as None
         # until emit, because NaN means something to vectorbt, so drop them here.
-        out[symbol] = {key: value for key, value in fields.items() if value is not None and value != ""}
+        fields = {key: value for key, value in fields.items() if value is not None and value != ""}
+        # ⚠️ Except leverage and the point size: a blank one is the Studio's usual one, named here
+        # so the plan, the export and point_sizes (the extra exits' stop distances) all say the same.
+        # Leverage differs from vectorbtX's own blank bought outright, on FX spot and in a portfolio
+        # (usual_leverage); the point size for an index or a share priced in pence (usual_point_size).
+        if "leverage" not in fields:
+            fields["leverage"] = usual_leverage(fields["mode"], fields.get("asset_class"), strategy_kind(spec))
+        if "point_size" not in fields:
+            fields["point_size"] = usual_point_size(fields["mode"], fields.get("asset_class"),
+                                                    fields.get("quote_currency"))
+        out[symbol] = fields
     return out
 
 
@@ -229,19 +248,179 @@ def adjusted_symbols(spec, data_dir=None):
 
 
 def point_sizes(spec, columns, data_dir=None):
-    """Each column's point size: the instrument's own, else its mode's default."""
+    """Each column's point size, as the run uses it.
+
+    ⚠️ instrument_fields always names one (the instrument's own, else usual_point_size), so this
+    agrees with the plan. It used to fall back to the mode's plain default, 0.01 on a spread
+    bet even for an FX pair, while vectorbtX filled in the pip: the extra exits then measured
+    their stop in points 100 times too coarse on an FX instrument with no point size.
+    """
     if "from_file" in (spec.get("instruments") or {}):
         frame = load_universe(spec, data_dir).to_frame()
         return [float(frame.loc[column, "point_size"]) for column in columns]
     fields = instrument_fields(spec)
-    sizes = []
-    for column in columns:
-        values = fields[column]
-        if values.get("point_size") is None:
-            sizes.append(float(mode_defaults(values["mode"])["point_size"]))
+    return [float(fields[column]["point_size"]) for column in columns]
+
+
+def usual_point_size(mode, asset_class=None, quote_currency=None):
+    """The point size the Studio fills in: the market's own convention for one point.
+
+    FX: the pip for the quote currency (vectorbtX's fx_pip: 0.0001, or 0.01 for yen and a few
+    others), in every way of trading. An index: 1.0, an index point. A share priced in pence
+    (Yahoo's .L quotes, GBp): 1.0, a penny. Anything else: 0.01, a cent (or a penny). vectorbtX
+    gives an index 0.01 and knows nothing of pence (docs/UPSTREAM.md issue 25).
+    ⚠️ VERIFY per broker for commodities: gold and oil spread bets quote points of 0.1 or 0.01.
+    """
+    from vectorbtx.instruments.defaults import fx_pip
+
+    asset_class = asset_class or mode_defaults(mode).get("asset_class")
+    if asset_class == "fx" or mode == "fx_spot":
+        return float(fx_pip(quote_currency))
+    if asset_class == "index" or (asset_class == "stocks" and quote_currency in ("GBp", "GBX")):
+        return 1.0
+    return 0.01
+
+
+def usual_leverage(mode, asset_class=None, kind="signals"):
+    """The leverage the Studio fills in for a way of trading, an asset class and a kind of strategy.
+
+    The owner's rule (17 November 2026): unlevered unless it is a spread bet or a CFD.
+    Spread bets and CFDs trade at the usual retail limits, vectorbtX's table by asset class
+    (30x FX, 10x indices and commodities, 5x single stocks). Everything else is 1x, no
+    borrowing: shares bought outright, FX spot and every portfolio ("most portfolios and
+    naked trading are non-margin"). vectorbtX's own default is 2x bought outright and on FX
+    spot (docs/UPSTREAM.md issue 24).
+    """
+    if mode not in ("cfd", "spreadbet") or kind == "portfolio":
+        return 1.0
+    # Read from vectorbtX's table, not by building an Instrument: one that is still incomplete (a
+    # CFD with no contract size, which the grid already flags) would refuse to build.
+    from vectorbtx.instruments.defaults import max_leverage
+
+    return float(max_leverage(mode, asset_class or mode_defaults(mode).get("asset_class")))
+
+
+def point_meaning(spec, data_dir=None):
+    """{symbol: what one point is for it, in its market's words}: "1 cent (0.01)", "1 pip (0.0001)".
+
+    Stops, targets, spreads and a spread bet's stake are all counted in points: the point
+    size of price. On a share that is a cent (or a penny), so a 1.00 move is 100 points; on
+    an FX pair the market counts pips (0.0001, or 0.01 when the quote is yen), and a point
+    is named a pip only when the point size is the pip (vectorbtX's fx_pip, by quote
+    currency); on an index it is usually 1.0, an index point.
+    """
+    from vectorbtx.instruments.defaults import fx_pip
+
+    symbols = list(spec["data"]["symbols"])
+    if "from_file" in (spec.get("instruments") or {}):
+        return {symbol: f"{size:g} of the price" for symbol, size in zip(symbols, point_sizes(spec, symbols, data_dir))}
+    out = {}
+    for (symbol, fields), size in zip(instrument_fields(spec).items(), point_sizes(spec, symbols, data_dir)):
+        mode = fields["mode"]
+        asset_class = fields.get("asset_class") or mode_defaults(mode).get("asset_class")
+        quote = fields.get("quote_currency")
+        if asset_class == "fx" or mode == "fx_spot":
+            pip = float(fx_pip(quote))
+            out[symbol] = (f"1 pip ({size:g})" if abs(size - pip) < 1e-12 else
+                           f"{size:g} of the price, {size / pip:g} of a pip ({pip:g})")
+        elif asset_class == "stocks" and quote in ("GBp", "GBX"):
+            # A share priced in pence (Yahoo's .L quotes): a point of 1.0 is a penny.
+            out[symbol] = "1p (1.0: the price is in pence)" if abs(size - 1.0) < 1e-12 else \
+                f"{size:g}p (the price is in pence)"
+        elif asset_class == "stocks" and abs(size - 0.01) < 1e-12:
+            out[symbol] = "1p (0.01)" if quote == "GBP" else "1 cent (0.01)"
+        elif asset_class == "index" and abs(size - 1.0) < 1e-12:
+            out[symbol] = "1 index point (1.0)"
         else:
-            sizes.append(float(values["point_size"]))
-    return sizes
+            out[symbol] = f"{size:g} of the price"
+    return out
+
+
+def default_leverage(spec):
+    """{symbol: the leverage each instrument trades at}: its own, else the usual one (usual_leverage)."""
+    out = {}
+    for symbol, fields in instrument_fields(spec).items():
+        out[symbol] = float(fields["leverage"])
+    return out
+
+
+def sizing_check(spec, data, entries=None, data_dir=None):
+    """One trade of a rule strategy against what its account can fund, per symbol, before any run.
+
+    The sizes are vectorbtX's own (resolve_size, then quantize_engine_size, at the open the
+    order fills at), so this says what the run will do: a trade worth more than cash x
+    leverage is cut down (or skipped), and one below the minimum size is not placed at all.
+    `entries`: the signal-bar entry masks (long or short); each fills at the next bar's open,
+    and the largest of those trades is shown. Without them, the last bar's.
+
+    [{"symbol", "price", "bar", "typical_range" (the median high-to-low of the 20 bars before),
+      "stop_price", "stop_pct", "size" (as traded), "asked" (before
+      rounding to the increment), "min_size", "unit", "value", "times_cash", "leverage", "funded",
+      "fits", "below_minimum"}], or [] when nothing is sized. Sizes are in the instrument's own
+      unit: shares, lots, or a stake per point.
+    """
+    from vectorbtx.frontend.prepare import quantize_engine_size, resolve_size
+    from vectorbtx.modes.base import get_adapter
+
+    spec = apply_params(spec)
+    risk = spec.get("risk") or {}
+    sizing = {key: value for key, value in (risk.get("sizing") or {}).items() if key in SIZING_KEYS}
+    if strategy_kind(spec) != "signals" or not sizing:
+        return []
+    stop = risk.get("stop") or {}
+    stop_points = stop.get("points") if stop.get("kind") in ("fixed", "trailing") else None
+    init_cash = float(spec["account"]["init_cash"])
+    prepared = prepare_data(spec, data, data_dir)
+    fill = pd.DataFrame(prepared["open"])
+    columns = list(fill.columns)
+    universe = load_universe(spec, data_dir)
+    # resolve_size takes only fixed-stop points for risk sizing (validate_spec requires one).
+    wanted = resolve_size(universe, fill, columns, stop_points=stop_points if stop.get("kind") == "fixed" else None,
+                          init_cash=init_cash, **sizing)
+    with RUN_LOCK, warnings.catch_warnings():
+        # The sizes below the minimum are reported in the rows; vectorbtX's own warning would
+        # go to the console. (The lock: catch_warnings is process-wide, see RUN_LOCK.)
+        warnings.simplefilter("ignore")
+        traded = quantize_engine_size(universe, wanted, columns)
+    rows = []
+    for column in columns:
+        instrument = universe[column].filled()
+        adapter = get_adapter(instrument.mode)
+        # The bar the trade fills on: the next open after an entry signal.
+        if entries is not None and column in entries:
+            fills = pd.Series(entries[column].to_numpy(dtype=bool), index=entries.index).shift(1, fill_value=False)
+            fills = fills.reindex(fill.index, fill_value=False).to_numpy()
+        else:
+            fills = np.zeros(len(fill), dtype=bool)
+        if not fills.any():
+            fills[-1] = True
+        values = (traded[column].abs() * fill[column]).to_numpy()
+        candidates = np.where(fills & np.isfinite(wanted[column].to_numpy()))[0]
+        if not len(candidates):
+            continue
+        # The largest trade. Latest first, so on a tie (a stake the same on every bar) argmax,
+        # which takes the first maximum, picks the latest.
+        latest_first = candidates[::-1]
+        scores = np.where(np.isfinite(values[latest_first]), values[latest_first], -1.0)
+        bar = int(latest_first[int(np.argmax(scores))])
+        price = float(fill[column].iloc[bar])
+        size = float(adapter.from_engine_units(np.asarray([traded[column].iloc[bar]], dtype=float), instrument)[0])
+        asked = float(adapter.from_engine_units(np.asarray([wanted[column].iloc[bar]], dtype=float), instrument)[0])
+        value = abs(float(traded[column].iloc[bar])) * price
+        leverage = float(instrument.leverage or 1.0)
+        distance = float(stop_points) * float(instrument.point_size) if stop_points else None
+        # How far price usually travels in one bar here: the median high-to-low range of the 20
+        # bars before the fill. A stop inside it is likely hit within a bar or two of the entry.
+        ranges = (pd.DataFrame(prepared["high"])[column] - pd.DataFrame(prepared["low"])[column]).iloc[max(0, bar - 20):bar]
+        typical_range = float(ranges.median()) if len(ranges.dropna()) else None
+        rows.append({"symbol": column, "price": price, "bar": fill.index[bar], "typical_range": typical_range,
+                     "stop_price": distance, "stop_pct": distance / price if distance else None,
+                     "size": size, "asked": asked, "min_size": float(instrument.min_size or 0.0),
+                     "unit": adapter.unit_name(instrument), "value": value,
+                     "times_cash": value / init_cash, "leverage": leverage, "funded": init_cash * leverage,
+                     "fits": value <= init_cash * leverage * (1 + 1e-9),
+                     "below_minimum": size == 0 and abs(asked) > 0})
+    return rows
 
 
 def needed_currencies(spec, data_dir=None):
@@ -459,7 +638,12 @@ def call_plan(spec, data_dir=None):
             # A per-bar score frame from compile_signals, on the signals' bar: the front
             # door shifts it with them.
             args["entry_priority"] = ("var", "entry_priority")
-        args["when_cash_short"] = ("lit", account.get("when_cash_short") or "skip")
+    if kind == "signals":
+        # ⚠️ What an entry bigger than the account can fund does (cash x leverage, so a
+        # risk-sized trade with a tight stop can outgrow it on one symbol too): "partial"
+        # cuts it down to what is funded, "skip" places nothing. Named on every rule
+        # strategy, so the export says which; the default per account is spec.when_cash_short's.
+        args["when_cash_short"] = ("lit", when_cash_short(spec))
 
     # Passed through untouched: upon_opposite_entry, seed ... (validate_spec keeps the
     # cash passthroughs, cash_sharing, group_by and call_seq, out of a rule strategy).
@@ -536,7 +720,7 @@ def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=Fa
     # never sees, so each run collects its own and returns them for the page to show.
     # "always", because Python otherwise shows a warning once per process and a long-lived
     # Streamlit server would swallow it on every run after the first.
-    with warnings.catch_warnings(record=True) as caught:
+    with RUN_LOCK, warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", UserWarning)
         pf = front_door(**kwargs)
     notes = []
@@ -622,6 +806,35 @@ def run_vectorised(spec, data, params_list, window=None, data_dir=None, offline=
     kwargs = {keyword: runtime[value] if how == "var" else value for keyword, (how, value) in args.items()}
     pf = vectorbtx().x.PortfolioBacktest(**kwargs)
     return [pf[[column]] for column in columns]
+
+
+def warm_up():
+    """Run every template once on synthetic prices, so numba's code is compiled before the first real run.
+
+    The first backtest in a process compiles vectorbt's and vectorbtX's numba kernels (and
+    the extra exits' templates), which takes up to a minute in a fresh environment. ui.boot
+    calls this once per Studio start, in a background thread, so the wait comes while the
+    user is still building. It reads no stored data and makes no network call: currency
+    conversion is taken out, and FRED rates become a static table (static ones are kept,
+    so the holding-cost path compiles too).
+    """
+    from . import analysis, data as data_module
+    from .spec import list_templates, load_template
+
+    specs = [load_template(name) for name in list_templates()]
+    # The extra exits' numba templates (exit_rules.py), which no template uses.
+    with_exits = load_template("ma_cross")
+    with_exits["risk"]["exits"] = {"time_bars": 20, "breakeven_points": 30.0, "step_points": 20.0}
+    specs.append(with_exits)
+    for spec in specs:
+        account = spec.setdefault("account", {})
+        account.pop("fx", None)
+        account.pop("base_currency", None)
+        if (account.get("rates") or {}).get("source") == "fred":
+            account["rates"] = {"source": "static", "values": {"USD": 0.0}}
+        frames = data_module.synthetic_ohlcv(spec["data"]["symbols"], n=300, seed=1)
+        run = run_backtest(spec, frames, offline=True)
+        analysis.extract_results(run, benchmark=True)
 
 
 def backtest_error():

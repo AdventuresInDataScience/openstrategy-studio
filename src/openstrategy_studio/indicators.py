@@ -262,6 +262,61 @@ PARAM_HELP = {
 }
 SOURCE_NAMES = {"talib": "TA-Lib", "pandas_ta": "pandas-ta", "pattern": "ta_patterns"}
 
+# Labels and descriptions written for the Studio, where the library's own say too little: TA-Lib
+# gives a display name and its group ("Price Transform", "Math Operators") and nothing else.
+# Each label carries its formula or meaning in brackets, so the picker explains itself.
+# Applied when the snapshot is built (build_catalogue); checked against the libraries' numbers
+# in tests/test_indicators.py.
+ENTRY_TEXT = {
+    "talib:AVGPRICE": ("Average price ((open + high + low + close) / 4)",
+                       "The mean of the bar's four prices: a smoother stand-in for the close, often fed to other "
+                       "indicators."),
+    "talib:MEDPRICE": ("Median price ((high + low) / 2)",
+                       "The middle of the bar's range, halfway between its high and low. Not a median over many "
+                       "bars: that is Median, under Statistical."),
+    "talib:TYPPRICE": ("Typical price ((high + low + close) / 3)",
+                       "The average of the high, the low and the close: the price CCI and MFI are built on, and the "
+                       "pivot of a floor-trader pivot."),
+    "talib:WCLPRICE": ("Weighted close ((high + low + 2 x close) / 4)",
+                       "The typical price with the close counted twice, so it leans towards where the bar closed."),
+    "talib:HA": ("Heikin-Ashi candles (smoothed open, high, low, close)",
+                 "Heikin-Ashi bars: close = (open + high + low + close) / 4; open = halfway between the previous "
+                 "Heikin-Ashi open and close; high and low also take in those two. They smooth a trend into runs of "
+                 "one colour. ⚠️ They are not prices you could trade at: compare them with each other, not with the "
+                 "real prices."),
+    "talib:MAX": ("Highest over n bars (this bar included)",
+                  "The highest value of its input over the last timeperiod bars, the current one included. Apply it "
+                  "to high for the highest high. For a breakout above the bars before, compare with it 1 bar ago, or "
+                  "use Highest high and lowest low over n bars, which can leave the current bar out."),
+    "talib:MIN": ("Lowest over n bars (this bar included)",
+                  "The lowest value of its input over the last timeperiod bars, the current one included. Apply it "
+                  "to low for the lowest low. For a break below the bars before, compare with it 1 bar ago, or use "
+                  "Highest high and lowest low over n bars, which can leave the current bar out."),
+    "talib:MINMAX": ("Lowest and highest over n bars (this bar included)",
+                     "Both of Lowest over n bars and Highest over n bars, from one input: min and max."),
+    "talib:MAXINDEX": ("Bar number of the highest over n bars",
+                       "The position, counted from the first bar of the data, of the highest value in the last "
+                       "timeperiod bars. To ask how many bars ago the high was, use Highest high and lowest low over "
+                       "n bars (its bars_since_high output)."),
+    "talib:MININDEX": ("Bar number of the lowest over n bars",
+                       "The position, counted from the first bar of the data, of the lowest value in the last "
+                       "timeperiod bars. To ask how many bars ago the low was, use Highest high and lowest low over "
+                       "n bars (its bars_since_low output)."),
+    "talib:MINMAXINDEX": ("Bar numbers of the lowest and highest over n bars",
+                          "Both of the bar-number entries above, from one input."),
+    "talib:FRACTAL": ("Williams fractal (a swing high or low, marked once confirmed)",
+                      "100 on the bar that confirms a swing: a high above the leftbars bars before it and the "
+                      "rightbars bars after it (a low below them, for swinglow). The mark comes rightbars bars after "
+                      "the swing itself, when it is known; 0 elsewhere."),
+    "talib:ZIGZAG": ("Zig zag (the latest swing of at least a set size)",
+                     "Follows swings at least as large as its sensitivity setting. zigzag is the price of the latest "
+                     "swing high or low, which moves while that swing is still extending; trend is its direction (1 "
+                     "up, -1 down); pivotidx is its bar number, counted from the first bar of the data."),
+    "talib:MEDIAN": ("Median over n bars",
+                     "The middle value of its input over the last timeperiod bars: half were above it, half below. "
+                     "Less pulled about by one wild bar than a moving average."),
+}
+
 # The candlestick and chart pattern families: (module path in ta_patterns, family label).
 PATTERN_FAMILIES = {
     "candle": [("single", "Single bar"), ("two_bar", "Two bars"), ("three_bar", "Three bars"),
@@ -294,6 +349,52 @@ STUDIO = {
         "outputs": ["open", "high", "low", "close"],
         "description": "The last completed day's (week's, month's) open, high, low and close, held until the next "
                        "one completes. It never shows a period that is still forming.",
+    },
+    "studio:highest_lowest": {
+        "label": "Highest high and lowest low over n bars", "menu": ["Price levels", "Highs and lows over n bars"],
+        "inputs": ["high", "low"], "defaults": {"high": "high", "low": "low"},
+        "params": {"bars": {"type": "int", "default": 20, "help": "How many bars the highest and lowest are taken "
+                                                                   "over."},
+                   "include_current": {"type": "bool", "default": False,
+                                       "help": "Off: the n bars before this one, the level a breakout must clear "
+                                               "(close above upper is a 20-bar breakout). On: this bar and the n - 1 "
+                                               "before it, as a Donchian channel draws it, which the bar's own high "
+                                               "can never be above."}},
+        "outputs": ["upper", "lower", "middle", "bars_since_high", "bars_since_low"],
+        "description": "The highest high (upper) and lowest low (lower) of n bars, the midpoint between them, and how "
+                       "many bars ago each was set (0 is this bar). Apply it to close for the highest and lowest "
+                       "close.",
+    },
+    "studio:pivots": {
+        "label": "Pivot points (from the previous day, week or month)",
+        "menu": ["Price levels", "Pivots and previous periods"],
+        "inputs": [],
+        "params": {"period": {"type": "choice", "default": "day", "options": ["day", "week", "month"],
+                              "help": "Which completed period the levels are worked out from: yesterday, last week "
+                                      "or last month. They hold until the next one completes."},
+                   "method": {"type": "choice", "default": "classic",
+                              "options": ["classic", "fibonacci", "camarilla", "woodie"],
+                              "help": "classic: pivot (high + low + close) / 3, R1 = 2 x pivot - low, S1 = 2 x pivot "
+                                      "- high, R2 and S2 one range away, R3 and S3 further. fibonacci: the pivot "
+                                      "plus or minus 0.382, 0.618 and 1 times the range. camarilla: the close plus "
+                                      "or minus 1.1 / 12, 1.1 / 6 and 1.1 / 4 times the range. woodie: classic with "
+                                      "the pivot (high + low + 2 x close) / 4."}},
+        "outputs": ["pivot", "r1", "r2", "r3", "s1", "s2", "s3"],
+        "description": "Floor-trader support and resistance from the last completed period's high, low and close: "
+                       "the pivot, three resistance levels above it (r1 to r3) and three supports below (s1 to s3). A "
+                       "period still forming is never used.",
+    },
+    "studio:period_to_date": {
+        "label": "This day, week or month so far (open, high, low)",
+        "menu": ["Price levels", "Pivots and previous periods"],
+        "inputs": [],
+        "params": {"period": {"type": "choice", "default": "day", "options": ["day", "week", "month", "year"],
+                              "help": "The period that is still forming: today, this week, this month or this year "
+                                      "(calendar, by the bars' dates)."}},
+        "outputs": ["open", "high", "low"],
+        "description": "The current period's open, and its highest high and lowest low so far, this bar included. "
+                       "On intraday bars, today so far; on daily bars, this week or month so far. With Previous day, "
+                       "week or month it gives breakouts of yesterday's range.",
     },
     "studio:offset": {
         "label": "Offset a line by a percentage", "menu": ["Transform", "Offsets and bands"],
@@ -522,6 +623,50 @@ def run_studio(function, params, inputs, data):
             binned = binned[binned.notna().any(axis=1)].shift(1)
             out[field] = binned.reindex(close.index, method="ffill")
         return out
+    if function == "highest_lowest":
+        bars = int(params["bars"])
+        high, low = inputs[0], inputs[1]
+        out = {"upper": high.rolling(bars, min_periods=bars).max(), "lower": low.rolling(bars, min_periods=bars).min()}
+        for name, frame, pick in (("bars_since_high", high, np.argmax), ("bars_since_low", low, np.argmin)):
+            # How far back in each window its extreme sits, the latest one when two are equal:
+            # pick runs on the window reversed (newest first), so it finds the newest first.
+            values = frame.to_numpy(dtype=float)
+            since = np.full(values.shape, np.nan)
+            if len(values) >= bars:
+                windows = np.lib.stride_tricks.sliding_window_view(values, bars, axis=0)[..., ::-1]
+                filled = np.where(np.isnan(windows), -np.inf if pick is np.argmax else np.inf, windows)
+                since[bars - 1:] = pick(filled, axis=-1)
+                since[bars - 1:][np.isnan(windows).any(axis=-1)] = np.nan
+            out[name] = pd.DataFrame(since, index=frame.index, columns=frame.columns)
+        if not params.get("include_current"):
+            # The n bars BEFORE this one: shifted by a bar, so each bar-since counts one more.
+            out = {name: frame.shift(1) + (1 if name.startswith("bars_since") else 0) for name, frame in out.items()}
+        out["middle"] = (out["upper"] + out["lower"]) / 2
+        return out
+    if function == "pivots":
+        # ⚠️ No leakage: the previous period's own levels, which only ever show completed periods.
+        last = run_studio("previous_period", {"period": params["period"]}, [], data)
+        high, low, close = last["high"], last["low"], last["close"]
+        span = high - low
+        method = params["method"]
+        pivot = (high + low + 2 * close) / 4 if method == "woodie" else (high + low + close) / 3
+        if method == "fibonacci":
+            levels = {f"r{n}": pivot + k * span for n, k in ((1, 0.382), (2, 0.618), (3, 1.0))}
+            levels.update({f"s{n}": pivot - k * span for n, k in ((1, 0.382), (2, 0.618), (3, 1.0))})
+        elif method == "camarilla":
+            levels = {f"r{n}": close + span * 1.1 / k for n, k in ((1, 12), (2, 6), (3, 4))}
+            levels.update({f"s{n}": close - span * 1.1 / k for n, k in ((1, 12), (2, 6), (3, 4))})
+        else:
+            levels = {"r1": 2 * pivot - low, "s1": 2 * pivot - high, "r2": pivot + span, "s2": pivot - span,
+                      "r3": high + 2 * (pivot - low), "s3": low - 2 * (high - pivot)}
+        return {"pivot": pivot, **levels}
+    if function == "period_to_date":
+        # Grouped by the bars' own calendar period, and cumulative within it: a bar sees its
+        # period's bars up to itself, never a later one.
+        rule = {"day": "D", "week": "W-SUN", "month": "M", "year": "Y"}[params["period"]]
+        key = close.index.to_period(rule)
+        return {"open": data["open"].groupby(key).transform("first"), "high": data["high"].groupby(key).cummax(),
+                "low": data["low"].groupby(key).cummin()}
     if function == "offset":
         return {"value": inputs[0] * (1 + float(params["percent"]) / 100.0)}
     if function == "percent_band":
@@ -785,8 +930,10 @@ def _pattern_entries():
 def _studio_entries():
     rows = []
     for indicator_id, item in STUDIO.items():
+        # An entry reads the close unless it names its own defaults (highest_lowest reads high and low).
+        defaults = {name: (item.get("defaults") or {}).get(name, "close") for name in item["inputs"]}
         rows.append(dict(item, id=indicator_id, source="studio", function=indicator_id.split(":", 1)[1],
-                         defaults={name: "close" for name in item["inputs"]}))
+                         defaults=defaults))
     return rows
 
 
@@ -808,6 +955,9 @@ def build_catalogue():
     talib_rows = _talib_entries()
     talib_names = {row["function"] for row in talib_rows}
     rows = talib_rows + _pandas_ta_entries(talib_names) + _pattern_entries() + _studio_entries()
+    for row in rows:
+        if row["id"] in ENTRY_TEXT:
+            row["label"], row["description"] = ENTRY_TEXT[row["id"]]
     return sorted(rows, key=lambda row: row["id"])
 
 

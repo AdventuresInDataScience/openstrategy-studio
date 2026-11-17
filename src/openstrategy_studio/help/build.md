@@ -3,25 +3,35 @@ Work through the steps left to right. The **At a glance** panel on the right sho
 **1. Setup.** Name the strategy, pick the symbols, timeframe and dates, then answer two questions:
 
 - *What are you building?* **Trade on signals** (rules decide when to buy and sell) or **hold a portfolio** (target weights, rebalanced on a schedule or never; one symbol held from the start is buy and hold).
-- *How are you trading it?* Buying outright, CFDs, spread bets or FX spot. This sets the costs, how a short is charged, and how positions are sized, for every symbol. The instrument grid then shows only the fields that way of trading uses.
+- *How are you trading it?* Buying outright, CFDs, spread bets or FX spot. This sets the costs, how a short is charged, and how positions are sized, for every symbol. The instrument grid then shows only the fields that way of trading uses. Its **leverage** column fills in with the usual limit: on spread bets and CFDs 30x for FX, 10x for indices and commodities and 5x for single stocks; none (1x) bought outright, on FX spot and in every portfolio. Type your own to change it.
+- **Points.** Stops, targets, spreads and a spread bet's stake are counted in points, each instrument's point size of price. On a share a point is 1 cent, so a 1.00 move is 100 points (on a share priced in pence, 1p); on FX it is a pip (0.0001, or 0.01 on a yen pair); on an index, 1.0. The point_size column fills in with the usual one when you pick how you trade, an asset class or a quote currency; a commodity's varies by broker, so check yours. The line under the grid says what a point is for each symbol, and the line under a stop or target box what its distance is in price.
 
-**2. Features.** The lines and signals your rules compare. **Add a feature** in three steps: a category (Indicator, Statistical, Price levels, Candlestick, Chart pattern, Transform, Custom), a family (Moving averages, Momentum ...), then the item. Its outputs are listed before you add it; each becomes a line you can use, such as `bb.upperband`.
+**2. Features.** The lines and signals your rules compare. **Add a feature** in three steps: a category (Indicator, Statistical, Price levels, Candlestick, Chart pattern, Transform, Custom), a family (Moving averages, Momentum ...), then the item. Its outputs, the prices it reads and its settings (with their defaults) are listed before you add it; each output becomes a line you can use, such as `bb.upperband`.
+
+- *Price levels* holds the highest and lowest over n bars (with or without the current bar, and how many bars ago each was set), pivot points from the previous day, week or month, the previous period's open, high, low and close, and this day, week or month so far. *Price types* explain themselves: Typical price ((high + low + close) / 3) and so on.
 
 - Rename a feature in its **Name** box at any time; the rules, other features and optimise variables that use it follow.
 - Every input can read a price or another feature: an EMA of an RSI, or bands around an EMA.
 - *Transform* holds the adjustments: offset a line by a percentage, a band either side of it, the distance between two lines, a line some bars ago, bars since a signal. "Crosses within 5% of the EMA" is a 5% band around the EMA, compared in a rule.
 - On an SMA, EMA or other single-type average, **Let the optimiser pick the type** swaps it for the *Moving average* entry at the same type (the same numbers), so the Optimise page can try SMA against EMA and others.
 
-**3. Rules** (signals). Each rule is a list of named conditions and a **logic line** that combines them:
+**3. Rules** (signals). Each rule sits in its own panel, titled with its logic line, and is a list of named conditions and a **logic line** that combines them:
 
-- A condition compares two lines (*fast crosses above slow*), checks that a pattern appears, or (entries only) filters by weekday, month, session or a higher timeframe.
+- **Add condition**, then pick its **Kind**: compare two lines (*fast crosses above slow*), a pattern appears, the day, month or time of day, or a comparison on a higher timeframe. Every rule takes every kind, exits included: *A or Friday* is a time exit.
+- Each condition has its own panel, titled in words, so it can be closed once it is right.
+- **Must hold** says when: on this bar, on each of the last N bars (*RSI above 50 for 3 bars*), on any of the last N bars (*a cross within the last 5 bars*), or N bars ago (*a cross 1 bar ago, then a close below the EMA now*). On a higher timeframe, N counts its bars.
 - New conditions are named A, B, C ...; type a name of your own in a condition's **Name** box (letters, digits and underscores, such as `trend` or `rsi_low`) and the logic line follows.
 - The logic line uses `and`, `or`, `xor`, `nand`, `nor`, `xnor` and `not`, with brackets: `(A and (B or C)) and not D`, or `trend and not overbought`. Brackets are needed wherever two different words meet, so the line always says exactly what you mean. Names match exactly, capitals included.
 - **Make versions of this rule** keeps several versions; the optimiser can choose between them.
 
 **3. Portfolio** (portfolios). Optionally pick assets by a score, choose the weighting, and how often to go back to the target weights: never (buy and hold), every bar, or on a calendar, optionally only when the weights have drifted.
 
-**4. Risk.** How big each position is (labelled for the way you trade), a stop, a take profit, extra exits (after a number of bars, breakeven, a stepped stop), and for intraday bars the order timing: entries good for the day only, and closing before the end of the day.
+**4. Risk.** How big each position is (labelled for the way you trade; a risk of 0.01 is 1% of the starting cash, the same amount on every trade, and the line under the box says what it is in money), a stop, a take profit, and then:
+
+- **Leverage**: each symbol's leverage and what it funds. It is set in the instrument grid on the Setup tab.
+- **When a trade is bigger than the account can fund**: fill as much as it funds, or skip the trade.
+- **Trade size check**: the largest trade your entries place, with its stop in price, against what the account funds. A warning says what to change before you run, including a stop narrower than a usual bar.
+- Extra exits (after a number of bars, breakeven, a stepped stop), and for intraday bars the order timing: entries good for the day only, and closing before the end of the day.
 
 **5. Account.** Starting cash, how several symbols share it, the reporting currency, and interest rates for holding costs.
 

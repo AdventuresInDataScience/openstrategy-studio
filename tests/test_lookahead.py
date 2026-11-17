@@ -97,7 +97,37 @@ OPERATOR_RULES = {
                                        "op": ">", "right": {"feature": "hi"}}]),
     "higher timeframe candle": rule([{"filter": "higher_timeframe", "timeframe": "1w", "left": {"price": "close"},
                                       "op": ">", "right": {"price": "open"}}]),
+    # A condition's timing (compile.held): each of the last N bars, any of them, N bars ago.
+    "for 3 bars": rule([{**above_zero("m"), "for_bars": 3}]),
+    "within 4 bars": rule([{**above_zero("z"), "within_bars": 4}]),
+    "2 bars ago": rule([{**above_zero("m"), "bars_ago": 2}]),
+    "higher timeframe for 2 weeks": rule([{"filter": "higher_timeframe", "timeframe": "1w", **above_zero("m"),
+                                           "for_bars": 2}]),
+    "higher timeframe within 3 weeks": rule([{"filter": "higher_timeframe", "timeframe": "1w",
+                                              "left": {"price": "close"}, "op": ">", "right": {"price": "open"},
+                                              "within_bars": 3}]),
 }
+
+
+def test_timing_reads_the_bars_it_says(ohlcv):
+    """On each of the last N bars, on any of them, N bars ago: against the plain condition, by hand."""
+    spec = apply_params(signal_spec(FEATURES, rule([above_zero("m")])))
+    plain = C.compile_signals(spec, ohlcv)["entries"]["EURUSD=X"].astype(float)
+    expected = {"for_bars": plain.rolling(3).sum() == 3, "within_bars": plain.rolling(3, min_periods=1).sum() > 0,
+                "bars_ago": plain.shift(3).fillna(0.0) > 0}
+    for key, wanted in expected.items():
+        timed = apply_params(signal_spec(FEATURES, rule([{**above_zero("m"), key: 3}])))
+        got = C.compile_signals(timed, ohlcv)["entries"]["EURUSD=X"]
+        pd.testing.assert_series_equal(got, wanted, check_names=False, obj=key)
+    # "Each of the last 3" holds on fewer bars than the plain condition, "any of the last 3" on more.
+    assert expected["for_bars"].sum() < plain.sum() < expected["within_bars"].sum()
+
+
+def test_a_pattern_within_some_bars_is_causal(ohlcv, monkeypatch):
+    monkeypatch.setattr(indicators, "run_pattern",
+                        lambda module, name, params, o, h, l, c, v: ((c > o) & (o > 0)).astype("int8"))
+    features = {"hammer": indicators.new_feature("pattern:candle:hammer")}
+    assert_causal(signal_spec(features, rule([{"pattern": "hammer", "side": "bullish", "within_bars": 3}])), ohlcv)
 
 
 def test_every_operator_is_causal(ohlcv):
@@ -108,8 +138,10 @@ def test_every_operator_is_causal(ohlcv):
 def test_crossings_are_causal(ohlcv):
     pytest.importorskip("vectorbt")
     for op in ("crosses_above", "crosses_below"):
-        entry = rule([{"left": {"feature": "m"}, "op": op, "right": {"const": 0.0}}])
-        assert_causal(signal_spec(FEATURES, entry), ohlcv)
+        # As it is, within the last 5 bars ("crossed recently"), and 1 bar ago (then confirmed).
+        for timing in ({}, {"within_bars": 5}, {"bars_ago": 1}):
+            entry = rule([{"left": {"feature": "m"}, "op": op, "right": {"const": 0.0}, **timing}])
+            assert_causal(signal_spec(FEATURES, entry), ohlcv)
 
 
 def test_pattern_condition_is_causal(ohlcv, monkeypatch):

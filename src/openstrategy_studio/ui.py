@@ -17,7 +17,9 @@ State rules (plan section 11):
 import copy
 import html
 import json
+import os
 import re
+import threading
 import traceback
 from importlib import resources
 from pathlib import Path
@@ -27,8 +29,8 @@ import streamlit as st
 from . import config, data as data_module, indicators, style
 from .expressions import (LOGIC_WORDS, append_letter, condition_name_problem, condition_text, next_letter, parse_logic,
                           remove_letter, summary)
-from .spec import (COMPARISON_OPS, PATTERN_SIDES, PRICE_FIELDS, TIMEFRAME_MINUTES, default_spec, feature_name_problem,
-                   get_path, is_choice, rename_condition, rename_feature, set_path)
+from .spec import (COMPARISON_OPS, PATTERN_SIDES, PRICE_FIELDS, TIMEFRAME_MINUTES, TIMING_KEYS, default_spec,
+                   feature_name_problem, get_path, is_choice, rename_condition, rename_feature, set_path)
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
@@ -49,6 +51,40 @@ def _apply_settings_once(settings_json):
     return True
 
 
+# The start-up warm-up's state, once it has been started: {"done": threading.Event, "error": text or None}.
+WARM_UP = {}
+
+
+@st.cache_resource(show_spinner=False)
+def _start_warm_up():
+    """Compile numba's code in a background thread, once per Studio start (engine.warm_up).
+
+    The thread never touches Streamlit. Its own try/except is the exception to "one per
+    page": it runs outside any page, and a failure there costs nothing but the head start
+    (the first real run compiles what it needs anyway), so it is recorded and shown as a
+    note, never raised.
+    """
+    state = {"done": threading.Event(), "error": None}
+
+    def work():
+        from . import engine
+        try:
+            engine.warm_up()
+        except Exception as error:   # noqa: BLE001  (best effort; see the docstring)
+            state["error"] = f"{type(error).__name__}: {error}"
+        finally:
+            state["done"].set()
+
+    threading.Thread(target=work, name="openstrategy-warm-up", daemon=True).start()
+    WARM_UP.update(state)
+    return True
+
+
+def warming_up():
+    """True while the start-up warm-up is still compiling."""
+    return bool(WARM_UP) and not WARM_UP["done"].is_set()
+
+
 def boot(title):
     """Call first on every page. Returns (settings, data_dir).
 
@@ -61,6 +97,9 @@ def boot(title):
         st.session_state["settings"] = config.load_settings()
     settings = st.session_state["settings"]
     _apply_settings_once(json.dumps(settings, sort_keys=True))
+    # OPENSTRATEGY_STUDIO_WARM_UP=0 turns it off for one process (the tests set it).
+    if settings.get("warm_up", True) and os.environ.get("OPENSTRATEGY_STUDIO_WARM_UP", "1") != "0":
+        _start_warm_up()
     look, problems = style.active_theme(settings)
     # Style tags alone: Streamlit puts them where they take no space on the page.
     st.html(f"<style>{style.stylesheet(look)}</style>")
@@ -391,9 +430,19 @@ def feature_picker(features):
                                        "below; its settings can be changed once it is added.")
     item = indicators.entry(picked)
     with st.container(border=True):
-        st.markdown(f"**{item['label']}**  \n" + (item.get("description") or "")[:240])
-        st.caption("Outputs: " + ", ".join(item["outputs"]) + (f"  ·  reads: {', '.join(item['inputs'])}"
-                                                               if item["inputs"] else ""))
+        st.markdown(f"**{item['label']}**  \n" + (item.get("description") or "")[:400])
+        # Its settings and their defaults, so "over n bars" shows its n before it is added;
+        # each can be changed on the feature's card once added.
+        settings = []
+        for name, declaration in item["params"].items():
+            if declaration["type"] == "code":
+                continue
+            default = declaration.get("default")
+            settings.append(f"{name} {'(library default)' if default is None else default}")
+        reads = [f"{name} (default {item['defaults'].get(name) or 'close'})" for name in item["inputs"]]
+        st.caption("Outputs: " + ", ".join(item["outputs"])
+                   + (f"  ·  reads: {', '.join(reads)}" if reads else "")
+                   + (f"  ·  settings: {', '.join(settings)}" if settings else "  ·  no settings"))
         stem = re.sub(r"[^a-z0-9]+", "_", item["function"].split(":")[-1].lower()).strip("_") or "feature"
         if not stem[0].isalpha():
             stem = "f_" + stem
@@ -478,12 +527,40 @@ def feature_editor(name, feature, features):
 # Rules: lettered conditions and a logic line
 # ---------------------------------------------------------------------------
 
-def new_condition(kind, features):
+# The kinds a condition can be, in the Kind list of every rule (exits included: see compile_signals).
+# Calendar and higher-timeframe conditions are both {"filter": ...} in the spec.
+CONDITION_KINDS = {"comparison": "Compare two lines", "pattern": "A pattern appears",
+                   "calendar": "Day, month or time of day", "higher": "On a higher timeframe"}
+HIGHER_TIMEFRAMES = ["1h", "4h", "1d", "1w", "1M"]
+TIMING_LABELS = {"now": "On this bar", "for_bars": "On each of the last N bars", "within_bars": "On any of the last N bars",
+                 "bars_ago": "N bars ago"}
+
+
+def condition_kind(node):
+    """Which entry of CONDITION_KINDS a condition is."""
+    if "pattern" in node:
+        return "pattern"
+    if node.get("filter") == "higher_timeframe":
+        return "higher"
+    if "filter" in node:
+        return "calendar"
+    return "comparison"
+
+
+def _higher_than(timeframe):
+    return [tf for tf in HIGHER_TIMEFRAMES if TIMEFRAME_MINUTES[tf] > TIMEFRAME_MINUTES.get(timeframe, 0)]
+
+
+def new_condition(kind, features, timeframe="1d"):
     if kind == "pattern":
         patterns = [name for name, feature in features.items() if str(feature.get("indicator")).startswith("pattern:")]
         return {"pattern": patterns[0] if patterns else "", "side": "bullish"}
-    if kind == "filter":
+    if kind == "calendar":
         return {"filter": "weekday", "days": [0, 1, 2, 3, 4]}
+    if kind == "higher":
+        higher = _higher_than(timeframe) or ["1M"]
+        return {"filter": "higher_timeframe", "timeframe": higher[0], "left": {"price": "close"}, "op": ">",
+                "right": {"price": "open"}}
     first = _output_options(features)[:1]
     left = dict(zip(("feature", "output"), first[0].split(".", 1))) if first else {"price": "close"}
     if first and len(indicators.outputs(features[left["feature"]]["indicator"])) == 1:
@@ -493,6 +570,11 @@ def new_condition(kind, features):
 
 def new_rule(features):
     return {"conditions": {"A": new_condition("comparison", features)}, "logic": "A"}
+
+
+def open_panel(path):
+    """Have a condition's panel open the next time it is drawn (a new or renamed condition)."""
+    st.session_state.setdefault("open_panels", set()).add(path)
 
 
 def _pattern_condition(path, node, features):
@@ -553,95 +635,133 @@ def _comparison_condition(path, node, features):
                       help="What the line is compared with: another feature, a price, or a fixed number.")
 
 
-def _filter_condition(path, node, features, timeframe):
-    kinds = ["weekday", "month", "session", "higher_timeframe"]
+def _calendar_condition(path, node, timeframe):
+    """A weekday, month or time-of-day condition: the same on every bar of its day, so no timing."""
+    kinds = ["weekday", "month", "session"]
     if TIMEFRAME_MINUTES.get(timeframe, 0) >= 1440:
         kinds.remove("session")          # time-of-day means nothing on daily bars
-    labels = {"weekday": "Weekdays", "month": "Months", "session": "Trading session (UTC)",
-              "higher_timeframe": "Higher timeframe condition"}
-    kind = st.selectbox("Filter", kinds, index=kinds.index(node["filter"]) if node["filter"] in kinds else 0,
+    labels = {"weekday": "On chosen weekdays", "month": "In chosen months", "session": "In a time-of-day session (UTC)"}
+    kind = st.selectbox("Which", kinds, index=kinds.index(node["filter"]) if node["filter"] in kinds else 0,
                         format_func=labels.get, key=key(path, ":filter"),
-                        help="Entries are allowed only when this holds: on chosen weekdays or months, inside a "
-                             "time-of-day session (intraday bars only), or while a condition holds on a higher "
-                             "timeframe.")
+                        help="True on the weekdays or in the months you pick, or inside a time-of-day session "
+                             "(intraday bars only). In an entry rule joined with and, it allows entries only then; "
+                             "in an exit rule joined with or, it closes a position then (a Friday exit).")
     if kind != node["filter"]:
         defaults = {"weekday": {"days": [0, 1, 2, 3, 4]}, "month": {"months": list(range(1, 13))},
-                    "session": {"from": "07:00", "to": "16:00"},
-                    "higher_timeframe": {"timeframe": "1w", "left": {"price": "close"}, "op": ">",
-                                         "right": {"price": "open"}}}
+                    "session": {"from": "07:00", "to": "16:00"}}
         set_value(path, {"filter": kind, **defaults[kind]})
         renew_widgets()
         st.rerun()
     if kind == "weekday":
-        days = st.multiselect("Trade on", list(range(7)), default=node.get("days", []),
+        days = st.multiselect("Weekdays", list(range(7)), default=node.get("days", []),
                               format_func=DAY_NAMES.__getitem__, key=key(path, ":days"),
-                              help="The weekday of the bar the signal fires on (UTC). The entry fills at the next "
-                                   "bar's open, which may fall on the next day.")
+                              help="The weekday of the bar the condition is read on (UTC). The order fills at the "
+                                   "next bar's open, which may fall on the next day.")
         if days != node.get("days"):
             set_value(f"{path}.days", days)
     elif kind == "month":
-        months = st.multiselect("Trade in", list(range(1, 13)), default=node.get("months", []),
+        months = st.multiselect("Months", list(range(1, 13)), default=node.get("months", []),
                                 format_func=lambda month: MONTH_NAMES[month - 1], key=key(path, ":months"),
-                                help="The month of the bar the signal fires on.")
+                                help="The month of the bar the condition is read on.")
         if months != node.get("months"):
             set_value(f"{path}.months", months)
-    elif kind == "session":
+    else:
         left, right = st.columns(2)
         start = left.text_input("From (HH:MM)", value=node.get("from", "07:00"), key=key(path, ":from"),
-                                help="The session's start, in UTC, 24-hour clock: a signal on a bar that starts at "
-                                     "or after it counts.")
+                                help="The session's start, in UTC, 24-hour clock: a bar that starts at or after it "
+                                     "counts.")
         end = right.text_input("To (HH:MM)", value=node.get("to", "16:00"), key=key(path, ":to"),
                                help="The session's end, in UTC, 24-hour clock: a bar that starts at it no longer "
                                     "counts. It may wrap past midnight (22:00 to 02:00).")
         if (start, end) != (node.get("from"), node.get("to")):
             set_value(f"{path}.from", start)
             set_value(f"{path}.to", end)
-    else:
-        higher = [tf for tf in ["1h", "4h", "1d", "1w", "1M"] if TIMEFRAME_MINUTES[tf] > TIMEFRAME_MINUTES.get(timeframe, 0)]
-        chosen = st.selectbox("Timeframe", higher, index=higher.index(node["timeframe"]) if node.get("timeframe")
-                              in higher else 0, key=key(path, ":tf"),
-                              help="Computed on completed higher bars only, so it never peeks ahead.")
-        if chosen != node.get("timeframe"):
-            set_value(f"{path}.timeframe", chosen)
-        _comparison_condition(path, node, features)
 
 
-def condition_editor(path, name, node, features, timeframe, entry, on_remove, on_rename):
-    """One named condition: its name, what kind it is, its settings, and a remove button.
+def _higher_condition(path, node, features, timeframe):
+    higher = _higher_than(timeframe)
+    chosen = st.selectbox("Timeframe", higher, index=higher.index(node["timeframe"]) if node.get("timeframe")
+                          in higher else 0, key=key(path, ":tf"),
+                          help="The comparison below is computed on these bars, completed ones only, so it never "
+                               "peeks ahead: on a Wednesday a weekly condition reads last week.")
+    if chosen != node.get("timeframe"):
+        set_value(f"{path}.timeframe", chosen)
+    _comparison_condition(path, node, features)
 
-    on_rename(new) renames it (and reruns), or returns why it cannot.
+
+def _timing_input(path, node, higher=False):
+    """When the condition must have held: now, on each of the last N bars, on any of them, or N bars ago.
+
+    Bound to the condition's own TIMING_KEYS (one at most), so the bars can be optimised
+    like any other number.
     """
-    with st.container(border=True):
-        kinds = ["comparison", "pattern"] + (["filter"] if entry else [])
-        kind = "pattern" if "pattern" in node else "filter" if "filter" in node else "comparison"
-        names = {"comparison": "Compare two lines", "pattern": "A pattern appears", "filter": "Only when (filter)"}
+    current = next((name for name in TIMING_KEYS if node.get(name)), "now")
+    options = ["now"] + TIMING_KEYS
+    columns = st.columns([3, 1])
+    unit = "higher-timeframe bars" if higher else "bars"
+    chosen = columns[0].selectbox(
+        "Must hold", options, index=options.index(current), format_func=TIMING_LABELS.get, key=key(path, ":timing"),
+        help=f"On this bar: as it is now. On each of the last N {unit}: true on this bar and the N - 1 before it, "
+             f"such as RSI above 50 for 3 bars in a row. On any of the last N {unit}: true at least once in that "
+             f"window, this bar included, such as a cross within the last 5 bars. N {unit} ago: the whole condition "
+             "as it was then, such as a cross 1 bar ago. Each reads past bars only.")
+    if chosen != current:
+        changed = {name: value for name, value in node.items() if name not in TIMING_KEYS}
+        if chosen != "now":
+            changed[chosen] = int(node.get(current) or (1 if chosen == "bars_ago" else 3))
+        set_value(path, changed)
+        renew_widgets()
+        st.rerun()
+    if chosen != "now":
+        bars = columns[1].number_input("N", min_value=1, step=1, value=int(node[chosen]), key=key(f"{path}.{chosen}"),
+                                       help="How many bars. It can be optimised on the Optimise page.")
+        if int(bars) != node[chosen]:
+            set_value(f"{path}.{chosen}", int(bars))
+
+
+def condition_editor(path, name, node, features, timeframe, on_remove, on_rename):
+    """One named condition in its own panel: its name, kind, settings, timing and a remove button.
+
+    The panel's title is the condition in words, so a closed panel still says what it does.
+    It is keyed by path, not by revision, so it stays open or closed across edits; a new or
+    renamed one opens (open_panel). on_rename(new) renames it (and reruns), or returns why it
+    cannot.
+    """
+    kind = condition_kind(node)
+    opened = path in st.session_state.get("open_panels", set())
+    with st.expander(f"{name} · {condition_text(node)}", expanded=opened, key=f"condition-panel:{path}"):
         head = st.columns([2, 4, 2], vertical_alignment="bottom")
         typed = head[0].text_input("Name", value=name, key=key(path, ":name"),
                                    help="What the logic line calls this condition, such as trend or rsi_low: "
                                         "letters, digits and underscores, starting with a letter. Renaming it "
                                         "renames it in the logic line and in the Optimise page's variables too.")
-        chosen = head[1].selectbox("Kind", kinds, index=kinds.index(kind) if kind in kinds else 0,
-                                   format_func=names.get, key=key(path, ":kind"),
-                                   help="Compare two lines, a pattern appearing, or (in entry rules only) a filter "
-                                        "on the day, month, session or a higher timeframe.")
+        kinds = list(CONDITION_KINDS)
+        chosen = head[1].selectbox("Kind", kinds, index=kinds.index(kind), format_func=CONDITION_KINDS.get,
+                                   key=key(path, ":kind"),
+                                   help="Compare two lines (fast crosses above slow), a pattern appearing, the day, "
+                                        "month or time of day, or a comparison on a higher timeframe (the weekly "
+                                        "close above its open). Every rule takes every kind.")
         head[2].button("Remove", key=key(path, ":remove"), on_click=on_remove)
         if typed.strip() != name:
             # A refused name stays in the box with the reason under it, as a broken logic line does.
             st.error(on_rename(typed.strip()))
         if chosen != kind:
-            set_value(path, new_condition(chosen, features))
+            set_value(path, new_condition(chosen, features, timeframe))
             renew_widgets()
             st.rerun()
         if kind == "pattern":
             _pattern_condition(path, node, features)
-        elif kind == "filter":
-            _filter_condition(path, node, features, timeframe)
+        elif kind == "calendar":
+            _calendar_condition(path, node, timeframe)
+        elif kind == "higher":
+            _higher_condition(path, node, features, timeframe)
         else:
             _comparison_condition(path, node, features)
-        st.caption(condition_text(_get(path, node)))
+        if kind != "calendar":
+            _timing_input(path, _get(path, node), higher=kind == "higher")
 
 
-def _rule_body(path, rule, features, timeframe, entry):
+def _rule_body(path, rule, features, timeframe):
     """The conditions and the logic line of one rule (one version of it)."""
     conditions = rule.setdefault("conditions", {})
     for letter in list(conditions):
@@ -655,25 +775,31 @@ def _rule_body(path, rule, features, timeframe, entry):
             problem = condition_name_problem(new, set(conditions) - {letter})
             if problem:
                 return problem
+            open_panel(f"{path}.conditions.{new}")
             # A structural change: every widget key under the old name must be renewed.
             rerun_after(lambda: rename_condition(current(), path, letter, new))
-        condition_editor(f"{path}.conditions.{letter}", letter, conditions[letter], features, timeframe, entry, remove,
+        described = condition_text(conditions[letter])
+        condition_editor(f"{path}.conditions.{letter}", letter, conditions[letter], features, timeframe, remove,
                          rename)
-    buttons = st.columns(4)
-    adds = [("comparison", "Add a comparison"), ("pattern", "Add a pattern")] + ([("filter", "Add a filter")]
-                                                                                  if entry else [])
-    joiner = buttons[3].selectbox("Join new with", ["and", "or"], key=key(path, ":join"),
+        # The panel's title is drawn before the settings inside write their new values, so after
+        # an edit it would show the old words until the next click: draw the page again, once
+        # (the second pass finds them equal), as the Features tab does.
+        if letter in conditions and condition_text(conditions[letter]) != described:
+            st.rerun()
+    buttons = st.columns([2, 2, 4])
+    joiner = buttons[1].selectbox("Join new with", ["and", "or"], key=key(path, ":join"),
                                   label_visibility="collapsed", format_func=lambda op: f"join with {op}")
-    for column, (kind, label) in zip(buttons, adds):
-        if column.button(label, key=key(path, f":add:{kind}"),
-                         help="Adds a condition, named with the next free letter (rename it in its Name box), and "
-                              "joins it to the logic line with the word chosen on the right (and, or). Edit the "
-                              "logic line for anything else."):
-            def add(kind=kind):
-                letter = next_letter(set(conditions))
-                conditions[letter] = new_condition(kind, features)
-                rule["logic"] = append_letter(rule.get("logic", ""), letter, joiner)
-            rerun_after(add)
+    if buttons[0].button("Add condition", key=key(path, ":add"),
+                         help="Adds a condition comparing two lines, named with the next free letter, and joins it "
+                              "to the logic line with the word on the right (and, or). Pick its kind in its Kind "
+                              "list: a comparison, a pattern, the day or time, or a higher timeframe. Edit the logic "
+                              "line for anything else."):
+        def add():
+            letter = next_letter(set(conditions))
+            conditions[letter] = new_condition("comparison", features, timeframe)
+            rule["logic"] = append_letter(rule.get("logic", ""), letter, joiner)
+            open_panel(f"{path}.conditions.{letter}")
+        rerun_after(add)
     logic = st.text_input("Logic", value=rule.get("logic", ""), key=key(path, ":logic"),
                           help="Combine the conditions by name with and, or, xor, nand, nor, xnor and not, using "
                                "brackets: (A and (B or C)) and not D, or trend and not overbought. Names match "
@@ -689,7 +815,7 @@ def _rule_body(path, rule, features, timeframe, entry):
             st.caption(f"Fires when {LOGIC_WORDS[tree['op']]} of its parts.")
 
 
-def rule_editor(path, features, timeframe, entry):
+def rule_editor(path, features, timeframe):
     """A rule slot: its conditions and logic line, or several versions the optimiser can choose between."""
     node = _get(path, None)
     if node is None:
@@ -718,9 +844,9 @@ def rule_editor(path, features, timeframe, entry):
             rerun_after(drop_version)
         if len(labels) == 1 and top[2].button("Back to a single rule", key=key(path, ":single")):
             rerun_after(lambda: set_path(current(), path, node["options"][chosen]))
-        _rule_body(f"{path}.options.{chosen}", node["options"][chosen], features, timeframe, entry)
+        _rule_body(f"{path}.options.{chosen}", node["options"][chosen], features, timeframe)
         return
-    _rule_body(path, node, features, timeframe, entry)
+    _rule_body(path, node, features, timeframe)
     if st.button("Make versions of this rule", key=key(path, ":versions"),
                  help="Keep this rule as version a and add others; the optimiser (BUTChC or Optuna) can then choose "
                       "between them."):

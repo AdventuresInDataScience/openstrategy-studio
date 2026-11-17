@@ -43,8 +43,14 @@ if row[0].button("Run backtest", type="primary", disabled=bool(problems) or not 
         return {"results": results, "spec": run["spec"], "fingerprint": data_module.fingerprint(data_dir, spec, frames),
                 "saved": None, "id": uuid.uuid4().hex}
 
-    outcome = ui.run_guarded("Running the backtest. The first run in a fresh environment compiles numba code, "
-                             "which can take a minute; later runs are fast.", run_all)
+    # The start-up warm-up (ui.boot) compiles numba's code in the background; a run that comes
+    # before it has finished waits for it, and says so.
+    label = ("Running the backtest. The Studio is still preparing its backtest engine in the background (once per "
+             "start), so this first run waits for that." if ui.warming_up() else "Running the backtest.")
+    outcome = ui.run_guarded(label, run_all)
+    if ui.WARM_UP.get("error"):
+        st.caption(f"The start-up warm-up stopped ({ui.WARM_UP['error']}), so this run compiled its own code. "
+                   "Nothing else is affected.")
     if outcome is not None:
         st.session_state["last_run"] = outcome
         st.session_state["figures"] = {}
@@ -99,8 +105,11 @@ elif accounts.get("model") == "shared" and results["meta"]["kind"] == "signals":
 # recorded these say nothing.
 notes = results["meta"].get("warnings") or []
 if notes:
-    st.warning("vectorbtX flagged this run. Its numbers may leave something out:\n\n"
-               + "\n".join(f"- {note}" for note in notes))
+    lines = []
+    for note, hint in analysis.warning_hints(notes):
+        lines.append(f"- {note}" + (f"\n\n  **{hint}**" if hint else ""))
+    st.warning("vectorbtX flagged this run. The run finished, but its numbers may leave something out:\n\n"
+               + "\n".join(lines))
 
 # --- stats ----------------------------------------------------------------------------
 tags = {"all": "All metrics", "mt5": "MT5 report", "vectorbtx": "vectorbtX extras"}

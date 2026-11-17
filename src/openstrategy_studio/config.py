@@ -24,7 +24,8 @@ DEFAULTS = {
     "default_theme": "page",        # the charts' theme; "page" follows the page theme (analysis.PAGE_THEME)
     "workers": max(1, (os.cpu_count() or 2) - 1),
     "offline": False,
-    "spike_multiple": 10.0,         # import check: bars this many median ranges wide are flagged
+    "warm_up": True,                # compile numba's code in the background at start (engine.warm_up)
+    "spike_multiple": 10.0,         # import check: a move or range this many times its recent typical one is flagged
     "fred_api_key": "",             # prefer the FRED_API_KEY environment variable or a .env file
     "vectorbtx": {key: None for key in VECTORBTX_KEYS},
 }

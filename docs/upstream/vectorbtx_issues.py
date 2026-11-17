@@ -491,6 +491,105 @@ def check_min_trade_skips_small_trades():
                     f"{later.max() if len(later) else 0:.2%} of the account (should be none)"
 
 
+# ---------------------------------------------------------------------------
+# 22. The sizing warnings measure every bar, not the bars an order is placed on
+# ---------------------------------------------------------------------------
+
+def check_sizing_warnings_measure_order_bars():
+    # One entry, filled at 100; the price then rises to 1000 and nothing more is traded. A stake
+    # of 300 a point is worth 30,000 at the fill, inside 5x leverage on 10,000 (50,000), so the
+    # trade fills in full and the buying-power warning has nothing to say. A notional of 500 buys
+    # 5 shares at 100, so the minimum-size warning has nothing to say either.
+    n = 10
+    opens = [100.0] * 5 + [1000.0] * 5
+    o, h, l, c = frames(opens)
+    entries = mask(c.index, ["X"], [("X", 1)])
+    exits = mask(c.index, ["X"], [("X", 3)])
+    said = []
+    runs = (dict(mode="spreadbet", point_size=1.0, spread_points=0.0, leverage=5.0, stake=300.0),
+            dict(EQUITY, notional=500.0))
+    sizes = []
+    for terms in runs:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=exits,
+                                         init_cash=10_000, freq="D", **terms)
+        said += [str(item.message) for item in caught if "buying power" in str(item.message)
+                 or "minimum tradeable size" in str(item.message)]
+        sizes.append(float(pf.orders.records_readable["Size"].iloc[0]))
+    present = bool(said)
+    return present, (f"orders filled in full (sizes {sizes[0]:g} and {sizes[1]:g}), yet {len(said)} warning(s): "
+                     + " | ".join(text[:90] for text in said) if said else
+                     f"orders filled in full (sizes {sizes[0]:g} and {sizes[1]:g}) and no warning")
+
+
+# ---------------------------------------------------------------------------
+# 23. Risk sizing from the balance or the equity (a required feature)
+# ---------------------------------------------------------------------------
+
+def check_risk_sizing_from_equity():
+    # Risk 1% over a 10-point stop. The first trade is stopped out for a loss of 100, leaving
+    # 9,900. Sized from the equity (or the balance: no position is open in between), the second
+    # trade risks 1% of 9,900, so 9.9 units, not the 10 that 1% of the starting cash gives.
+    opens = [100.0] * 10
+    lows = [value - 0.5 for value in opens]
+    lows[3] = 89.0                                               # the first trade's stop (90) is hit
+    o, h, l, c = frames(opens, lows=lows)
+    entries = mask(c.index, ["X"], [("X", 1), ("X", 5)])
+    none = mask(c.index, ["X"], [])
+    terms = dict(EQUITY, allow_fractional=True)
+    sizes = {}
+    for basis in ("equity", "balance"):
+        try:
+            pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none, risk_pct=0.01,
+                                         stop_points=10, init_cash=10_000, freq="D", risk_of=basis, **terms)
+        except Exception as error:                                       # noqa: BLE001
+            return True, f"risk_of={basis!r} is not accepted ({type(error).__name__}: {str(error)[:80]})"
+        buys = pf.orders.records_readable
+        buys = buys[buys["Side"] == "Buy"]
+        sizes[basis] = [round(float(size), 4) for size in buys["Size"]]
+    present = any(found != [10.0, 9.9] for found in sizes.values())
+    return present, f"buy sizes {sizes} (should be [10.0, 9.9] for both)"
+
+
+# ---------------------------------------------------------------------------
+# 24. Bought outright and FX spot default to 2x leverage
+# ---------------------------------------------------------------------------
+
+def check_unlevered_defaults():
+    from vectorbtx.instruments.defaults import max_leverage
+
+    found = {mode: max_leverage(mode) for mode in ("equity", "fx_spot")}
+    limits = {f"{mode}/{asset}": max_leverage(mode, asset) for mode in ("spreadbet", "cfd")
+              for asset in ("fx", "index", "commodities", "stocks")}
+    wanted = {"spreadbet/fx": 30, "spreadbet/index": 10, "spreadbet/commodities": 10, "spreadbet/stocks": 5}
+    wanted.update({key.replace("spreadbet", "cfd"): value for key, value in wanted.items()})
+    present = any(value != 1.0 for value in found.values()) or limits != wanted
+    return present, f"defaults {found} (should be 1x, no borrowing); spread bets and CFDs {limits}"
+
+
+# ---------------------------------------------------------------------------
+# 25. Point sizes: an index's point, and a share priced in pence
+# ---------------------------------------------------------------------------
+
+def check_point_size_defaults():
+    found = {}
+    for label, terms in (("spreadbet index", dict(mode="spreadbet", asset_class="index")),
+                         ("cfd index", dict(mode="cfd", asset_class="index", contract_size=1.0)),
+                         ("spreadbet GBp share", dict(mode="spreadbet", asset_class="stocks", quote_currency="GBp")),
+                         ("spreadbet EURUSD", dict(mode="spreadbet", asset_class="fx", base_currency="EUR",
+                                                   quote_currency="USD")),
+                         ("spreadbet USDJPY", dict(mode="spreadbet", asset_class="fx", base_currency="USD",
+                                                   quote_currency="JPY"))):
+        try:
+            found[label] = vbt.x.Instrument(**terms).filled().point_size
+        except Exception as error:                                       # noqa: BLE001
+            found[label] = f"{type(error).__name__}"
+    wanted = {"spreadbet index": 1.0, "cfd index": 1.0, "spreadbet GBp share": 1.0, "spreadbet EURUSD": 0.0001,
+              "spreadbet USDJPY": 0.01}
+    return found != wanted, f"point sizes {found} (should be {wanted})"
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -511,6 +610,12 @@ CHECKS = [
     (18, "The borrow fee on a direct short (feature)", check_borrow_fee),
     (19, "A per-instrument financing value is ignored in silence", check_financing_field_says_it_is_unused),
     (21, "min_trade never skips a trade: it compares targets, not holdings", check_min_trade_skips_small_trades),
+    (22, "The sizing warnings measure every bar, not the bars an order is placed on",
+     check_sizing_warnings_measure_order_bars),
+    (23, "Risk sizing from the balance or the equity (required feature)", check_risk_sizing_from_equity),
+    (24, "Bought outright and FX spot default to 2x leverage", check_unlevered_defaults),
+    (25, "An index's point size defaults to 0.01; a share priced in pence is not recognised",
+     check_point_size_defaults),
 ]
 
 

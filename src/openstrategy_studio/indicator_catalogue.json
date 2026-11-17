@@ -10731,6 +10731,44 @@
   }
  },
  {
+  "label": "Highest high and lowest low over n bars",
+  "menu": [
+   "Price levels",
+   "Highs and lows over n bars"
+  ],
+  "inputs": [
+   "high",
+   "low"
+  ],
+  "defaults": {
+   "high": "high",
+   "low": "low"
+  },
+  "params": {
+   "bars": {
+    "type": "int",
+    "default": 20,
+    "help": "How many bars the highest and lowest are taken over."
+   },
+   "include_current": {
+    "type": "bool",
+    "default": false,
+    "help": "Off: the n bars before this one, the level a breakout must clear (close above upper is a 20-bar breakout). On: this bar and the n - 1 before it, as a Donchian channel draws it, which the bar's own high can never be above."
+   }
+  },
+  "outputs": [
+   "upper",
+   "lower",
+   "middle",
+   "bars_since_high",
+   "bars_since_low"
+  ],
+  "description": "The highest high (upper) and lowest low (lower) of n bars, the midpoint between them, and how many bars ago each was set (0 is this bar). Apply it to close for the highest and lowest close.",
+  "id": "studio:highest_lowest",
+  "source": "studio",
+  "function": "highest_lowest"
+ },
+ {
   "label": "Offset a line by a percentage",
   "menu": [
    "Transform",
@@ -10784,6 +10822,82 @@
   "defaults": {
    "source": "close"
   }
+ },
+ {
+  "label": "This day, week or month so far (open, high, low)",
+  "menu": [
+   "Price levels",
+   "Pivots and previous periods"
+  ],
+  "inputs": [],
+  "params": {
+   "period": {
+    "type": "choice",
+    "default": "day",
+    "options": [
+     "day",
+     "week",
+     "month",
+     "year"
+    ],
+    "help": "The period that is still forming: today, this week, this month or this year (calendar, by the bars' dates)."
+   }
+  },
+  "outputs": [
+   "open",
+   "high",
+   "low"
+  ],
+  "description": "The current period's open, and its highest high and lowest low so far, this bar included. On intraday bars, today so far; on daily bars, this week or month so far. With Previous day, week or month it gives breakouts of yesterday's range.",
+  "id": "studio:period_to_date",
+  "source": "studio",
+  "function": "period_to_date",
+  "defaults": {}
+ },
+ {
+  "label": "Pivot points (from the previous day, week or month)",
+  "menu": [
+   "Price levels",
+   "Pivots and previous periods"
+  ],
+  "inputs": [],
+  "params": {
+   "period": {
+    "type": "choice",
+    "default": "day",
+    "options": [
+     "day",
+     "week",
+     "month"
+    ],
+    "help": "Which completed period the levels are worked out from: yesterday, last week or last month. They hold until the next one completes."
+   },
+   "method": {
+    "type": "choice",
+    "default": "classic",
+    "options": [
+     "classic",
+     "fibonacci",
+     "camarilla",
+     "woodie"
+    ],
+    "help": "classic: pivot (high + low + close) / 3, R1 = 2 x pivot - low, S1 = 2 x pivot - high, R2 and S2 one range away, R3 and S3 further. fibonacci: the pivot plus or minus 0.382, 0.618 and 1 times the range. camarilla: the close plus or minus 1.1 / 12, 1.1 / 6 and 1.1 / 4 times the range. woodie: classic with the pivot (high + low + 2 x close) / 4."
+   }
+  },
+  "outputs": [
+   "pivot",
+   "r1",
+   "r2",
+   "r3",
+   "s1",
+   "s2",
+   "s3"
+  ],
+  "description": "Floor-trader support and resistance from the last completed period's high, low and close: the pivot, three resistance levels above it (r1 to r3) and three supports below (s1 to s3). A period still forming is never used.",
+  "id": "studio:pivots",
+  "source": "studio",
+  "function": "pivots",
+  "defaults": {}
  },
  {
   "label": "Previous day, week or month",
@@ -11411,7 +11525,7 @@
   "id": "talib:AVGPRICE",
   "source": "talib",
   "function": "AVGPRICE",
-  "label": "Average Price",
+  "label": "Average price ((open + high + low + close) / 4)",
   "menu": [
    "Price levels",
    "Price types"
@@ -11432,7 +11546,7 @@
   "outputs": [
    "real"
   ],
-  "description": "Price Transform"
+  "description": "The mean of the bar's four prices: a smoother stand-in for the close, often fed to other indicators."
  },
  {
   "id": "talib:BBANDS",
@@ -12499,7 +12613,7 @@
   "id": "talib:FRACTAL",
   "source": "talib",
   "function": "FRACTAL",
-  "label": "Williams Fractal",
+  "label": "Williams fractal (a swing high or low, marked once confirmed)",
   "menu": [
    "Price levels",
    "Swing points"
@@ -12526,7 +12640,7 @@
    "swinghigh",
    "swinglow"
   ],
-  "description": "Momentum Indicators"
+  "description": "100 on the bar that confirms a swing: a high above the leftbars bars before it and the rightbars bars after it (a low below them, for swinglow). The mark comes rightbars bars after the swing itself, when it is known; 0 elsewhere."
  },
  {
   "id": "talib:FRAMA",
@@ -12560,7 +12674,7 @@
   "id": "talib:HA",
   "source": "talib",
   "function": "HA",
-  "label": "Heikin-Ashi Candles",
+  "label": "Heikin-Ashi candles (smoothed open, high, low, close)",
   "menu": [
    "Price levels",
    "Price types"
@@ -12584,7 +12698,7 @@
    "halow",
    "haclose"
   ],
-  "description": "Price Transform"
+  "description": "Heikin-Ashi bars: close = (open + high + low + close) / 4; open = halfway between the previous Heikin-Ashi open and close; high and low also take in those two. They smooth a trend into runs of one colour. ⚠️ They are not prices you could trade at: compare them with each other, not with the real prices."
  },
  {
   "id": "talib:HMA",
@@ -13717,7 +13831,7 @@
   "id": "talib:MAX",
   "source": "talib",
   "function": "MAX",
-  "label": "Highest value over a specified period",
+  "label": "Highest over n bars (this bar included)",
   "menu": [
    "Price levels",
    "Highs and lows over n bars"
@@ -13737,13 +13851,13 @@
   "outputs": [
    "real"
   ],
-  "description": "Math Operators"
+  "description": "The highest value of its input over the last timeperiod bars, the current one included. Apply it to high for the highest high. For a breakout above the bars before, compare with it 1 bar ago, or use Highest high and lowest low over n bars, which can leave the current bar out."
  },
  {
   "id": "talib:MAXINDEX",
   "source": "talib",
   "function": "MAXINDEX",
-  "label": "Index of highest value over a specified period",
+  "label": "Bar number of the highest over n bars",
   "menu": [
    "Price levels",
    "Highs and lows over n bars"
@@ -13763,7 +13877,7 @@
   "outputs": [
    "integer"
   ],
-  "description": "Math Operators"
+  "description": "The position, counted from the first bar of the data, of the highest value in the last timeperiod bars. To ask how many bars ago the high was, use Highest high and lowest low over n bars (its bars_since_high output)."
  },
  {
   "id": "talib:MCGD",
@@ -13795,7 +13909,7 @@
   "id": "talib:MEDIAN",
   "source": "talib",
   "function": "MEDIAN",
-  "label": "Rolling Median",
+  "label": "Median over n bars",
   "menu": [
    "Statistical",
    "Spread and distribution"
@@ -13815,13 +13929,13 @@
   "outputs": [
    "real"
   ],
-  "description": "Statistic Functions"
+  "description": "The middle value of its input over the last timeperiod bars: half were above it, half below. Less pulled about by one wild bar than a moving average."
  },
  {
   "id": "talib:MEDPRICE",
   "source": "talib",
   "function": "MEDPRICE",
-  "label": "Median Price",
+  "label": "Median price ((high + low) / 2)",
   "menu": [
    "Price levels",
    "Price types"
@@ -13838,7 +13952,7 @@
   "outputs": [
    "real"
   ],
-  "description": "Price Transform"
+  "description": "The middle of the bar's range, halfway between its high and low. Not a median over many bars: that is Median, under Statistical."
  },
  {
   "id": "talib:MFI",
@@ -13930,7 +14044,7 @@
   "id": "talib:MIN",
   "source": "talib",
   "function": "MIN",
-  "label": "Lowest value over a specified period",
+  "label": "Lowest over n bars (this bar included)",
   "menu": [
    "Price levels",
    "Highs and lows over n bars"
@@ -13950,13 +14064,13 @@
   "outputs": [
    "real"
   ],
-  "description": "Math Operators"
+  "description": "The lowest value of its input over the last timeperiod bars, the current one included. Apply it to low for the lowest low. For a break below the bars before, compare with it 1 bar ago, or use Highest high and lowest low over n bars, which can leave the current bar out."
  },
  {
   "id": "talib:MININDEX",
   "source": "talib",
   "function": "MININDEX",
-  "label": "Index of lowest value over a specified period",
+  "label": "Bar number of the lowest over n bars",
   "menu": [
    "Price levels",
    "Highs and lows over n bars"
@@ -13976,13 +14090,13 @@
   "outputs": [
    "integer"
   ],
-  "description": "Math Operators"
+  "description": "The position, counted from the first bar of the data, of the lowest value in the last timeperiod bars. To ask how many bars ago the low was, use Highest high and lowest low over n bars (its bars_since_low output)."
  },
  {
   "id": "talib:MINMAX",
   "source": "talib",
   "function": "MINMAX",
-  "label": "Lowest and highest values over a specified period",
+  "label": "Lowest and highest over n bars (this bar included)",
   "menu": [
    "Price levels",
    "Highs and lows over n bars"
@@ -14003,13 +14117,13 @@
    "min",
    "max"
   ],
-  "description": "Math Operators"
+  "description": "Both of Lowest over n bars and Highest over n bars, from one input: min and max."
  },
  {
   "id": "talib:MINMAXINDEX",
   "source": "talib",
   "function": "MINMAXINDEX",
-  "label": "Indexes of lowest and highest values over a specified period",
+  "label": "Bar numbers of the lowest and highest over n bars",
   "menu": [
    "Price levels",
    "Highs and lows over n bars"
@@ -14030,7 +14144,7 @@
    "minidx",
    "maxidx"
   ],
-  "description": "Math Operators"
+  "description": "Both of the bar-number entries above, from one input."
  },
  {
   "id": "talib:MINUS_DI",
@@ -15894,7 +16008,7 @@
   "id": "talib:TYPPRICE",
   "source": "talib",
   "function": "TYPPRICE",
-  "label": "Typical Price",
+  "label": "Typical price ((high + low + close) / 3)",
   "menu": [
    "Price levels",
    "Price types"
@@ -15913,7 +16027,7 @@
   "outputs": [
    "real"
   ],
-  "description": "Price Transform"
+  "description": "The average of the high, the low and the close: the price CCI and MFI are built on, and the pivot of a floor-trader pivot."
  },
  {
   "id": "talib:ULTOSC",
@@ -16193,7 +16307,7 @@
   "id": "talib:WCLPRICE",
   "source": "talib",
   "function": "WCLPRICE",
-  "label": "Weighted Close Price",
+  "label": "Weighted close ((high + low + 2 x close) / 4)",
   "menu": [
    "Price levels",
    "Price types"
@@ -16212,7 +16326,7 @@
   "outputs": [
    "real"
   ],
-  "description": "Price Transform"
+  "description": "The typical price with the close counted twice, so it leans towards where the bar closed."
  },
  {
   "id": "talib:WILLR",
@@ -16274,7 +16388,7 @@
   "id": "talib:ZIGZAG",
   "source": "talib",
   "function": "ZIGZAG",
-  "label": "Zig Zag",
+  "label": "Zig zag (the latest swing of at least a set size)",
   "menu": [
    "Price levels",
    "Swing points"
@@ -16302,7 +16416,7 @@
    "trend",
    "pivotidx"
   ],
-  "description": "Overlap Studies"
+  "description": "Follows swings at least as large as its sensitivity setting. zigzag is the price of the latest swing high or low, which moves while that swing is still extending; trend is its direction (1 up, -1 down); pivotidx is its bar number, counted from the first bar of the data."
  },
  {
   "id": "talib:ZLEMA",

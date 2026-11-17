@@ -317,6 +317,39 @@ def extract_results(run, benchmark=False):
     return results
 
 
+# What to change in the Studio for each warning vectorbtX gives, by a phrase the warning
+# contains. vectorbtX names its own arguments (raise_reject=, leverage=), which the Studio
+# sets on its own pages or not at all, so its advice alone leaves a Studio user stuck.
+# ⚠️ Matched on vectorbtX's wording: tests/test_engine.py checks the first two against a
+# real run, so a reworded warning fails a test instead of losing its hint.
+WARNING_HINTS = {
+    "funded buying power": "In the Studio: the Build page's Risk tab shows the largest trade against what the "
+                           "account funds (cash times leverage). Raise the leverage there, lower the risk or the "
+                           "amount, or widen the stop. To skip such trades instead of cutting them down, choose "
+                           "Skip the trade under 'When a trade is bigger than the account can fund'.",
+    "minimum tradeable size": "In the Studio: raise the risk or the amount on the Build page's Risk tab, tighten the "
+                              "stop, or set min_size in the instrument grid (Setup tab) to your broker's.",
+    "borrowed the securities for free": "In the Studio: set borrow_rate in the instrument grid (Build page, Setup "
+                                        "tab), or 0 if the borrow really is free.",
+    "Carry skipped": "In the Studio: name both base_currency and quote_currency in the instrument grid (Build page, "
+                     "Setup tab).",
+    "default maximum": "In the Studio: the leverage is set on the Build page's Risk tab.",
+    "do not bracket close": "In the Studio: the Data page's check on import lists the bars whose high or low is "
+                            "inside the open or close.",
+    "pip convention": "In the Studio: set point_size in the instrument grid (Build page, Setup tab).",
+    "have no FX rate": "In the Studio: store the FX dataset over the whole backtest period (Data page).",
+}
+
+
+def warning_hints(notes):
+    """[(vectorbtX's warning, the Studio's hint or None)] for the Backtest page."""
+    out = []
+    for note in notes:
+        hint = next((text for phrase, text in WARNING_HINTS.items() if phrase in note), None)
+        out.append((note, hint))
+    return out
+
+
 def save_run(data_dir, results, spec, settings, fingerprint):
     """Write results under runs/<run_id>/ and index them. Returns the run folder."""
     stamp = datetime.now(timezone.utc)
