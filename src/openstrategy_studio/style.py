@@ -38,7 +38,9 @@ from . import config
 # Streamlit needs a real file path for --theme.base, so this is the folder on disk
 # (package data, collected by hatch and by the PyInstaller spec's collect_all).
 PACKAGED = Path(__file__).with_name("themes")
-DEFAULT_THEME = "daylight"
+# Midnight, a dark page, since 20 November 2026 (the owner's call: a dark background with bright
+# foreground colours makes the sections and their hierarchy easier to tell apart).
+DEFAULT_THEME = "midnight"
 # The theme file the running server was started with (set by cli.run_app).
 ACTIVE_ENV = "OPENSTRATEGY_STUDIO_PAGE_THEME"
 
@@ -208,6 +210,15 @@ def load_theme(path):
     studio.setdefault("glow", "none")                            # the page background's decoration
     studio.setdefault("positive", "#4ADE80" if dark else "#16A34A")
     studio.setdefault("negative", "#F87171" if dark else "#DC2626")
+    # The section tones: each part of a strategy has its own colour, worn by its cards (a left bar,
+    # a tint and the title), so the Build page's sections and their nesting read at a glance. Entry
+    # rules are the gains colour, exit rules the losses colour.
+    studio.setdefault("tone_setup", theme["primaryColor"])
+    studio.setdefault("tone_feature", studio["accent"])
+    studio.setdefault("tone_entry", studio["positive"])
+    studio.setdefault("tone_exit", studio["negative"])
+    studio.setdefault("tone_risk", "#FBBF24" if dark else "#D97706")
+    studio.setdefault("tone_account", "#C084FC" if dark else "#7C3AED")
     studio.setdefault("chart_theme", "page")                     # "page": drawn from these colours (analysis)
     studio.setdefault("css", "")                                 # extra rules, after the stylesheet
     return {"name": path.stem, "path": path, "theme": theme, "studio": studio}
@@ -235,6 +246,15 @@ def css_variables(theme):
         "--os-glow": studio["glow"],
         "--os-positive": studio["positive"],
         "--os-negative": studio["negative"],
+        # The tone in force: each card sets it from one of the tones below (studio.css), and
+        # anything outside a card falls back to the primary colour.
+        "--os-tone": table["primaryColor"],
+        "--os-tone-setup": studio["tone_setup"],
+        "--os-tone-feature": studio["tone_feature"],
+        "--os-tone-entry": studio["tone_entry"],
+        "--os-tone-exit": studio["tone_exit"],
+        "--os-tone-risk": studio["tone_risk"],
+        "--os-tone-account": studio["tone_account"],
         # Fonts for the Studio's own HTML (the At a glance panel); Streamlit sets its own.
         "--os-heading-font": table.get("headingFont", table.get("font", "sans-serif")),
         "--os-code-font": table.get("codeFont", "monospace"),

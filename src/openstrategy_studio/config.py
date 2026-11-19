@@ -20,7 +20,7 @@ VECTORBTX_KEYS = ["rounding", "financing_markup", "carry_markup", "fx_markup", "
 
 DEFAULTS = {
     "data_dir": "",                 # blank: platformdirs.user_data_dir("openstrategy-studio")
-    "page_theme": "daylight",       # a file in themes/ or the user's themes folder (style.py); applies at start
+    "page_theme": "midnight",       # a file in themes/ or the user's themes folder (style.py); applies at start
     "default_theme": "page",        # the charts' theme; "page" follows the page theme (analysis.PAGE_THEME)
     "workers": max(1, (os.cpu_count() or 2) - 1),
     "offline": False,

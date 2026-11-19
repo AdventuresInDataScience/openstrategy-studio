@@ -195,8 +195,9 @@ def test_settings_page_offers_the_themes(home):
     picker = next(box for box in app.selectbox if box.label == "Page theme")
     assert set(picker.options) >= {"Daylight", "Midnight", "Paper", "Nord", "Terminal"}
     assert not any("restart the Studio" in item.value for item in app.info)
-    picker.set_value("midnight").run()
+    # Midnight is the default, so picking Daylight is the change that needs a restart.
+    picker.set_value("daylight").run()
     assert any("restart the Studio" in item.value for item in app.info)
     next(button for button in app.button if button.label == "Make an editable copy").click().run()
     assert not app.exception, [item.value for item in app.exception]
-    assert (style.user_themes_dir() / "midnight_copy.toml").exists()
+    assert (style.user_themes_dir() / "daylight_copy.toml").exists()

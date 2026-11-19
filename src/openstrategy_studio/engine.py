@@ -310,6 +310,94 @@ def usual_leverage(mode, asset_class=None, kind="signals"):
     return float(max_leverage(mode, asset_class or mode_defaults(mode).get("asset_class")))
 
 
+# The currency a ticker's market quotes in, by Yahoo's exchange suffix: the Studio's usual
+# reading when a symbol is added, which the grid shows and the user can change. ⚠️ A guess
+# from the name, not from the data: a London ETF quoted in dollars ends in .L too.
+TICKER_SUFFIX_CURRENCY = {
+    ".L": "GBp", ".IL": "USD", ".DE": "EUR", ".F": "EUR", ".PA": "EUR", ".AS": "EUR", ".MI": "EUR", ".MC": "EUR",
+    ".BR": "EUR", ".LS": "EUR", ".VI": "EUR", ".HE": "EUR", ".IR": "EUR", ".SW": "CHF", ".TO": "CAD", ".V": "CAD",
+    ".AX": "AUD", ".NZ": "NZD", ".T": "JPY", ".HK": "HKD", ".SI": "SGD", ".KS": "KRW", ".NS": "INR", ".BO": "INR",
+    ".ST": "SEK", ".OL": "NOK", ".CO": "DKK", ".SA": "BRL", ".MX": "MXN",
+}
+# Yahoo's index tickers (^...) outside the US, by the currency their points are worth.
+INDEX_CURRENCY = {"^FTSE": "GBP", "^FTMC": "GBP", "^GDAXI": "EUR", "^FCHI": "EUR", "^STOXX50E": "EUR",
+                  "^AEX": "EUR", "^IBEX": "EUR", "^N225": "JPY", "^HSI": "HKD", "^AXJO": "AUD", "^GSPTSE": "CAD",
+                  "^SSMI": "CHF"}
+
+
+def usual_market(ticker):
+    """{"asset_class", "quote_currency", "base_currency"} read from a ticker by Yahoo's conventions.
+
+    EURUSD=X is an FX pair (EUR against USD); JPY=X is Yahoo's dollar against the yen; ^FTSE an
+    index in pounds; GC=F a future (a commodity), in dollars; VOD.L a share in pence. Anything
+    else is a share in dollars. Only what the ticker says: the asset class is left out when it
+    does not say (a plain share is the mode's default, stocks).
+    """
+    ticker = str(ticker or "").upper()
+    if ticker.endswith("=X"):
+        pair = ticker[:-2]
+        if len(pair) == 6 and pair.isalpha():
+            return {"asset_class": "fx", "base_currency": pair[:3], "quote_currency": pair[3:]}
+        if len(pair) == 3 and pair.isalpha():
+            return {"asset_class": "fx", "base_currency": "USD", "quote_currency": pair}
+    if ticker.startswith("^"):
+        return {"asset_class": "index", "quote_currency": INDEX_CURRENCY.get(ticker, "USD")}
+    if ticker.endswith("=F"):
+        return {"asset_class": "commodities", "quote_currency": "USD"}
+    if "-" in ticker and ticker.rsplit("-", 1)[1] in ("USD", "EUR", "GBP"):
+        return {"quote_currency": ticker.rsplit("-", 1)[1]}           # a crypto pair such as BTC-USD
+    for suffix, currency in TICKER_SUFFIX_CURRENCY.items():
+        if ticker.endswith(suffix):
+            return {"quote_currency": currency}
+    return {"quote_currency": "USD"}
+
+
+def usual_instrument(mode, kind="signals", ticker=None, given=None):
+    """Every instrument field the Build page's grid shows for `mode`, at its usual value.
+
+    What a new symbol starts with, and what a cell follows when the way of trading changes (the
+    owner's call, 20 November 2026: no blank cells, even where the value is 0 or false). The
+    market (asset class and currencies) comes from `given` (the instrument's own fields) where
+    it names them, else from the ticker (usual_market); the rest from the market and the mode:
+    the usual leverage and point size (usual_leverage, usual_point_size), a contract of 100,000
+    units (a standard lot) on FX CFDs and FX spot and 1 on other CFDs, vectorbtX's mode defaults
+    for sizes, the price field, commission and the spread, no other costs, and floor rounding.
+    Each value is what vectorbtX would use for a blank, apart from the market, which a blank
+    leaves unknown.
+
+    ⚠️ No borrow_rate: no rate is published, and a blank one makes the run say the short was
+    borrowed for free, which is the point (CLAUDE.md, "The borrow fee follows how a thing is
+    traded").
+    """
+    given = given or {}
+    market = usual_market(ticker)
+    defaults = mode_defaults(mode)
+    rejected = set(mode_rules(mode)["rejected"])
+    asset_class = given.get("asset_class") or market.get("asset_class") or defaults.get("asset_class")
+    if mode == "fx_spot":
+        asset_class = "fx"
+    quote = given.get("quote_currency") or market.get("quote_currency")
+    out = {"asset_class": asset_class, "quote_currency": quote,
+           "leverage": usual_leverage(mode, asset_class, kind),
+           "point_size": usual_point_size(mode, asset_class, quote),
+           "increment": defaults.get("increment"), "min_size": defaults.get("min_size"),
+           "allow_fractional": bool(defaults.get("allow_fractional")),
+           "cost_currency": given.get("cost_currency") or quote,
+           "commission_pct": defaults.get("commission_pct") or 0.0,
+           "commission_flat": defaults.get("commission_flat") or 0.0,
+           "commission_per_unit": 0.0, "commission_min": 0.0,
+           "spread_points": defaults.get("spread_points"), "slippage": 0.0,
+           "rounding": "floor", "leverage_type": "instrument_level",
+           "price_field": defaults.get("price_field")}
+    if asset_class == "fx":
+        out["base_currency"] = given.get("base_currency") or market.get("base_currency")
+    if mode in ("cfd", "fx_spot"):
+        out["contract_size"] = 100000.0 if asset_class == "fx" else 1.0
+    # Only the fields this way of trading takes (base_currency stays on an FX pair: carry needs it).
+    return {name: value for name, value in out.items()
+            if value is not None and (name not in rejected or (name == "base_currency" and asset_class == "fx"))}
+
+
 def point_meaning(spec, data_dir=None):
     """{symbol: what one point is for it, in its market's words}: "1 cent (0.01)", "1 pip (0.0001)".
 

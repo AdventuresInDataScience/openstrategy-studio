@@ -27,10 +27,10 @@ from pathlib import Path
 import streamlit as st
 
 from . import config, data as data_module, indicators, style
-from .expressions import (LOGIC_WORDS, append_letter, condition_name_problem, condition_text, next_letter, parse_logic,
-                          remove_letter, summary)
+from .expressions import (LOGIC_WORDS, append_letter, condition_name_problem, condition_text, next_condition_name,
+                          next_letter, parse_logic, remove_letter, summary)
 from .spec import (COMPARISON_OPS, HIGHER_TIMEFRAMES, PATTERN_SIDES, PRICE_FIELDS, TIMEFRAME_MINUTES, TIMING_KEYS,
-                   default_spec, default_variable, feature_name_problem, get_path, is_choice, rename_condition,
+                   default_spec, feature_name_problem, get_path, is_choice, rename_condition,
                    rename_feature, set_path, tunable_inputs)
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -258,6 +258,81 @@ def glance(spec, problems):
     st.html(f'<div class="os-glance"><div class="os-glance-title">At a glance</div>{"".join(rows)}{status}</div>')
 
 
+# ---------------------------------------------------------------------------
+# Cards and sections: the Build page's hierarchy, drawn by themes/studio.css
+# ---------------------------------------------------------------------------
+# A page sets no colour of its own: it names a tone (a part of the strategy) and the
+# stylesheet colours the card from the page theme's tone_* tokens.
+TONES = ["setup", "feature", "entry", "exit", "risk", "account", "add"]
+
+
+def _css_name(name):
+    """A key fragment the stylesheet's attribute selectors can match: no spaces or dots."""
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", str(name))
+
+
+def card(name, tone):
+    """A card in a section's tone: a keyed container (os-card-<tone>-<name>) that studio.css draws."""
+    return st.container(key=f"os-card-{tone}-{_css_name(name)}")
+
+
+def sub_card(name):
+    """A card inside a card (a condition inside a rule): it keeps its parent's tone."""
+    return st.container(key=f"os-sub-{_css_name(name)}")
+
+
+def heading(text, tone=None, help=None):
+    """A small heading inside a tab, in a section's tone, with an optional ⓘ."""
+    tone_class = f" os-tone-{tone}" if tone else ""
+    st.markdown(f'<div class="os-heading{tone_class}">{html.escape(text)}</div>', unsafe_allow_html=True, help=help)
+
+
+def section(title, tone, name, expanded=True, icon=None):
+    """A collapsible section in a tone: an expander keyed os-exp-<tone>-<name>, which keeps its
+    own open or closed state across reruns."""
+    return st.expander(title, expanded=expanded, key=f"os-exp-{tone}-{_css_name(name)}", icon=icon)
+
+
+def card_header(name, title, meta="", code="", off="", help=None):
+    """A card's title row: the title in the card's tone, then details, and room for buttons.
+
+    Returns the row (a horizontal container), so the caller adds its icon buttons to it,
+    on the same line as the title (the owner's call: a delete is a bin on the title, not a
+    button in the box). `meta` is muted text, `code` a formula in a chip, `off` an italic
+    note such as "not used".
+    """
+    row = st.container(horizontal=True, vertical_alignment="center", gap="small", key=f"os-head-{_css_name(name)}")
+    text = f'<span class="os-title">{html.escape(title)}</span>'
+    if meta:
+        text += f'<span class="os-meta">{html.escape(meta)}</span>'
+    if code:
+        text += f'<span class="os-code">{html.escape(code)}</span>'
+    if off:
+        text += f'<span class="os-off">{html.escape(off)}</span>'
+    row.markdown(text, unsafe_allow_html=True, help=help, width="stretch")
+    return row
+
+
+def is_open(path, default=False):
+    """Whether a card's body is shown. Kept per session by path; a card never toggled is `default`."""
+    return st.session_state.setdefault("panels", {}).get(path, default)
+
+
+def open_panel(path, opened=True):
+    """Have a card open (or closed) the next time it is drawn: a new or renamed feature or condition."""
+    st.session_state.setdefault("panels", {})[path] = opened
+
+
+def open_button(row, path, default, key_, what):
+    """The edit / close button on a card's title row. A callback, so the icon and the body
+    agree on the run the click starts."""
+    opened = is_open(path, default)
+    row.button("", key=key_, type="tertiary", icon=":material/expand_less:" if opened else ":material/edit:",
+               help=f"Hide {what}" if opened else f"Show and edit {what}",
+               on_click=open_panel, args=(path, not opened))
+    return opened
+
+
 def chart_theme_options():
     """(chart theme names, {name: label}) in the selector's groups, for the pickers and Settings."""
     from . import analysis
@@ -431,7 +506,19 @@ def ref_input(path, features, label, allow_const=True, help=None):
 # ---------------------------------------------------------------------------
 
 def feature_picker(features):
-    """Add a feature: category, then family, then the indicator or pattern, with its outputs shown first."""
+    """Add a feature: category, then family, then the indicator or pattern, with its outputs shown first.
+
+    Drawn as the dashed "add" card under the features, so the entry it describes reads as
+    something to add, not as a feature already there. The feature it adds opens at once,
+    just above, with every setting showing.
+    """
+    with card("feature-picker", "add"):
+        card_header("feature-picker", "Add a feature",
+                    meta="indicators, patterns, levels and transforms, each computed on every bar")
+        _feature_picker_body(features)
+
+
+def _feature_picker_body(features):
     menu = indicators.menu()
     columns = st.columns(3)
     # Plain keys, not spec-bound: the picker remembers where you were between adds.
@@ -449,43 +536,82 @@ def feature_picker(features):
                                   help="The one to add. Its description, outputs and the prices it reads show "
                                        "below; its settings can be changed once it is added.")
     item = indicators.entry(picked)
-    with st.container(border=True):
-        st.markdown(f"**{item['label']}**  \n" + (item.get("description") or "")[:400])
-        # Its settings and their defaults, so "over n bars" shows its n before it is added;
-        # each can be changed on the feature's card once added.
-        settings = []
-        for name, declaration in item["params"].items():
-            if declaration["type"] == "code":
-                continue
-            default = declaration.get("default")
-            settings.append(f"{name} {'(library default)' if default is None else default}")
-        reads = [f"{name} (default {item['defaults'].get(name) or 'close'})" for name in item["inputs"]]
-        st.caption("Outputs: " + ", ".join(item["outputs"])
-                   + (f"  ·  reads: {', '.join(reads)}" if reads else "")
-                   + (f"  ·  settings: {', '.join(settings)}" if settings else "  ·  no settings"))
-        stem = re.sub(r"[^a-z0-9]+", "_", item["function"].split(":")[-1].lower()).strip("_") or "feature"
-        if not stem[0].isalpha():
-            stem = "f_" + stem
-        suggestion, number = stem, 2
-        while suggestion in features:
-            suggestion, number = f"{stem}_{number}", number + 1
-        left, right = st.columns([3, 1])
-        # Keyed on the suggestion too, so it moves on (sma, sma_2 ...) once a name is taken.
-        name = left.text_input("Name it", value=suggestion, key=f"pick:name:{picked}:{suggestion}",
-                               help="How the rules refer to it, such as fast or rsi. Letters, digits and "
-                                    "underscores, starting with a letter.")
-        right.write("")
-        if right.button("Add feature", type="primary", key="pick:add"):
-            problem = feature_name_problem(name, set(features))
-            if problem:
-                st.error(problem)
-            else:
-                rerun_after(lambda: features.__setitem__(name, indicators.new_feature(picked)))
+    # What it is, in the add card itself: its description, what it reads, its settings with their
+    # defaults (so "over n bars" shows its n before it is added) and its outputs.
+    st.markdown(f"**{item['label']}** · " + (item.get("description") or "")[:400])
+    settings = []
+    for name, declaration in item["params"].items():
+        if declaration["type"] == "code":
+            continue
+        default = declaration.get("default")
+        settings.append(f"{name} {'(library default)' if default is None else default}")
+    reads = [f"{name} (default {item['defaults'].get(name) or 'close'})" for name in item["inputs"]]
+    st.caption("Outputs: " + ", ".join(item["outputs"])
+               + (f"  ·  reads: {', '.join(reads)}" if reads else "")
+               + (f"  ·  settings: {', '.join(settings)}" if settings else "  ·  no settings"))
+    stem = re.sub(r"[^a-z0-9]+", "_", item["function"].split(":")[-1].lower()).strip("_") or "feature"
+    if not stem[0].isalpha():
+        stem = "f_" + stem
+    suggestion, number = stem, 2
+    while suggestion in features:
+        suggestion, number = f"{stem}_{number}", number + 1
+    left, right = st.columns([3, 1], vertical_alignment="bottom")
+    # Keyed on the suggestion too, so it moves on (sma, sma_2 ...) once a name is taken.
+    name = left.text_input("Name it", value=suggestion, key=f"pick:name:{picked}:{suggestion}",
+                           help="How the rules refer to it, such as fast or rsi. Letters, digits and "
+                                "underscores, starting with a letter.")
+    if right.button("Add feature", type="primary", key="pick:add", icon=":material/add:", width="stretch"):
+        problem = feature_name_problem(name, set(features))
+        if problem:
+            st.error(problem)
+        else:
+            def add():
+                features[name] = indicators.new_feature(picked)
+                # It opens with every setting showing, so they are set where it was added.
+                open_panel(f"features.{name}")
+            rerun_after(add)
+
+
+def feature_card(name, feature, features):
+    """One feature as a card: its name, type and formula on the title row with an edit and a bin
+    button there, and its settings below while it is open.
+
+    Returns the formula it showed (indicators.describe), so the page can redraw once when an
+    edit inside changed it (the title is drawn before the settings write back).
+    """
+    item = indicators.catalogue().get(feature.get("indicator"))
+    described = indicators.describe(feature)
+    path = f"features.{name}"
+    with card(f"feature-{name}", "feature"):
+        row = card_header(f"feature-{name}", name, meta=item["label"] if item else str(feature.get("indicator")),
+                          code=described)
+        opened = open_button(row, path, False, key(path, ":open"), "its settings")
+        row.button("", key=key(path, ":delete"), type="tertiary", icon=":material/delete:",
+                   help=f"Delete {name}. Rules and features that read it will say so until they are changed.",
+                   on_click=_delete_feature, args=(features, name))
+        if opened:
+            feature_editor(name, feature, features)
+    return described
+
+
+def _delete_feature(features, name):
+    """The bin on a feature's card (a callback, so the page redraws without it at once)."""
+    features.pop(name, None)
+    prune_variables()            # its settings leave the Optimise page with it
+    save_draft()
+    renew_widgets()
 
 
 def feature_editor(name, feature, features):
-    """One feature's name, inputs and settings, its outputs, and a delete button."""
-    typed = st.columns([1, 2])[0].text_input(
+    """One feature's name, inputs and settings, and its outputs (inside its card).
+
+    Its description first, then one grid: the name, what it is applied to, then its settings.
+    """
+    item = indicators.catalogue().get(feature.get("indicator"))
+    if item is not None and item.get("description"):
+        st.caption(item["description"][:300])
+    columns = st.columns(3)
+    typed = columns[0].text_input(
         "Name", value=name, key=key(f"features.{name}", ":name"),
         help="How the rules and other features refer to it, such as fast or rsi: letters, digits and underscores, "
              "starting with a letter. Renaming it renames every use too: the rules, features that read it, the "
@@ -498,20 +624,18 @@ def feature_editor(name, feature, features):
         else:
             def rename():
                 rename_feature(current(), name, typed.strip())
-                # Its panel is keyed by name, so it would come back closed: the Build page opens it.
-                st.session_state["renamed_feature"] = typed.strip()
+                # Its card's open state is kept by name: it stays open under the new one.
+                open_panel(f"features.{typed.strip()}")
             # A structural change: every widget key under the old name must be renewed.
             rerun_after(rename)
-    item = indicators.catalogue().get(feature.get("indicator"))
     if item is None:
         st.error(f"{name} uses an unknown indicator ({feature.get('indicator')}). Delete it and add it again.")
     else:
         if item["id"] == "studio:python":
             st.warning("Python code runs on your machine. Only use code you trust.")
-        if item.get("description"):
-            st.caption(item["description"][:300])
-        columns = st.columns(3)
-        for index, input_name in enumerate(item["inputs"]):
+        # The inputs follow the name in the same row (and wrap under it), so a one-input feature
+        # shows its name and what it is applied to side by side.
+        for index, input_name in enumerate(item["inputs"], start=1):
             with columns[index % 3]:
                 input_select(f"features.{name}.inputs.{input_name}", features, name,
                              "Applied to" if len(item["inputs"]) == 1 else f"Input: {input_name}")
@@ -539,12 +663,10 @@ def feature_editor(name, feature, features):
                     found = current().setdefault("optimise", {}).setdefault("variables", {})
                     found.setdefault(f"features.{name}.params.matype", {"values": tries})
                 rerun_after(swap)
-    if st.button("Delete feature", key=key(f"features.{name}", ":delete")):
-        rerun_after(lambda: features.pop(name))
 
 
 # ---------------------------------------------------------------------------
-# Rules: lettered conditions and a logic line
+# Rules: named conditions and a logic line
 # ---------------------------------------------------------------------------
 
 # The kinds a condition can be, in the Kind list of every rule (exits included: see compile_signals).
@@ -588,12 +710,9 @@ def new_condition(kind, features, timeframe="1d"):
 
 
 def new_rule(features):
-    return {"conditions": {"A": new_condition("comparison", features)}, "logic": "A"}
-
-
-def open_panel(path):
-    """Have a condition's panel open the next time it is drawn (a new or renamed condition)."""
-    st.session_state.setdefault("open_panels", set()).add(path)
+    """A rule with one condition comparing two lines, named condition1."""
+    name = next_condition_name(set())
+    return {"conditions": {name: new_condition("comparison", features)}, "logic": name}
 
 
 def _pattern_condition(path, node, features):
@@ -745,17 +864,24 @@ def _timing_input(path, node, higher=False):
 
 
 def condition_editor(path, name, node, features, timeframe, on_remove, on_rename):
-    """One named condition in its own panel: its name, kind, settings, timing and a remove button.
+    """One named condition as a card inside its rule: its name and what it says on the title row,
+    with an edit and a bin button there, and its kind, settings and timing while it is open.
 
-    The panel's title is the condition in words, so a closed panel still says what it does.
-    It is keyed by path, not by revision, so it stays open or closed across edits; a new or
+    The title is the condition in words, so a closed card still says what it does. A new or
     renamed one opens (open_panel). on_rename(new) renames it (and reruns), or returns why it
     cannot.
     """
     kind = condition_kind(node)
-    opened = path in st.session_state.get("open_panels", set())
-    with st.expander(f"{name} · {condition_text(node)}", expanded=opened, key=f"condition-panel:{path}"):
-        head = st.columns([2, 4, 2], vertical_alignment="bottom")
+    with sub_card(f"condition-{path}"):
+        row = card_header(f"condition-{path}", name, code=condition_text(node))
+        opened = open_button(row, path, False, key(path, ":open"), "its settings")
+        row.button("", key=key(path, ":remove"), type="tertiary", icon=":material/delete:", on_click=on_remove,
+                   help="Delete this condition: its name leaves the logic line, and its values leave the Optimise "
+                        "page.")
+        if not opened:
+            _optimised_note(path)
+            return
+        head = st.columns([2, 4], vertical_alignment="bottom")
         typed = head[0].text_input("Name", value=name, key=key(path, ":name"),
                                    help="What the logic line calls this condition, such as trend or rsi_low: "
                                         "letters, digits and underscores, starting with a letter. Renaming it "
@@ -766,9 +892,6 @@ def condition_editor(path, name, node, features, timeframe, on_remove, on_rename
                                    help="Compare two lines (fast crosses above slow), a pattern appearing, the day, "
                                         "month or time of day, or a comparison on a higher timeframe (the weekly "
                                         "close above its open). Every rule takes every kind.")
-        head[2].button("Delete condition", key=key(path, ":remove"), on_click=on_remove,
-                       help="Removes this condition, takes its name out of the logic line, and takes its values "
-                            "off the Optimise page.")
         if typed.strip() != name:
             # A refused name stays in the box with the reason under it, as a broken logic line does.
             st.error(on_rename(typed.strip()))
@@ -788,61 +911,33 @@ def condition_editor(path, name, node, features, timeframe, on_remove, on_rename
             _comparison_condition(path, node, features)
         if kind != "calendar":
             _timing_input(path, _get(path, node), higher=kind == "higher")
-        _optimise_picker(path)
+        _optimised_note(path)
 
 
-def _optimise_picker(path):
-    """Which of one condition's values the optimiser searches, picked where the condition is built.
+def _optimised_note(path):
+    """Which of a condition's values the optimiser searches, and over what: read-only.
 
-    The list is the condition's rows of tunable_inputs, so it offers exactly what the Optimise
-    page does: the comparison, each number, each side's bars ago (0 included), the timing's N,
-    the bars of rising and falling, a pattern's side, a higher timeframe. Picking one adds it
-    to optimise.variables with a starting range (spec.default_variable), as the Optimise
-    page's Add does; the range is changed there. Taking it out of the list removes it.
+    The Optimise page is the one place a value is added to the search or taken out of it (the
+    owner's call, 20 November 2026: a picker here as well made it unclear where the choice is
+    made). This only says what is searched, so it is in sight while the rule is built.
     """
     spec = current()
     rows = {row["path"]: row for row in tunable_inputs(spec) if row["path"].startswith(path + ".")}
-    if not rows:
-        return
     found = (spec.get("optimise") or {}).get("variables") or {}
-
-    def shown(row, value):
-        return (row.get("labels") or {}).get(value, value)
-
-    def label(item):
-        row = rows[item]
-        return f"{row['label'].rsplit(' › ', 1)[-1]} (now {shown(row, row['value'])})"
-
-    searched = [item for item in rows if item in found]
-    chosen = st.multiselect("Optimise", list(rows), default=searched, format_func=label, key=key(path, ":optimise"),
-                            placeholder="Nothing in this condition is searched",
-                            help="Let the optimiser search these values of the condition. Each is added to the "
-                                 "Optimise page with a starting range (half to double its value; a comparison "
-                                 "and its mirror; every side of a pattern), where its range or list is set. "
-                                 "Taking one out of this list stops the search on it.")
-    if set(chosen) != set(searched):
-        variables = spec.setdefault("optimise", {}).setdefault("variables", {})
-        for item, row in rows.items():
-            if item in chosen and item not in variables:
-                variables[item] = default_variable(row)
-            elif item not in chosen and item in variables:
-                del variables[item]
-        save_draft()
-        found = variables
-    # What each searched value will try, so the range is in sight without leaving the page.
     parts = []
-    for item in chosen:
-        variable, row = found.get(item) or {}, rows[item]
+    for item, row in rows.items():
+        variable = found.get(item)
+        if not variable:
+            continue
+        labels = row.get("labels") or {}
         if "values" in variable:
-            tries = ", ".join(str(shown(row, value)) for value in variable["values"])
-        elif "start" in variable:
+            tries = ", ".join(str(labels.get(value, value)) for value in variable["values"])
+        else:
             tries = f"{variable['start']:g} to {variable['stop']:g}" + (f" by {variable['step']:g}"
                                                                          if variable.get("step") else "")
-        else:
-            continue
-        parts.append(f"{row['label'].rsplit(' › ', 1)[-1]}: {tries}")
+        parts.append(f"{row['label'].rsplit(' › ', 1)[-1]} {tries}")
     if parts:
-        st.caption("Searched: " + "; ".join(parts) + ". Change the ranges on the Optimise page.")
+        st.caption(":material/tune: Optimised: " + "; ".join(parts) + ". Set on the Optimise page.")
 
 
 def _rule_body(path, rule, features, timeframe):
@@ -866,29 +961,16 @@ def _rule_body(path, rule, features, timeframe):
         described = condition_text(conditions[letter])
         condition_editor(f"{path}.conditions.{letter}", letter, conditions[letter], features, timeframe, remove,
                          rename)
-        # The panel's title is drawn before the settings inside write their new values, so after
+        # The card's title is drawn before the settings inside write their new values, so after
         # an edit it would show the old words until the next click: draw the page again, once
         # (the second pass finds them equal), as the Features tab does.
         if letter in conditions and condition_text(conditions[letter]) != described:
             st.rerun()
-    buttons = st.columns([2, 2, 4])
-    joiner = buttons[1].selectbox("Join new with", ["and", "or"], key=key(path, ":join"),
-                                  label_visibility="collapsed", format_func=lambda op: f"join with {op}")
-    if buttons[0].button("Add condition", key=key(path, ":add"),
-                         help="Adds a condition comparing two lines, named with the next free letter, and joins it "
-                              "to the logic line with the word on the right (and, or). Pick its kind in its Kind "
-                              "list: a comparison, a pattern, the day or time, or a higher timeframe. Edit the logic "
-                              "line for anything else."):
-        def add():
-            letter = next_letter(set(conditions))
-            conditions[letter] = new_condition("comparison", features, timeframe)
-            rule["logic"] = append_letter(rule.get("logic", ""), letter, joiner)
-            open_panel(f"{path}.conditions.{letter}")
-        rerun_after(add)
     logic = st.text_input("Logic", value=rule.get("logic", ""), key=key(path, ":logic"),
                           help="Combine the conditions by name with and, or, xor, nand, nor, xnor and not, using "
-                               "brackets: (A and (B or C)) and not D, or trend and not overbought. Names match "
-                               "exactly, capitals included. Brackets are needed wherever two different words meet.")
+                               "brackets: (condition1 and (condition2 or condition3)) and not condition4, or trend "
+                               "and not overbought. Names match exactly, capitals included. Brackets are needed "
+                               "wherever two different words meet.")
     if logic != rule.get("logic"):
         set_value(f"{path}.logic", logic)
     try:
@@ -898,16 +980,32 @@ def _rule_body(path, rule, features, timeframe):
     else:
         if isinstance(tree, dict) and "op" in tree:
             st.caption(f"Fires when {LOGIC_WORDS[tree['op']]} of its parts.")
+    buttons = st.container(horizontal=True, vertical_alignment="center", gap="small")
+    clicked = buttons.button("Add condition", key=key(path, ":add"), icon=":material/add:",
+                             help="Adds a condition comparing two lines, named condition1, condition2 and so on, and "
+                                  "joins it to the logic line with the word beside this button (and, or). Pick its "
+                                  "kind in its Kind list: a comparison, a pattern, the day or time, or a higher "
+                                  "timeframe. Edit the logic line for anything else.")
+    joiner = buttons.selectbox("Join new with", ["and", "or"], key=key(path, ":join"), label_visibility="collapsed",
+                               format_func=lambda op: f"joined with {op}", width=170)
+    if clicked:
+        def add():
+            name = next_condition_name(set(conditions))
+            conditions[name] = new_condition("comparison", features, timeframe)
+            rule["logic"] = append_letter(rule.get("logic", ""), name, joiner)
+            open_panel(f"{path}.conditions.{name}")
+        rerun_after(add)
 
 
 def rule_editor(path, features, timeframe):
-    """A rule slot: its conditions and logic line, or several versions the optimiser can choose between."""
+    """A rule slot's body: its conditions and logic line, or the version in use when the
+    optimiser can choose between versions."""
     node = _get(path, None)
     if node is None:
         return
     if is_choice(node):
         labels = list(node["options"])
-        top = st.columns([2, 2, 2])
+        top = st.columns([2, 2, 2], vertical_alignment="bottom")
         chosen = top[0].selectbox("Version in use", labels, index=labels.index(node["choose"]),
                                   key=key(path, ":choose"),
                                   help="The optimiser can choose between versions: add rules." + path.split(".")[-1]
@@ -936,10 +1034,66 @@ def rule_editor(path, features, timeframe):
         _rule_body(f"{path}.options.{chosen}", node["options"][chosen], features, timeframe)
         return
     _rule_body(path, node, features, timeframe)
-    if st.button("Make versions of this rule", key=key(path, ":versions"),
-                 help="Keep this rule as version a and add others; the optimiser (BUTChC or Optuna) can then choose "
-                      "between them."):
-        rerun_after(lambda: set_path(current(), path, {"choose": "a", "options": {"a": copy.deepcopy(node)}}))
+
+
+def rule_title(node):
+    """What a rule's title row says after its name: its logic line, or the version in use."""
+    if node is None:
+        return ""
+    if is_choice(node):
+        return f"version {node['choose']}: {node['options'][node['choose']].get('logic') or '?'}"
+    return node.get("logic") or "(no logic line)"
+
+
+def rule_card(slot, label, features, timeframe, help_text):
+    """One rule slot as a card in its tone (entries green, exits red): its name and logic line on
+    the title row, with an edit, a versions and a bin button there, and its conditions below.
+
+    A slot with no rule is one line, with a button to add one. Returns the title it showed, so
+    the page can redraw once when the logic line inside changed it.
+    """
+    rules = current().setdefault("rules", {})
+    node = rules.get(slot)
+    path = f"rules.{slot}"
+    tone = "entry" if slot.endswith("entry") else "exit"
+    with card(f"rule-{slot}", tone):
+        if node is None:
+            row = card_header(f"rule-{slot}", label, off="not used", help=help_text)
+
+            def start():
+                rules[slot] = new_rule(features)
+                open_panel(f"{path}.conditions.{next(iter(rules[slot]['conditions']))}")
+                save_draft()
+                renew_widgets()
+            row.button(f"Add a {label.lower()} rule", key=key(path, ":add_rule"), icon=":material/add:",
+                       type="tertiary", on_click=start,
+                       help="Starts the rule with one condition, condition1, comparing two lines. Add more conditions "
+                            "and join them in its logic line.")
+            return ""
+        title = rule_title(node)
+        row = card_header(f"rule-{slot}", label, code=title, help=help_text)
+        opened = open_button(row, path, True, key(path, ":open"), "its conditions")
+        if not is_choice(node):
+            def versions():
+                set_path(current(), path, {"choose": "a", "options": {"a": copy.deepcopy(node)}})
+                save_draft()
+                renew_widgets()
+            row.button("", key=key(path, ":versions"), type="tertiary", icon=":material/call_split:",
+                       on_click=versions,
+                       help="Make versions of this rule: keep it as version a and add others, so the optimiser "
+                            "(BUTChC or Optuna) can choose between them.")
+
+        def clear():
+            rules[slot] = None
+            prune_variables()
+            save_draft()
+            renew_widgets()
+        row.button("", key=key(path, ":delete_rule"), type="tertiary", icon=":material/delete:", on_click=clear,
+                   help="Delete the whole rule: its conditions, its logic line and any versions of it, and take "
+                        "their values off the Optimise page.")
+        if opened:
+            rule_editor(path, features, timeframe)
+    return title
 
 
 # ---------------------------------------------------------------------------

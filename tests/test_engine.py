@@ -38,7 +38,7 @@ def test_single_symbol_plan(ma_spec):
     assert plan["front_door"] == "SingleBacktest" and plan["single"]
     assert args["close"] == ("var", "close") and args["open"] == ("var", "open_")
     assert args["mode"] == ("lit", "spreadbet") and "instruments" not in args
-    assert args["risk_pct"] == ("lit", 0.01)
+    assert args["risk_amount"] == ("lit", 100.0)
     assert args["stop_points"] == ("lit", 60) and "trail_points" not in args
     assert args["target_points"] == ("lit", 120)
     assert args["short_entries"] == ("var", "short_entries")      # always the four-array form
@@ -827,9 +827,9 @@ def test_risk_is_sized_from_a_stop_level_and_the_check_agrees():
 
 
 def test_risk_sizing_with_no_stop_is_worth_the_risk_times_the_leverage():
-    """1% of 10,000 with no stop, bought outright at 1x: a position worth 100, an implied stop at zero."""
+    """A risk of 100 with no stop, bought outright at 1x: a position worth 100, an implied stop at zero."""
     pytest.importorskip("vectorbtx")
-    risk = {"sizing": {"risk_pct": 0.01}, "stop": {"kind": "none"}}
+    risk = {"sizing": {"risk_amount": 100.0}, "stop": {"kind": "none"}}
     spec = pulse_spec("long_entry", 1, "long_exit", 7, risk=risk)
     assert validate_spec(spec) == []
     data = bars(**DIPS)
@@ -860,3 +860,50 @@ def test_a_spread_bet_keeps_its_own_price_when_the_account_converts():
     spec["setup"]["trading"] = "spreadbet"
     assert float(engine.prepare_data(spec, data)["close"].iloc[0, 0]) == pytest.approx(100.0)
     assert "to_base_currency" not in export_script(spec)
+
+
+def test_a_ticker_names_its_market():
+    """Yahoo's conventions, read when a symbol is added (engine.usual_market): a pair, an index, a future,
+    a London share in pence, a share in dollars."""
+    assert engine.usual_market("EURUSD=X") == {"asset_class": "fx", "base_currency": "EUR", "quote_currency": "USD"}
+    assert engine.usual_market("JPY=X") == {"asset_class": "fx", "base_currency": "USD", "quote_currency": "JPY"}
+    assert engine.usual_market("^FTSE") == {"asset_class": "index", "quote_currency": "GBP"}
+    assert engine.usual_market("^GSPC") == {"asset_class": "index", "quote_currency": "USD"}
+    assert engine.usual_market("GC=F") == {"asset_class": "commodities", "quote_currency": "USD"}
+    assert engine.usual_market("VOD.L") == {"quote_currency": "GBp"}
+    assert engine.usual_market("SAP.DE") == {"quote_currency": "EUR"}
+    assert engine.usual_market("SPY") == {"quote_currency": "USD"}
+
+
+def test_the_usual_instrument_fills_every_cell_and_runs_as_blanks_do(ohlcv):
+    """Every grid field at its usual value (no blank cells: the owner's call, 20 November 2026), only the
+    fields the mode takes, no borrow rate; and the run is the same as with those cells left blank."""
+    pytest.importorskip("vectorbtx")
+    cfd = engine.usual_instrument("cfd", "signals", "EURUSD=X")
+    assert cfd["contract_size"] == 100000.0 and cfd["leverage"] == 30.0 and cfd["point_size"] == 0.0001
+    assert cfd["base_currency"] == "EUR" and cfd["cost_currency"] == "USD" and "allow_fractional" not in cfd
+    assert engine.usual_instrument("cfd", "signals", "SPY")["contract_size"] == 1.0
+    equity = engine.usual_instrument("equity", "signals", "SPY")
+    assert "contract_size" not in equity and "base_currency" not in equity and "borrow_rate" not in equity
+    assert equity["allow_fractional"] is False and equity["leverage"] == 1.0
+    assert engine.usual_instrument("spreadbet", "portfolio", "^FTSE")["leverage"] == 1.0
+    # The same backtest as blank cells, which vectorbtX fills with the same defaults.
+    symbol = list(ohlcv["close"].columns)[0]
+    spec = {"version": 2, "name": "t", "setup": {"kind": "signals", "trading": "cfd"},
+            "data": {"symbols": [symbol], "timeframe": "1d", "start": "2020-01-01", "end": "2022-12-31"},
+            "features": {"fast": {"indicator": "talib:SMA", "inputs": {"close": "close"}, "params": {"timeperiod": 5}},
+                         "slow": {"indicator": "talib:SMA", "inputs": {"close": "close"}, "params": {"timeperiod": 20}}},
+            "rules": {"long_entry": {"conditions": {"up": {"left": {"feature": "fast"}, "op": "crosses_above",
+                                                           "right": {"feature": "slow"}}}, "logic": "up"},
+                      "long_exit": {"conditions": {"down": {"left": {"feature": "fast"}, "op": "crosses_below",
+                                                            "right": {"feature": "slow"}}}, "logic": "down"},
+                      "short_entry": None, "short_exit": None},
+            "risk": {"sizing": {"stake": 0.1}, "stop": {"kind": "fixed", "points": 50.0}},
+            "account": {"init_cash": 10000.0, "freq": "D"}}
+    values = []
+    blank = {"asset_class": "fx", "base_currency": "EUR", "quote_currency": "USD", "contract_size": 100000.0}
+    for fields in (blank, engine.usual_instrument("cfd", "signals", "EURUSD=X")):
+        run = engine.run_backtest(dict(spec, instruments={symbol: fields}), ohlcv)
+        values.append(np.asarray(run["pf"].value()).ravel())
+        assert len(run["pf"].orders.records) > 4
+    np.testing.assert_allclose(values[0], values[1])

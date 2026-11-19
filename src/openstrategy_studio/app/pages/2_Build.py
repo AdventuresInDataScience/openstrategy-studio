@@ -15,7 +15,7 @@ from openstrategy_studio import analysis, engine, indicators, store, style, ui
 from openstrategy_studio.compile import compile_features, compile_signals, compile_weights, export_script
 from openstrategy_studio.spec import (CALENDAR_FREQS, DISTANCE_DEFAULTS, FRACTION_KEYS, FREQ, LINE_UNITS, RISK_OF,
                                       SELECTION_MODES, SIZING_KEYS, STOP_UNITS, TIMEFRAMES, TRADING, WEIGHT_SCHEMES,
-                                      apply_params, blank_spec, is_choice, is_intraday, list_templates,
+                                      apply_params, blank_spec, is_intraday, list_templates,
                                       load_template, spec_hash, strategy_kind, trading_mode, validate_spec,
                                       when_cash_short)
 
@@ -79,6 +79,26 @@ INSTRUMENT_HELP = {
     "price_field": "close, or adj_close: prices adjusted for dividends and splits (the default when buying "
                    "outright). Needs adj_close in the stored data.",
 }
+# How each grid column is headed: plain words, the field name kept in its tooltip.
+INSTRUMENT_LABELS = {
+    "asset_class": "Asset class", "quote_currency": "Quote currency", "base_currency": "Base currency",
+    "leverage": "Leverage", "leverage_type": "Leverage applies to", "point_size": "Point size",
+    "contract_size": "Contract size", "price_field": "Price", "spread_points": "Spread (points)",
+    "commission_pct": "Commission (fraction)", "commission_flat": "Commission per order",
+    "commission_per_unit": "Commission per unit", "commission_min": "Minimum commission",
+    "cost_currency": "Cost currency", "slippage": "Slippage", "borrow_rate": "Borrow rate (a year)",
+    "increment": "Size step", "min_size": "Smallest size", "allow_fractional": "Fractions allowed",
+    "rounding": "Rounding",
+}
+# The grid in three parts, each narrow enough to read without scrolling sideways. Each mode
+# shows only the fields vectorbtX accepts for it (borrow_rate only bought outright).
+INSTRUMENT_GROUPS = {
+    "Market": ["asset_class", "quote_currency", "base_currency", "leverage", "leverage_type", "point_size",
+               "contract_size", "price_field"],
+    "Costs": ["spread_points", "commission_pct", "commission_flat", "commission_per_unit", "commission_min",
+              "cost_currency", "slippage", "borrow_rate"],
+    "Order sizes": ["increment", "min_size", "allow_fractional", "rounding"],
+}
 KIND_LABELS = {"signals": "Trade on signals", "portfolio": "Hold a portfolio"}
 KIND_HELP = {"signals": "Entry and exit rules decide when to buy and when to sell, long or short.",
              "portfolio": "Target weights across the symbols, rebalanced on a schedule or never. One symbol held "
@@ -92,25 +112,16 @@ TRADING_HELP = {
     "spreadbet": "A stake per point, on margin. The cost is in the spread (no commission), plus overnight funding.",
     "fx_spot": "Currency pairs in lots, on margin. Costs: the spread, commission, and carry on both currencies.",
 }
-SIZING_LABELS = {
-    "equity": {"risk_pct": "Risk a share of the account per trade (0.01 = 1%)",
-               "risk_amount": "Risk a cash amount per trade", "stake": "Shares per trade",
-               "notional": "A cash amount per trade", "notional_pct": "A share of the account per trade (0.1 = 10%)"},
-    "cfd": {"risk_pct": "Risk a share of the account per trade (0.01 = 1%)",
-            "risk_amount": "Risk a cash amount per trade", "stake": "Contracts per trade",
-            "notional": "Position value per trade", "notional_pct": "Position worth a share of the account (0.1 = 10%)"},
-    "spreadbet": {"risk_pct": "Risk a share of the account per trade (0.01 = 1%)",
-                  "risk_amount": "Risk a cash amount per trade", "stake": "Stake per point",
-                  "notional": "Position value per trade",
-                  "notional_pct": "Position worth a share of the account (0.1 = 10%)"},
-    "fx_spot": {"risk_pct": "Risk a share of the account per trade (0.01 = 1%)",
-                "risk_amount": "Risk a cash amount per trade", "stake": "Lots per trade",
-                "notional": "Position value per trade", "notional_pct": "Position worth a share of the account (0.1 = 10%)"},
-}
+# Position size as two questions (the owner's call, 20 November 2026): what sets the size, then
+# how much. A value or a risk is a fixed amount or a share of the balance or the equity; a share
+# of the starting cash would be a fixed amount again, so it is not offered twice. Each answer is
+# one vectorbtX keyword (SIZING_FOR); `size`, raw engine units, is not offered.
+SIZE_BY = {"size": "A fixed size", "value": "Its value", "risk": "What it risks at the stop"}
+AMOUNT_OF = {"fixed": "A fixed amount", "balance": "A share of the balance", "equity": "A share of the equity"}
+SIZING_FOR = {("value", "fixed"): "notional", ("value", "share"): "notional_pct",
+              ("risk", "fixed"): "risk_amount", ("risk", "share"): "risk_pct"}
 SIZING_DEFAULTS = {"risk_pct": 0.01, "risk_amount": 100.0, "stake": 1.0, "notional": 1000.0, "size": 1.0,
                    "notional_pct": 0.1}
-# How a share of the account reads on the Risk tab (spec.RISK_OF holds the keys).
-BASIS_LABELS = {"init_cash": "The starting cash", "balance": "The balance", "equity": "The equity"}
 # How each way of measuring a stop or target reads (spec.STOP_UNITS holds the keys).
 UNIT_LABELS = {"points": "In points", "pct": "In % of the price", "multiple": "A multiple of a line",
                "level": "At a line's level"}
@@ -130,22 +141,24 @@ def compare(left, op, right):
 PRESETS = {
     "ma_cross": ("Moving-average cross",
                  {"fast": feature("talib:SMA", timeperiod=50), "slow": feature("talib:SMA", timeperiod=200)},
-                 {"long_entry": {"conditions": {"A": compare({"feature": "fast"}, "crosses_above", {"feature": "slow"})},
-                                 "logic": "A"},
-                  "long_exit": {"conditions": {"A": compare({"feature": "fast"}, "crosses_below", {"feature": "slow"})},
-                                "logic": "A"}}),
+                 {"long_entry": {"conditions": {"cross_up": compare({"feature": "fast"}, "crosses_above",
+                                                                    {"feature": "slow"})}, "logic": "cross_up"},
+                  "long_exit": {"conditions": {"cross_down": compare({"feature": "fast"}, "crosses_below",
+                                                                     {"feature": "slow"})}, "logic": "cross_down"}}),
     "rsi": ("RSI reversion", {"rsi": feature("talib:RSI", timeperiod=14)},
-            {"long_entry": {"conditions": {"A": compare({"feature": "rsi"}, "crosses_above", {"const": 30.0})},
-                            "logic": "A"},
-             "long_exit": {"conditions": {"A": compare({"feature": "rsi"}, "crosses_above", {"const": 70.0})},
-                           "logic": "A"}}),
+            {"long_entry": {"conditions": {"oversold": compare({"feature": "rsi"}, "crosses_above", {"const": 30.0})},
+                            "logic": "oversold"},
+             "long_exit": {"conditions": {"overbought": compare({"feature": "rsi"}, "crosses_above", {"const": 70.0})},
+                           "logic": "overbought"}}),
     "channel": ("Channel breakout",
                 {"upper": dict(feature("talib:MAX", timeperiod=20), inputs={"close": "high"}),
                  "lower": dict(feature("talib:MIN", timeperiod=20), inputs={"close": "low"})},
-                {"long_entry": {"conditions": {"A": compare({"price": "close"}, ">", {"feature": "upper", "shift": 1})},
-                                "logic": "A"},
-                 "long_exit": {"conditions": {"A": compare({"price": "close"}, "<", {"feature": "lower", "shift": 1})},
-                               "logic": "A"}}),
+                {"long_entry": {"conditions": {"breakout": compare({"price": "close"}, ">",
+                                                                    {"feature": "upper", "shift": 1})},
+                                "logic": "breakout"},
+                 "long_exit": {"conditions": {"breakdown": compare({"price": "close"}, "<",
+                                                                   {"feature": "lower", "shift": 1})},
+                               "logic": "breakdown"}}),
 }
 
 
@@ -183,28 +196,93 @@ def usual_leverage_for(fields, mode=None, kind_=None):
     return engine.usual_leverage(mode or trading, fields.get("asset_class"), kind_ or kind)
 
 
-def usual_terms(fields, mode=None, kind_=None):
-    """{"leverage", "point_size"}: what the Studio fills in for one instrument's fields.
+def usual_fields(fields, symbol, mode=None, kind_=None):
+    """Every grid field's usual value for one instrument (engine.usual_instrument).
 
-    Leverage by the way of trading, the asset class and the kind of strategy; the point size
-    by the market's convention (engine.usual_point_size: a pip on FX, 1.0 on an index, a cent
-    on a share).
+    Its market (asset class, currencies) from its own fields where they say, else read from the
+    ticker its data was stored from (SPY, EURUSD=X); the leverage by the way of trading and the
+    kind of strategy; the point size by the market's convention (a pip on FX, 1.0 on an index,
+    a cent on a share); the rest vectorbtX's defaults for the mode, and 0 for other costs.
     """
-    return {"leverage": usual_leverage_for(fields, mode, kind_),
-            "point_size": engine.usual_point_size(mode or trading, fields.get("asset_class"),
-                                                  fields.get("quote_currency"))}
+    return engine.usual_instrument(mode or trading, kind_ or kind, ticker=tickers.get(symbol, symbol), given=fields)
 
 
 def follow_usual(fields, before, after):
-    """Give `fields` the usual leverage and point size of `after` where they held the usual ones of `before`.
+    """Give `fields` each usual value of `after` where it was blank or held the usual value of `before`.
 
-    `before` and `after` are the usual terms (usual_terms) for the instrument as it was and as
-    it is now. A value that was blank, or the usual one, follows the change; one typed in by
-    hand stays. Called when the way of trading or the kind of strategy changes.
+    `before` and `after` are the usual values (usual_fields) for the instrument as it was and as
+    it is now. A blank or usual value follows the change; one typed in by hand stays. Called
+    when the way of trading, the kind of strategy, an asset class or a currency changes.
     """
-    for name in ("leverage", "point_size"):
-        if fields.get(name) is None or fields[name] == before[name]:
-            fields[name] = after[name]
+    for name, value in after.items():
+        if fields.get(name) is None or fields[name] == before.get(name):
+            fields[name] = value
+
+
+def sizing_choice(sizing):
+    """(what sets the size, how much) for a spec's sizing: keys of SIZE_BY and AMOUNT_OF.
+
+    A share with no basis (or an older one of the starting cash) answers None to how much, so
+    the radio shows nothing picked and the At a glance panel asks for one: the page never picks
+    one on its own, since rendering must not change the spec.
+    """
+    if "stake" in sizing:
+        return "size", None
+    if "notional" in sizing:
+        return "value", "fixed"
+    if "risk_amount" in sizing:
+        return "risk", "fixed"
+    if "notional_pct" in sizing:
+        return "value", sizing.get("risk_of")
+    if "risk_pct" in sizing:
+        return "risk", sizing.get("risk_of")
+    return None, None                     # a raw size, which the choices do not offer
+
+
+def usual_stake():
+    """A fixed size to start from: a tenth of a lot on FX (a whole lot is 100,000 units), else 1."""
+    classes = {((spec.get("instruments") or {}).get(symbol) or {}).get("asset_class") for symbol in symbols}
+    return 0.1 if trading == "fx_spot" or (trading == "cfd" and classes == {"fx"}) else 1.0
+
+
+def new_sizing(by, amount_of, old):
+    """The sizing for a new answer, carrying the amount across where it is the same money.
+
+    A share becomes the fixed amount it is at the starting cash (1% of 10,000 risks 100), and a
+    fixed amount the share it is of the starting cash; balance and equity swap the basis only.
+    Anything else starts from SIZING_DEFAULTS.
+    """
+    if by == "size":
+        return {"stake": usual_stake()}
+    cash = float((spec.get("account") or {}).get("init_cash") or 0.0) or 10000.0
+    old_key = next((name_ for name_ in SIZING_KEYS if name_ in old), None)
+    old_value = old.get(old_key)
+    new_key = SIZING_FOR[(by, "fixed" if amount_of in (None, "fixed") else "share")]
+    if new_key in ("notional", "risk_amount"):
+        share = {"notional": "notional_pct", "risk_amount": "risk_pct"}[new_key]
+        value = round(old_value * cash, 2) if old_key == share else (old_value if old_key == new_key else
+                                                                     SIZING_DEFAULTS[new_key])
+        return {new_key: value}
+    fixed = {"notional_pct": "notional", "risk_pct": "risk_amount"}[new_key]
+    value = round(old_value / cash, 6) if old_key == fixed else (old_value if old_key == new_key else
+                                                                 SIZING_DEFAULTS[new_key])
+    return {new_key: value, "risk_of": amount_of}
+
+
+def stake_label():
+    """What a fixed size counts, in each way of trading's own unit: shares bought outright, money a
+    point on a spread bet, lots on FX (100,000 units: the convention), contracts on other CFDs."""
+    if trading == "equity":
+        return "Shares per trade"
+    if trading == "spreadbet":
+        currency = (spec.get("account") or {}).get("base_currency")
+        return f"Stake per point ({currency} a point)" if currency else "Stake per point (money a point)"
+    if trading == "fx_spot":
+        return "Lots per trade (a lot is 100,000 units)"
+    classes = {((spec.get("instruments") or {}).get(symbol) or {}).get("asset_class") for symbol in symbols}
+    if classes == {"fx"}:
+        return "Lots per trade (a lot is the contract size: 100,000 units on FX)"
+    return "Contracts per trade (lots on the FX pairs)" if "fx" in classes else "Contracts per trade"
 
 
 def points_in_price(points):
@@ -300,7 +378,7 @@ def leverage_summary():
     can mix limits (an index at 10x, a stock at 5x, an FX pair at 30x on spread bets). A
     second widget here would fight the grid over the same value.
     """
-    st.markdown("**Leverage**", help=INSTRUMENT_HELP["leverage"])
+    ui.heading("Leverage", "risk", help=INSTRUMENT_HELP["leverage"])
     found = spec.get("instruments") or {}
     if "from_file" in found:
         st.caption("Each instrument's leverage comes from the universe file.")
@@ -336,10 +414,10 @@ def trade_size_check():
     vectorbtX's own sizes (engine.sizing_check), so a warning here is the warning the run
     would give, with what to change in the Studio's words.
     """
-    st.markdown("**Trade size check**",
-                help="The largest trade the entry rules place over the backtest period, sized as vectorbtX sizes it "
-                     "at the open it fills at, against the cash times the leverage. When the rules never fire, the "
-                     "last bar's trade is shown.")
+    ui.heading("Trade size check", "risk",
+               help="The largest trade the entry rules place over the backtest period, sized as vectorbtX sizes it "
+                    "at the open it fills at, against the cash times the leverage. When the rules never fire, the "
+                    "last bar's trade is shown.")
     if validate_spec(spec):
         st.caption("Fix the problems in the At a glance panel to check the trade size.")
         return
@@ -373,7 +451,7 @@ def trade_size_check():
     if any(row["implied_stop"] for row in rows):
         st.caption("With no stop, the stop shown is implied: 1 / leverage of the price, the move that would take the "
                    "trade's whole margin. No stop is placed.")
-    if sizing_key in FRACTION_KEYS and sizing_now.get("risk_of", "init_cash") != "init_cash":
+    if sizing_key in FRACTION_KEYS and sizing_now.get("risk_of") in RISK_OF:
         st.caption(f"Sized here from the starting cash. In the run each trade is sized from "
                    f"{RISK_OF[sizing_now['risk_of']]} at its signal bar, so it grows with profits and shrinks after "
                    "losses.")
@@ -420,6 +498,14 @@ trading = trading_mode(spec)
 symbols = spec["data"]["symbols"]
 timeframe = spec["data"]["timeframe"]
 stored = ui.stored_symbols(data_dir)
+# Each stored name with what it holds (SPY: 1d, 1w from yahoo), so two sources stored under
+# different names (SPY, SPY_csv) can be told apart in the symbol picker; and the source's own
+# ticker (EURUSD=X), which the instrument grid reads its market and currencies from.
+held, tickers = {}, {}
+listing = store.list_datasets(data_dir)
+for name_, rows_ in (listing.groupby("symbol") if not listing.empty else []):
+    held[name_] = f"{name_} ({', '.join(rows_['timeframe'])} · {', '.join(sorted(set(rows_['source'])))})"
+    tickers[name_] = next((value for value in rows_.get("ticker", []) if isinstance(value, str) and value), name_)
 
 with form:
     third = "Rules" if kind == "signals" else "Portfolio"
@@ -428,49 +514,44 @@ with form:
 
     # --- setup ----------------------------------------------------------------------
     with tabs["Setup"]:
-        row = st.columns([2, 3])
-        name = row[0].text_input("Name", value=spec.get("name", ""), key=ui.key("name"),
-                                 help="Names the strategy in saved runs, jobs and downloaded files.")
-        if name != spec.get("name"):
-            ui.set_value("name", name)
-        options = sorted(set(stored) | set(symbols))
-        # Each stored name with what it holds (SPY: 1d, 1w from yahoo), so two sources stored under
-        # different names (SPY, SPY_csv) can be told apart here.
-        held = {}
-        listing = store.list_datasets(data_dir)
-        for name_, rows_ in (listing.groupby("symbol") if not listing.empty else []):
-            held[name_] = f"{name_} ({', '.join(rows_['timeframe'])} · {', '.join(sorted(set(rows_['source'])))})"
-        picked_symbols = row[1].multiselect("Symbols", options, default=symbols, key=ui.key("data.symbols"),
-                                            format_func=lambda name_: held.get(name_, f"{name_} (not stored)"),
-                                            help="What the strategy trades: the names datasets are stored under on "
-                                                 "the Data page, with the timeframes and source each holds. A longer "
-                                                 "timeframe is resampled from the finest stored one. With several, "
-                                                 "only the dates they all share are used.")
-        row = st.columns(3)
-        picked_timeframe = row[0].selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index(timeframe),
-                                            key=ui.key("data.timeframe"),
-                                            help="The bar size. Every rule is evaluated once per bar. Data stored "
-                                                 "at a finer timeframe is resampled up.")
-        # Streamlit limits date pickers to ten years either side unless told otherwise.
-        span = {"min_value": date(1970, 1, 1), "max_value": date(2100, 12, 31)}
-        start = row[1].date_input("From", value=date.fromisoformat(str(spec["data"]["start"])[:10]),
-                                  key=ui.key("data.start"), **span,
-                                  help="The first date of the backtest. Indicators warm up from here, so their "
-                                       "first bars are blank.")
-        end = row[2].date_input("To", value=date.fromisoformat(str(spec["data"]["end"])[:10]),
-                                key=ui.key("data.end"), **span, help="The last date of the backtest.")
+        # Three cards: what is traded and when, what kind of strategy and how it is traded, and
+        # each instrument's terms.
+        with ui.card("market", "setup"):
+            ui.card_header("market", "Market", meta="what is traded, on which bars, over which dates")
+            row = st.columns([2, 3])
+            name = row[0].text_input("Name", value=spec.get("name", ""), key=ui.key("name"),
+                                     help="Names the strategy in saved runs, jobs and downloaded files.")
+            if name != spec.get("name"):
+                ui.set_value("name", name)
+            options = sorted(set(stored) | set(symbols))
+            picked_symbols = row[1].multiselect("Symbols", options, default=symbols, key=ui.key("data.symbols"),
+                                                format_func=lambda name_: held.get(name_, f"{name_} (not stored)"),
+                                                help="What the strategy trades: the names datasets are stored under on "
+                                                     "the Data page, with the timeframes and source each holds. A "
+                                                     "longer timeframe is resampled from the finest stored one. With "
+                                                     "several, only the dates they all share are used.")
+            row = st.columns(3)
+            picked_timeframe = row[0].selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index(timeframe),
+                                                key=ui.key("data.timeframe"),
+                                                help="The bar size. Every rule is evaluated once per bar. Data stored "
+                                                     "at a finer timeframe is resampled up.")
+            # Streamlit limits date pickers to ten years either side unless told otherwise.
+            span = {"min_value": date(1970, 1, 1), "max_value": date(2100, 12, 31)}
+            start = row[1].date_input("From", value=date.fromisoformat(str(spec["data"]["start"])[:10]),
+                                      key=ui.key("data.start"), **span,
+                                      help="The first date of the backtest. Indicators warm up from here, so their "
+                                           "first bars are blank.")
+            end = row[2].date_input("To", value=date.fromisoformat(str(spec["data"]["end"])[:10]),
+                                    key=ui.key("data.end"), **span, help="The last date of the backtest.")
         if picked_symbols != symbols:
             def switch_symbols():
                 instruments = spec.setdefault("instruments", {})
                 if "from_file" not in instruments:
-                    template = dict(next(iter(instruments.values()), {}))
                     for symbol in picked_symbols:
                         if symbol not in instruments:
-                            # A new symbol copies the first one's settings, and gets the usual leverage
-                            # and point size for its asset class where that one names none.
-                            instruments[symbol] = dict(template)
-                            for name_, value in usual_terms(template).items():
-                                instruments[symbol].setdefault(name_, value)
+                            # A new symbol starts with every field at its usual value for its own market
+                            # (the owner's call, 20 November 2026: no blank cells).
+                            instruments[symbol] = usual_fields({}, symbol)
                     for symbol in list(instruments):
                         if symbol not in picked_symbols:
                             del instruments[symbol]
@@ -489,18 +570,24 @@ with form:
             if value != spec["data"][field]:
                 ui.set_value(f"data.{field}", value)
 
-        left, right = st.columns(2, gap="large")
-        picked_kind = left.radio("What are you building?", list(KIND_LABELS), index=list(KIND_LABELS).index(kind),
-                                 format_func=KIND_LABELS.get, captions=[KIND_HELP[name] for name in KIND_LABELS],
-                                 key=ui.key("setup.kind"),
-                                 help="It decides the third tab: Rules or Portfolio. Switching starts that tab, "
-                                      "the Risk tab and the shared-cash settings afresh; features are kept.")
-        picked_trading = right.radio("How are you trading it?", TRADING, index=TRADING.index(trading),
-                                     format_func=TRADING_LABELS.get, captions=[TRADING_HELP[name] for name in TRADING],
-                                     key=ui.key("setup.trading"),
-                                     help="One way of trading for every instrument. It decides which costs apply, "
-                                          "which instrument fields are shown below and how sizes are counted. "
-                                          "Switching drops the fields the new way does not use.")
+        with ui.card("strategy-kind", "setup"):
+            ui.card_header("strategy-kind", "Strategy", meta="what is built, and how it is traded")
+            # Each choice in a row, with only the chosen one's description under it.
+            picked_kind = st.radio("What are you building?", list(KIND_LABELS), index=list(KIND_LABELS).index(kind),
+                                   format_func=KIND_LABELS.get, horizontal=True, key=ui.key("setup.kind"),
+                                   help="Trade on signals: " + KIND_HELP["signals"] + " Hold a portfolio: "
+                                        + KIND_HELP["portfolio"] + " It decides the third tab: Rules or Portfolio. "
+                                        "Switching starts that tab, the Risk tab and the shared-cash settings afresh; "
+                                        "features are kept.")
+            st.caption(KIND_HELP[kind])
+            picked_trading = st.radio("How are you trading it?", TRADING, index=TRADING.index(trading),
+                                      format_func=TRADING_LABELS.get, horizontal=True, key=ui.key("setup.trading"),
+                                      help=" ".join(f"{TRADING_LABELS[name]}: {TRADING_HELP[name]}" for name in TRADING)
+                                           + " One way of trading for every instrument: it decides which costs apply, "
+                                             "which instrument fields are shown below and how sizes are counted. "
+                                             "Switching drops the fields the new way does not use, and moves every "
+                                             "value still at its usual setting to the new way's.")
+            st.caption(TRADING_HELP[trading])
         if picked_kind != kind:
             def switch_kind():
                 spec["setup"]["kind"] = picked_kind
@@ -522,9 +609,10 @@ with form:
                     spec["risk"] = {}
                 # The usual leverage follows the kind (a stock spread bet is 5x traded on signals, 1x
                 # held in a portfolio); one typed in by hand stays.
-                for fields in (spec.get("instruments") or {}).values():
+                for symbol_, fields in (spec.get("instruments") or {}).items():
                     if isinstance(fields, dict):
-                        follow_usual(fields, usual_terms(fields, trading, kind), usual_terms(fields, trading, picked_kind))
+                        follow_usual(fields, usual_fields(fields, symbol_, trading, kind),
+                                     usual_fields(fields, symbol_, trading, picked_kind))
                 ui.prune_variables()
             ui.rerun_after(switch_kind)
         if picked_trading != trading:
@@ -532,12 +620,12 @@ with form:
                 spec["setup"]["trading"] = picked_trading
                 read = ui.run_guarded("Reading instrument modes", lambda: engine.mode_rules(picked_trading))
                 rejected = set((read or {"rejected": {}})["rejected"])
-                for fields in (spec.get("instruments") or {}).values():
+                for symbol_, fields in (spec.get("instruments") or {}).items():
                     if isinstance(fields, dict):
-                        # The usual leverage and point size for the old way of trading become the usual
-                        # ones for the new (1x bought outright, 5x for a stock spread bet ...); values
-                        # typed in by hand stay.
-                        before = usual_terms(fields, trading)
+                        # Every value at its usual setting for the old way of trading moves to the new
+                        # way's (1x bought outright, 5x for a stock spread bet, a lot of 100,000 on an
+                        # FX CFD ...); values typed in by hand stay, and blanks are filled in.
+                        before = usual_fields(fields, symbol_, trading)
                         if trading == "fx_spot" and not fields.get("asset_class"):
                             # FX spot is FX without saying so; another way of trading must be told.
                             fields["asset_class"] = "fx"
@@ -546,137 +634,158 @@ with form:
                             if (field in rejected and not (field == "base_currency" and fields.get("asset_class") == "fx")) \
                                     or (field == "borrow_rate" and picked_trading != "equity"):
                                 del fields[field]
-                        follow_usual(fields, before, usual_terms(fields, picked_trading))
+                        follow_usual(fields, before, usual_fields(fields, symbol_, picked_trading))
             ui.rerun_after(switch_trading)
 
-        st.markdown("**Instruments**")
-        instruments = spec.setdefault("instruments", {})
-        universes = sorted(path.name for path in (data_dir / "universes").glob("*"))
-        use_file = st.toggle("Read instruments from a universe file", value="from_file" in instruments,
-                             disabled=not universes and "from_file" not in instruments,
-                             help="Store universe files on the Data page. A file names each row's own mode.",
-                             key=ui.key("instruments.use_file"))
-        if not use_file and "from_file" in instruments:
-            # Back from a universe file to the grid: each symbol starts from the usual terms.
-            spec["instruments"] = {symbol: usual_terms({}) for symbol in symbols}
-            instruments = spec["instruments"]
-        if use_file:
-            current_file = instruments.get("from_file")
-            file = st.selectbox("Universe file", universes,
-                                index=universes.index(current_file) if current_file in universes else 0,
-                                key=ui.key("instruments.from_file"),
-                                help="A stored file with one instrument per row, each with its own mode and costs. "
-                                     "It replaces the grid.")
-            if instruments != {"from_file": file}:
-                ui.set_value("instruments", {"from_file": file})
-        elif not symbols:
-            st.caption("Pick the symbols to trade above: each gets a row here, filled in with the usual leverage "
-                       "and point size for how you trade it.")
-        else:
-            rules = ui.run_guarded("Reading instrument modes", lambda: engine.mode_rules(trading)) or \
-                {"required": set(), "rejected": {}}
-            shown = {field: kind_name for field, kind_name in INSTRUMENT_FIELDS.items()
-                     if (field not in rules["rejected"] or field == "base_currency")
-                     and (field != "borrow_rate" or trading == "equity")}
-            grid = pd.DataFrame([{field: instruments.get(symbol, {}).get(field) for field in shown}
-                                 for symbol in symbols], index=symbols)
-            for field, kind_name in shown.items():
-                if kind_name == "number":
-                    grid[field] = pd.to_numeric(grid[field], errors="coerce")
-                else:
-                    grid[field] = grid[field].map(lambda value: "" if value is None else str(value).lower()
-                                                  if isinstance(value, bool) else str(value))
-            # Every column gets its ⓘ (INSTRUMENT_HELP); a few also get a list of choices.
-            choices = {"rounding": ["", "floor", "nearest", "ceil"], "allow_fractional": ["", "true", "false"],
-                       "price_field": ["", "close", "adj_close"],
-                       "asset_class": ["", "stocks", "commodities", "fx", "index"],
-                       "leverage_type": ["", "instrument_level", "portfolio_level"]}
-            config = {}
-            for field, kind_name in shown.items():
-                if field in choices:
-                    config[field] = st.column_config.SelectboxColumn(field, options=choices[field],
-                                                                     help=INSTRUMENT_HELP[field])
-                elif field == "borrow_rate":
-                    config[field] = st.column_config.NumberColumn(field, min_value=0.0, format="%.4f",
-                                                                  help=INSTRUMENT_HELP[field])
-                elif kind_name == "number":
-                    config[field] = st.column_config.NumberColumn(field, help=INSTRUMENT_HELP[field])
-                else:
-                    config[field] = st.column_config.TextColumn(field, help=INSTRUMENT_HELP[field])
-            st.caption(f"{TRADING_LABELS[trading]}: blank cells use the mode's default, and only the fields this mode "
-                       "uses are shown. Leverage fills in with the usual limit: on spread bets and CFDs 30x for FX, "
-                       "10x for indices and commodities and 5x for single stocks; 1x (no borrowing) for everything "
-                       "else and in every portfolio. Type your own to change it. Costs come only from these fields. "
-                       "Financing on held positions comes from the account's rates and the markup on the Settings "
-                       "page.")
-            # What a point is, per symbol, in its market's own words: stops, targets, spreads and
-            # stakes are all counted in points, and the conventions differ (cents, pips, index points).
-            meaning = ui.run_guarded("Reading the point sizes", lambda: engine.point_meaning(spec, data_dir)) or {}
-            st.caption("A point: " + "; ".join(f"on {symbol}, {text_}" for symbol, text_ in meaning.items())
-                       + ". A share counts cents (a 1.00 move is 100 points), FX counts pips, an index counts index "
-                         "points.")
-            edited = st.data_editor(grid, column_config=config, key=ui.key(f"instruments.grid:{trading}"),
-                                    width="stretch")
-            updated = {}
-            for symbol, values in edited.iterrows():
-                # Fields the grid does not show are kept as they are.
-                old = instruments.get(symbol) or {}
-                fields = {field: value for field, value in old.items() if field not in shown}
-                for field, kind_name in shown.items():
-                    value = values[field]
-                    if value is None or (isinstance(value, float) and np.isnan(value)) or value == "":
+        with ui.card("instruments", "setup"):
+            ui.card_header("instruments", "Instruments", meta=f"{TRADING_LABELS[trading].lower()}: each symbol's terms",
+                           help="Every cell starts at its usual value for the symbol's market and the way of trading; "
+                                "type your own to change it. Costs come only from these fields. Financing on held "
+                                "positions comes from the account's rates and the markup on the Settings page.")
+            instruments = spec.setdefault("instruments", {})
+            universes = sorted(path.name for path in (data_dir / "universes").glob("*"))
+            use_file = st.toggle("Read instruments from a universe file", value="from_file" in instruments,
+                                 disabled=not universes and "from_file" not in instruments,
+                                 help="Store universe files on the Data page. A file names each row's own mode.",
+                                 key=ui.key("instruments.use_file"))
+            if not use_file and "from_file" in instruments:
+                # Back from a universe file to the grid: each symbol starts from the usual values.
+                spec["instruments"] = {symbol: usual_fields({}, symbol) for symbol in symbols}
+                instruments = spec["instruments"]
+            if use_file:
+                current_file = instruments.get("from_file")
+                file = st.selectbox("Universe file", universes,
+                                    index=universes.index(current_file) if current_file in universes else 0,
+                                    key=ui.key("instruments.from_file"),
+                                    help="A stored file with one instrument per row, each with its own mode and "
+                                         "costs. It replaces the grid.")
+                if instruments != {"from_file": file}:
+                    ui.set_value("instruments", {"from_file": file})
+            elif not symbols:
+                st.caption("Pick the symbols to trade above: each gets a row here, filled in with the usual values for "
+                           "its market and how you trade it.")
+            else:
+                rules = ui.run_guarded("Reading instrument modes", lambda: engine.mode_rules(trading)) or \
+                    {"required": set(), "rejected": {}}
+                # A pair's base currency only where there is a pair (FX spot, or an instrument whose
+                # asset class is fx): an empty column beside a share only asks a question it does not have.
+                has_pair = trading == "fx_spot" or any((instruments.get(symbol) or {}).get("asset_class") == "fx"
+                                                       for symbol in symbols)
+                shown = {field: kind_name for field, kind_name in INSTRUMENT_FIELDS.items()
+                         if (field not in rules["rejected"] or field == "base_currency")
+                         and (field != "base_currency" or has_pair)
+                         and (field != "borrow_rate" or trading == "equity")}
+                # What a point is, per symbol, in its market's own words: stops, targets, spreads and
+                # stakes are all counted in points, and the conventions differ (cents, pips, index points).
+                meaning = ui.run_guarded("Reading the point sizes", lambda: engine.point_meaning(spec, data_dir)) or {}
+                st.caption("A point: " + "; ".join(f"on {symbol}, {text_}" for symbol, text_ in meaning.items())
+                           + ". A share counts cents (a 1.00 move is 100 points), FX counts pips, an index counts "
+                             "index points.")
+                choices = {"rounding": ["floor", "nearest", "ceil"], "price_field": ["close", "adj_close"],
+                           "asset_class": ["stocks", "commodities", "fx", "index"],
+                           "leverage_type": ["instrument_level", "portfolio_level"]}
+                updated = {symbol: dict(instruments.get(symbol) or {}) for symbol in symbols}
+                # The grid in three parts (market, costs, order sizes), each narrow enough to read
+                # without scrolling sideways. Only the cells a user changed are written back, so a
+                # blank one in an older strategy stays blank until it is edited or filled in below.
+                for group, group_fields in INSTRUMENT_GROUPS.items():
+                    fields_here = [field for field in group_fields if field in shown]
+                    if not fields_here:
                         continue
-                    if kind_name == "number":
-                        fields[field] = float(value)
-                    elif kind_name == "flag":
-                        fields[field] = value == "true"
-                    elif field == "slippage" and value != "auto":
-                        fields[field] = float(value)
-                    else:
-                        fields[field] = str(value)
-                # A new asset class or quote currency brings its usual leverage and point size (a pip
-                # on USDJPY is 0.01), unless that cell was typed in by hand, or is being typed in this
-                # very edit (it then differs from the spec's value).
-                if (fields.get("asset_class"), fields.get("quote_currency")) != (old.get("asset_class"),
-                                                                                  old.get("quote_currency")):
-                    before, after = usual_terms(old), usual_terms(fields)
-                    for name_ in ("leverage", "point_size"):
-                        if fields.get(name_) == old.get(name_) and old.get(name_) in (None, before[name_]):
-                            fields[name_] = after[name_]
-                updated[symbol] = fields
-            if updated != instruments:
-                ui.set_value("instruments", updated)
-            for symbol, fields in updated.items():
-                for field in sorted(rules["required"] - set(fields)):
-                    st.warning(f"{symbol}: {TRADING_LABELS[trading].lower()} need {field}.")
-                if (fields.get("asset_class") == "fx" or trading == "fx_spot") and \
-                        not (fields.get("base_currency") and fields.get("quote_currency")):
-                    st.warning(f"{symbol}: an FX instrument needs both base_currency and quote_currency (EUR and USD "
-                               "for EURUSD), or its carry cannot be priced.")
-            with st.expander(f"Defaults for {TRADING_LABELS[trading].lower()}"):
-                st.json(ui.run_guarded("Reading defaults", lambda: engine.mode_defaults(trading)) or {},
-                        expanded=False)
+                    grid = pd.DataFrame([{field: instruments.get(symbol, {}).get(field) for field in fields_here}
+                                         for symbol in symbols], index=symbols)
+                    config = {}
+                    for field in fields_here:
+                        kind_name = shown[field]
+                        label, tip = INSTRUMENT_LABELS[field], f"{INSTRUMENT_HELP[field]} (field: {field})"
+                        if kind_name == "number":
+                            grid[field] = pd.to_numeric(grid[field], errors="coerce")
+                            config[field] = st.column_config.NumberColumn(
+                                label, help=tip, **({"min_value": 0.0, "format": "%.4f"} if field == "borrow_rate"
+                                                    else {}))
+                        elif kind_name == "flag":
+                            grid[field] = grid[field].map(lambda value: bool(value))
+                            config[field] = st.column_config.CheckboxColumn(label, help=tip)
+                        else:
+                            grid[field] = grid[field].map(lambda value: "" if value is None else str(value))
+                            config[field] = (st.column_config.SelectboxColumn(label, options=choices[field], help=tip)
+                                             if field in choices else st.column_config.TextColumn(label, help=tip))
+                    ui.heading(group, "setup")
+                    edited = st.data_editor(grid, column_config=config, width="stretch",
+                                            key=ui.key(f"instruments.{group}:{trading}"))
+                    for symbol in symbols:
+                        for field in fields_here:
+                            before_cell, after_cell = grid.at[symbol, field], edited.at[symbol, field]
+                            if before_cell is after_cell or (pd.isna(before_cell) and pd.isna(after_cell)) \
+                                    or before_cell == after_cell:
+                                continue
+                            if after_cell is None or after_cell == "" or (isinstance(after_cell, float)
+                                                                          and np.isnan(after_cell)):
+                                updated[symbol].pop(field, None)
+                            elif shown[field] == "number":
+                                updated[symbol][field] = float(after_cell)
+                            elif shown[field] == "flag":
+                                updated[symbol][field] = bool(after_cell)
+                            elif field == "slippage" and after_cell != "auto":
+                                updated[symbol][field] = float(after_cell)
+                            else:
+                                updated[symbol][field] = str(after_cell)
+                for symbol, fields in updated.items():
+                    old = instruments.get(symbol) or {}
+                    # A new asset class or currency brings its own usual values (a pip on USDJPY is 0.01,
+                    # a lot of 100,000 on an FX CFD, the cost currency with the quote), unless that cell
+                    # was typed in by hand, or is being typed in this very edit.
+                    market = ("asset_class", "quote_currency", "base_currency")
+                    if any(fields.get(name_) != old.get(name_) for name_ in market):
+                        before, after = usual_fields(old, symbol), usual_fields(fields, symbol)
+                        for name_, value in after.items():
+                            if name_ not in market and fields.get(name_) == old.get(name_) \
+                                    and old.get(name_) in (None, before.get(name_)):
+                                fields[name_] = value
+                if updated != {symbol: instruments.get(symbol) or {} for symbol in symbols}:
+                    ui.set_value("instruments", updated)
+                blanks = [symbol for symbol, fields in updated.items()
+                          if any(field not in fields for field in usual_fields(fields, symbol) if field in shown)]
+                if blanks and st.button("Fill in the blank cells", key=ui.key("instruments", ":fill"),
+                                        icon=":material/format_color_fill:",
+                                        help="Gives every blank cell its usual value for the symbol's market and the "
+                                             "way of trading, as a new symbol gets. Cells with a value stay as they "
+                                             "are. A blank borrow rate stays blank: no rate is published, so the run "
+                                             "says when a short is borrowed for free."):
+                    def fill():
+                        for symbol_ in blanks:
+                            fields_ = spec["instruments"][symbol_]
+                            for name_, value in usual_fields(fields_, symbol_).items():
+                                fields_.setdefault(name_, value)
+                    ui.rerun_after(fill)
+                for symbol, fields in updated.items():
+                    for field in sorted(rules["required"] - set(fields)):
+                        st.warning(f"{symbol}: {TRADING_LABELS[trading].lower()} need {field}.")
+                    if (fields.get("asset_class") == "fx" or trading == "fx_spot") and \
+                            not (fields.get("base_currency") and fields.get("quote_currency")):
+                        st.warning(f"{symbol}: an FX instrument needs both base_currency and quote_currency (EUR and "
+                                   "USD for EURUSD), or its carry cannot be priced.")
 
     # --- features -------------------------------------------------------------------
     with tabs["Features"]:
-        st.caption("Features are the lines and signals the rules compare: indicators, patterns, levels and "
-                   "transforms, computed on every bar. Each output is a line you can use, such as bb.upperband.")
+        # Your features first, each a card (its name, type and formula on the title row, with an
+        # edit and a bin button there), then the dashed card that adds one. A new feature opens
+        # at once, just above the add card, with every setting showing.
+        ui.heading(f"Your features ({len(features)})" if features else "Your features", "feature",
+                   help="The lines and signals the rules compare: indicators, patterns, levels and transforms, "
+                        "computed on every bar. Each output is a line a rule can use, such as bb.upperband. Press "
+                        "the pencil on a card to change its settings.")
+        if not features:
+            st.caption("None yet. Add one below: an indicator such as a moving average or the RSI, a candlestick "
+                       "pattern, or a price level.")
         for feature_name, item in list(features.items()):
-            entry = indicators.catalogue().get(item.get("indicator"))
-            described = indicators.describe(item)
-            title = f"{feature_name}: {entry['label'] if entry else item.get('indicator')} · {described}"
-            # Keyed by name, so the panel stays open while its title changes (a setting edited,
-            # the type swapped); a renamed one opens under its new name (ui.feature_editor).
-            with st.expander(title, key=f"feature-panel:{feature_name}",
-                             expanded=feature_name == st.session_state.get("renamed_feature")):
-                ui.feature_editor(feature_name, item, features)
+            described = ui.feature_card(feature_name, item, features)
             # The title is drawn before the inputs and settings inside write their new values
             # back, so after an edit it would show the old ones until the next click. When an
             # edit changed what it says, draw the page again: once, as the second pass finds
-            # them equal. (Renames, swaps and deletes already redraw through ui.rerun_after.)
+            # them equal. (Renames, swaps and deletes already redraw.)
             if feature_name in features and indicators.describe(features[feature_name]) != described:
                 st.rerun()
-        st.markdown("**Add a feature**")
         ui.feature_picker(features)
 
     # --- rules or portfolio ---------------------------------------------------------
@@ -706,43 +815,18 @@ with form:
                 "short_exit": "When to close a short. Without one, a short is closed only by a stop, a target, an "
                               "extra exit or an opposite entry.",
             }
-
-            def slot_title(label, node):
-                """A rule panel's title: the rule's logic line, so a closed panel still says what it does."""
-                if node is None:
-                    return f"{label} · not used"
-                if is_choice(node):
-                    return f"{label} · version {node['choose']}: {node['options'][node['choose']].get('logic') or '?'}"
-                return f"{label} · {node.get('logic') or '(no logic line)'}"
-
+            # Each rule is a card in its tone (entries green, exits red): its logic line on the title
+            # row with an edit, a versions and a bin button, its conditions inside, each one line
+            # until opened. A slot with no rule is one line with an Add button (the owner's call,
+            # 20 November 2026: start with things minimised).
+            ui.heading("Long trades")
             for slot, label in (("long_entry", "Long entry"), ("long_exit", "Long exit"),
                                 ("short_entry", "Short entry"), ("short_exit", "Short exit")):
-                node = rules.get(slot)
-                title = slot_title(label, node)
-                # Keyed by slot, not by revision: the panel stays open or closed while its title changes.
-                # A rule is added and deleted with a button each (the owner's call, 19 November 2026:
-                # a "use this rule" switch did not read as a way to delete one).
-                with st.expander(title, expanded=True, key=f"rule-panel:{slot}"):
-                    if node is None:
-                        st.caption(slot_help[slot])
-                        if st.button(f"Add a {label.lower()} rule", key=ui.key(f"rules.{slot}", ":add_rule"),
-                                     help="Starts the rule with one condition, A, comparing two lines. Add more "
-                                          "conditions and join them in its logic line."):
-                            def start(slot=slot):
-                                rules[slot] = ui.new_rule(features)
-                                ui.open_panel(f"rules.{slot}.conditions.A")
-                            ui.rerun_after(start)
-                    else:
-                        ui.rule_editor(f"rules.{slot}", features, timeframe)
-                        if st.button(f"Delete the {label.lower()} rule", key=ui.key(f"rules.{slot}", ":delete_rule"),
-                                     help="Removes the whole rule: its conditions, its logic line and any versions "
-                                          "of it, and takes their values off the Optimise page."):
-                            def clear(slot=slot):
-                                rules[slot] = None
-                                ui.prune_variables()
-                            ui.rerun_after(clear)
+                if slot == "short_entry":
+                    ui.heading("Short trades")
+                title = ui.rule_card(slot, label, features, timeframe, slot_help[slot])
                 # The title is drawn before the logic line inside writes back: draw again once if it changed.
-                if slot_title(label, rules.get(slot)) != title:
+                if ui.rule_title(rules.get(slot)) != title:
                     st.rerun()
             st.caption("Every signal fills at the next bar's open. Each rule takes every kind of condition: a "
                        "weekday or higher-timeframe condition in an exit rule is a time exit (A or Friday) or narrows "
@@ -864,152 +948,182 @@ with form:
     with tabs["Risk"]:
         risk = spec.setdefault("risk", {})
         if kind != "signals":
-            st.write("A portfolio is sized by its weights, so there is no sizing, stop or target here.")
+            st.caption("A portfolio is sized by its weights, so there is no sizing, stop or target here.")
+            with ui.section("Leverage", "risk", "portfolio-leverage", icon=":material/account_balance:"):
+                leverage_summary()
+                # call_plan passes the box's value either way (vectorbtX's own default is on).
+                budget = st.checkbox("Use a leverage budget", value=bool(risk.get("leverage_budget")),
+                                     key=ui.key("risk.leverage_budget"),
+                                     help="Scales the target weights down on any bar where the book's gross exposure "
+                                          "is above the leverage allowed. Only instruments whose leverage_type is "
+                                          "portfolio_level set that limit, so without one this changes nothing.")
+                if budget != bool(risk.get("leverage_budget")):
+                    ui.set_value("risk.leverage_budget", budget)
         else:
-            labels = dict(SIZING_LABELS[trading])
+            # --- position size: what sets it, then how much (the owner's call, 20 November 2026) ---
+            # Three things can set a trade's size: a fixed size in the instrument's own unit, its
+            # value, or what it loses at the stop. A value or a risk is a fixed amount, or a share of
+            # the balance or the equity. A share of the starting cash is a fixed amount, so it is not
+            # offered twice. Each choice is one vectorbtX keyword (SIZING_FOR).
             sizing = risk.get("sizing") or {"stake": 1.0}
-            used = next((name_ for name_ in SIZING_KEYS if name_ in sizing), "stake")
-            if used not in labels:
-                labels[used] = "Units (raw size)"
-            chosen_sizing = st.radio("Position size", list(labels), index=list(labels).index(used),
-                                     format_func=labels.get, key=ui.key("risk.sizing", ":kind"),
-                                     help="How big each new position is. The two risk choices size the trade so "
-                                          "that hitting the stop loses that much, from whichever stop is set (in "
-                                          "points, in %, trailing, or from a line); with no stop, the trade is sized "
-                                          "as if its margin were the risk. A share of the account sizes the "
-                                          "position's value instead. A share can be of the starting cash, the "
-                                          "balance or the equity.")
-            if chosen_sizing != used:
-                def switch_sizing():
-                    basis = sizing.get("risk_of")
-                    risk["sizing"] = {chosen_sizing: SIZING_DEFAULTS[chosen_sizing]}
-                    if basis and chosen_sizing in FRACTION_KEYS:
-                        risk["sizing"]["risk_of"] = basis
-                    ui.prune_variables()
-                ui.rerun_after(switch_sizing)
-            amount_help = {"risk_pct": "The share of the account lost if the stop is hit (0.01 = 1%), of the "
-                                       "starting cash, the balance or the equity (chosen below).",
-                           "notional_pct": "The share of the account each new position is worth (0.1 = 10%), of the "
-                                           "starting cash, the balance or the equity (chosen below). Above 1 is a "
-                                           "levered position, which the instrument's leverage must fund.",
-                           "risk_amount": "The cash lost if the stop is hit, in the account's currency.",
-                           "stake": f"{labels.get('stake', 'Units')}: the instrument's own unit, the same on every "
-                                    "trade." + (" A spread bet's stake is money per point: per cent of price on a "
-                                                "share, per pip on FX, per index point on an index."
-                                                if trading == "spreadbet" else ""),
-                           "notional": "The position's full value when it opens, the same on every trade.",
-                           "size": "A raw size in the engine's own units."}
-            amount = ui.param_input(f"risk.sizing.{used}", {"type": "float", "default": 1.0},
-                                    label="Amount (a fraction: 0.01 = 1%)" if used in FRACTION_KEYS else "Amount",
-                                    help=amount_help.get(used))
-            cash = float((spec.get("account") or {}).get("init_cash") or 0.0)
-            basis = sizing.get("risk_of", "init_cash")
-            if used in FRACTION_KEYS:
-                # What the share is of (vectorbtX's risk_of): the starting cash, the same amount on every
-                # trade, or the balance or equity at the signal bar, read from the run as it goes.
-                bases = list(RISK_OF)
-                chosen_basis = st.radio("A share of", bases, index=bases.index(basis) if basis in bases else 0,
-                                        format_func=BASIS_LABELS.get, horizontal=True, key=ui.key("risk.sizing.risk_of"),
-                                        help="The starting cash: the same amount on every trade. The balance: the "
-                                             "cash after closed trades and every cost so far. The equity: the balance "
-                                             "plus the open trades' profit or loss. The balance and the equity are "
-                                             "read at the close of the bar the signal fires on, so the trades grow "
-                                             "with profits and shrink after losses. It can be searched on the "
-                                             "Optimise page.")
-                if chosen_basis != basis:
-                    ui.set_value("risk.sizing.risk_of", chosen_basis)
-                    basis = chosen_basis
-            # What the number means in money, under the box: 0.05 is 5%, not 0.05%.
-            if used in FRACTION_KEYS and isinstance(amount, (int, float)):
-                what = (f"{amount * cash:,.2f} lost on each trade that hits its stop" if used == "risk_pct" else
-                        f"each position is worth {amount * cash:,.2f}")
-                if basis == "init_cash":
-                    text = (f"{amount:g} is {amount:.2%} of the starting cash of {cash:,.0f}: {what}, the same on "
-                            "every trade.")
-                else:
-                    text = (f"{amount:g} is {amount:.2%} of {RISK_OF[basis]}, read at the close of each signal bar: "
-                            f"{what} while the account is at its starting {cash:,.0f}, more after profits and less "
-                            "after losses.")
-                if used == "notional_pct" and amount > 1:
-                    text += " Above 100% is a levered position: the instrument's leverage must fund it."
-                st.caption(text)
-            elif used == "risk_amount" and isinstance(amount, (int, float)) and cash:
-                st.caption(f"{amount:,.2f} lost on each trade that hits its stop, the same on every trade: "
-                           f"{amount / cash:.2%} of the starting cash of {cash:,.0f}.")
+            by, amount_of = sizing_choice(sizing)
+            with ui.section("Position size", "risk", "sizing", icon=":material/straighten:"):
+                picked_by = st.radio("Size each trade by", list(SIZE_BY), index=list(SIZE_BY).index(by)
+                                     if by in SIZE_BY else None, format_func=SIZE_BY.get, horizontal=True,
+                                     key=ui.key("risk.sizing", ":by"),
+                                     help="A fixed size: the same number of shares, lots or pounds a point on every "
+                                          "trade. Its value: what the position is worth when it opens. What it risks: "
+                                          "what it loses if the stop is hit, so a wider stop means a smaller trade "
+                                          "(with no stop, it is sized as if its margin were the risk).")
+                if picked_by != by and picked_by is not None:
+                    def switch_by():
+                        risk["sizing"] = new_sizing(picked_by, amount_of if picked_by != "size" else None, sizing)
+                        ui.prune_variables()
+                    ui.rerun_after(switch_by)
+                if by in ("value", "risk"):
+                    picked_of = st.radio("How much", list(AMOUNT_OF), index=list(AMOUNT_OF).index(amount_of)
+                                         if amount_of in AMOUNT_OF else None, format_func=AMOUNT_OF.get,
+                                         horizontal=True, key=ui.key("risk.sizing", ":amount_of"),
+                                         help="A fixed amount: the same money on every trade. A share of the balance: "
+                                              "of the cash after closed trades and every cost so far. A share of the "
+                                              "equity: of the balance plus the open trades' profit or loss. Both are "
+                                              "read at the close of the bar the signal fires on, so trades grow with "
+                                              "profits and shrink after losses. Which one can be searched on the "
+                                              "Optimise page.")
+                    if picked_of != amount_of and picked_of is not None:
+                        def switch_of():
+                            risk["sizing"] = new_sizing(by, picked_of, sizing)
+                            ui.prune_variables()
+                        ui.rerun_after(switch_of)
+                used = next((name_ for name_ in SIZING_KEYS if name_ in sizing), "stake")
+                if used == "size":
+                    st.caption("This strategy sizes by a raw engine size (size), which the choices above do not "
+                               "offer. Pick one of them to replace it.")
+                cash = float((spec.get("account") or {}).get("init_cash") or 0.0)
+                currency = (spec.get("account") or {}).get("base_currency") or "the account's currency"
+                labels = {"stake": stake_label(), "size": "Units (raw size)",
+                          "notional": f"Position value per trade ({currency})",
+                          "risk_amount": f"Risk per trade ({currency})",
+                          "notional_pct": "Share of the account per trade (a fraction: 0.1 = 10%)",
+                          "risk_pct": "Share of the account risked per trade (a fraction: 0.01 = 1%)"}
+                amount_help = {"stake": f"{labels['stake']}: the instrument's own unit, the same on every trade."
+                                        + (" A spread bet's stake is money per point: per cent of price on a share, "
+                                           "per pip on FX, per index point on an index." if trading == "spreadbet"
+                                           else ""),
+                               "size": "A raw size in the engine's own units.",
+                               "notional": "What each position is worth when it opens, the same on every trade.",
+                               "risk_amount": "What each trade loses if its stop is hit, the same on every trade.",
+                               "notional_pct": "What each position is worth when it opens, as a share of the balance "
+                                               "or the equity. Above 1 is a levered position, which the instrument's "
+                                               "leverage must fund.",
+                               "risk_pct": "What each trade loses if its stop is hit, as a share of the balance or the "
+                                           "equity."}
+                amount = ui.param_input(f"risk.sizing.{used}", {"type": "float", "default": SIZING_DEFAULTS[used]},
+                                        label=labels[used], help=amount_help[used])
+                # What the number means in money, under the box: 0.05 is 5%, not 0.05%.
+                if isinstance(amount, (int, float)):
+                    if used in FRACTION_KEYS:
+                        what = (f"{amount * cash:,.2f} lost on a trade that hits its stop" if used == "risk_pct" else
+                                f"each position worth {amount * cash:,.2f}")
+                        basis = RISK_OF.get(sizing.get("risk_of"), "the account")
+                        text = (f"{amount:g} is {amount:.2%} of {basis}, read at the close of each signal bar: {what} "
+                                f"while the account is at its starting {cash:,.0f}, more after profits and less after "
+                                "losses.")
+                        if used == "notional_pct" and amount > 1:
+                            text += " Above 100% is a levered position: the instrument's leverage must fund it."
+                        st.caption(text)
+                    elif used == "risk_amount" and cash:
+                        st.caption(f"{amount:,.2f} lost on each trade that hits its stop, the same on every trade: "
+                                   f"{amount / cash:.2%} of the starting cash of {cash:,.0f}.")
+                    elif used == "notional" and cash:
+                        st.caption(f"Each position is worth {amount:,.2f} when it opens, the same on every trade: "
+                                   f"{amount / cash:.0%} of the starting cash of {cash:,.0f}.")
+
+            # --- the stop ---
             stop = risk.get("stop") or {"kind": "none"}
-            stop_kind = st.radio("Stop", ["none", "fixed", "trailing"],
-                                 index=["none", "fixed", "trailing"].index(stop.get("kind", "none")),
-                                 format_func={"none": "No stop", "fixed": "Fixed stop", "trailing": "Trailing stop"}.get,
-                                 horizontal=True, key=ui.key("risk.stop", ":kind"),
-                                 help="Fixed and trailing stops cannot be combined: a trailing stop replaces the fixed "
-                                      "one. Whether there is a stop, which kind, how it is measured and its distance "
-                                      "can all be searched on the Optimise page (the extra exits need a fixed stop in "
-                                      "points, so with them only the distance is). A stop can be measured from a "
-                                      "line, such as 3 x an ATR or an EMA.")
-            if stop_kind != stop.get("kind", "none"):
-                def switch_stop():
-                    # The unit and both distances stay while the stop is off, so the optimiser can switch it on.
-                    risk["stop"] = dict(stop, kind=stop_kind)
-                    risk["stop"].setdefault("points", DISTANCE_DEFAULTS["stop"]["points"])
-                    ui.prune_variables()
-                ui.rerun_after(switch_stop)
-            if stop_kind == "none" and used in ("risk_pct", "risk_amount"):
-                # vectorbtX 1de5744 sizes a risk with no stop from the leverage (docs/UPSTREAM.md issue 28).
-                levers = ui.run_guarded("Reading the leverage", lambda: engine.default_leverage(spec)) or {}
-                parts = [f"{symbol} at {lever:g}x: worth {lever:g} x the risk, an implied stop "
-                         f"{100.0 / lever:.4g}% of the price away" for symbol, lever in levers.items() if lever]
-                st.caption("With no stop, each trade is sized as if its margin were the risk"
-                           + (": " + "; ".join(parts) if parts else "") + ". No stop is placed: a move past that point "
-                           "loses more than the risk, and a real account would meet a margin call first, which the "
-                           "backtest does not model.")
-            if stop_kind != "none":
-                distance_inputs(
-                    "stop", trailing=stop_kind == "trailing",
-                    help_points="How far from the fill price the stop sits, in points: the price distance divided by "
-                                "the point size. On a share a point is 1 cent, so a 1.00 move is 100 points; on FX it "
-                                "is a pip (0.0001, or 0.01 on a yen pair). A trailing stop in points stays this many "
-                                "points behind the best price since the entry.",
-                    help_pct="How far from the fill price the stop sits, as a fraction of that price: 0.02 puts it 2% "
-                             "below a long's fill (above a short's). A trailing stop keeps that share of the best "
-                             "price since the entry behind it. vectorbt's own stop, measured from the fill like a "
-                             "stop in points.")
+            with ui.section("Stop loss", "risk", "stop", icon=":material/block:"):
+                stop_kind = st.radio("Stop", ["none", "fixed", "trailing"],
+                                     index=["none", "fixed", "trailing"].index(stop.get("kind", "none")),
+                                     format_func={"none": "No stop", "fixed": "Fixed stop",
+                                                  "trailing": "Trailing stop"}.get,
+                                     horizontal=True, key=ui.key("risk.stop", ":kind"),
+                                     help="Fixed and trailing stops cannot be combined: a trailing stop replaces the "
+                                          "fixed one. Whether there is a stop, which kind, how it is measured and its "
+                                          "distance can all be searched on the Optimise page (the extra exits need a "
+                                          "fixed stop in points, so with them only the distance is). A stop can be "
+                                          "measured from a line, such as 3 x an ATR or an EMA.")
+                if stop_kind != stop.get("kind", "none"):
+                    def switch_stop():
+                        # The unit and both distances stay while the stop is off, so the optimiser can switch it on.
+                        risk["stop"] = dict(stop, kind=stop_kind)
+                        risk["stop"].setdefault("points", DISTANCE_DEFAULTS["stop"]["points"])
+                        ui.prune_variables()
+                    ui.rerun_after(switch_stop)
+                if stop_kind == "none" and used in ("risk_pct", "risk_amount"):
+                    # vectorbtX 1de5744 sizes a risk with no stop from the leverage (docs/UPSTREAM.md issue 28).
+                    levers = ui.run_guarded("Reading the leverage", lambda: engine.default_leverage(spec)) or {}
+                    parts = [f"{symbol} at {lever:g}x: worth {lever:g} x the risk, an implied stop "
+                             f"{100.0 / lever:.4g}% of the price away" for symbol, lever in levers.items() if lever]
+                    st.caption("With no stop, each trade is sized as if its margin were the risk"
+                               + (": " + "; ".join(parts) if parts else "") + ". No stop is placed: a move past that "
+                               "point loses more than the risk, and a real account would meet a margin call first, "
+                               "which the backtest does not model.")
+                if stop_kind != "none":
+                    distance_inputs(
+                        "stop", trailing=stop_kind == "trailing",
+                        help_points="How far from the fill price the stop sits, in points: the price distance divided "
+                                    "by the point size. On a share a point is 1 cent, so a 1.00 move is 100 points; on "
+                                    "FX it is a pip (0.0001, or 0.01 on a yen pair). A trailing stop in points stays "
+                                    "this many points behind the best price since the entry.",
+                        help_pct="How far from the fill price the stop sits, as a fraction of that price: 0.02 puts it "
+                                 "2% below a long's fill (above a short's). A trailing stop keeps that share of the "
+                                 "best price since the entry behind it. vectorbt's own stop, measured from the fill "
+                                 "like a stop in points.")
+
+            # --- the take profit ---
             target = risk.get("target") or {"kind": "none"}
             had_target = target.get("kind") == "fixed"
-            use_target = st.checkbox("Take profit", value=had_target, key=ui.key("risk.target", ":on"),
-                                     help="Close the trade once it has moved a set distance in your favour. Whether "
-                                          "there is one, how it is measured, and its distance can be searched on the "
-                                          "Optimise page.")
-            if use_target != had_target:
-                def switch_target():
-                    # The unit and both distances stay while the target is off, so the optimiser can switch it on.
-                    risk["target"] = dict(target, kind="fixed" if use_target else "none")
-                    risk["target"].setdefault("points", DISTANCE_DEFAULTS["target"]["points"])
-                    ui.prune_variables()
-                ui.rerun_after(switch_target)
-            if use_target:
-                distance_inputs(
-                    "target",
-                    help_points="How far from the fill price the target sits, in points (cents on a share, pips on "
-                                "FX). It fills like any exit, paying the spread.",
-                    help_pct="How far from the fill price the target sits, as a fraction of that price: 0.04 puts it "
-                             "4% above a long's fill (below a short's). It fills like any exit, paying the spread.")
-            # No leverage budget here: vectorbtX applies one to a portfolio's weights only.
-            # Each instrument's own leverage (just below) caps a rule strategy's trades.
-            leverage_summary()
-            shorts = {"partial": "Fill as much as the account funds", "skip": "Skip the trade"}
-            current_short = when_cash_short(spec)
-            chosen_short = st.radio(
-                "When a trade is bigger than the account can fund", list(shorts), index=list(shorts).index(current_short),
-                format_func=shorts.get, horizontal=True, key=ui.key("account.when_cash_short"),
-                help="An account funds its cash times the leverage (in a shared account, the cash left). Filling as "
-                     "much as it funds cuts the trade down, so a risk-sized trade then risks less than you asked. "
-                     "Skipping places nothing, so the run has fewer trades than signals. The default is to fill "
-                     "with an account per symbol and to skip in a shared account.")
-            if chosen_short != current_short:
-                ui.set_value("account.when_cash_short", chosen_short)
-            trade_size_check()
+            with ui.section("Take profit", "risk", "target", icon=":material/flag:"):
+                use_target = st.checkbox("Close the trade at a target", value=had_target, key=ui.key("risk.target", ":on"),
+                                         help="Close the trade once it has moved a set distance in your favour. "
+                                              "Whether there is one, how it is measured, and its distance can be "
+                                              "searched on the Optimise page.")
+                if use_target != had_target:
+                    def switch_target():
+                        # The unit and both distances stay while the target is off, so the optimiser can switch it on.
+                        risk["target"] = dict(target, kind="fixed" if use_target else "none")
+                        risk["target"].setdefault("points", DISTANCE_DEFAULTS["target"]["points"])
+                        ui.prune_variables()
+                    ui.rerun_after(switch_target)
+                if use_target:
+                    distance_inputs(
+                        "target",
+                        help_points="How far from the fill price the target sits, in points (cents on a share, pips "
+                                    "on FX). It fills like any exit, paying the spread.",
+                        help_pct="How far from the fill price the target sits, as a fraction of that price: 0.04 puts "
+                                 "it 4% above a long's fill (below a short's). It fills like any exit, paying the "
+                                 "spread.")
 
-            st.markdown("**Extra exits**")
+            # --- leverage, and a trade too big to fund ---
+            with ui.section("Leverage and funding", "risk", "funding", icon=":material/account_balance:"):
+                # No leverage budget here: vectorbtX applies one to a portfolio's weights only.
+                # Each instrument's own leverage caps a rule strategy's trades.
+                leverage_summary()
+                shorts = {"partial": "Fill as much as the account funds", "skip": "Skip the trade"}
+                current_short = when_cash_short(spec)
+                chosen_short = st.radio(
+                    "When a trade is bigger than the account can fund", list(shorts),
+                    index=list(shorts).index(current_short), format_func=shorts.get, horizontal=True,
+                    key=ui.key("account.when_cash_short"),
+                    help="An account funds its cash times the leverage (in a shared account, the cash left). Filling "
+                         "as much as it funds cuts the trade down, so a risk-sized trade then risks less than you "
+                         "asked. Skipping places nothing, so the run has fewer trades than signals. The default is to "
+                         "fill with an account per symbol and to skip in a shared account.")
+                if chosen_short != current_short:
+                    ui.set_value("account.when_cash_short", chosen_short)
+                trade_size_check()
+
+            # --- extra exits ---
             exits = risk.get("exits") or {}
             extra = [("time_bars", "Close after a number of bars", {"type": "int", "default": 20}, "Bars after entry"),
                      ("breakeven_points", "Move the stop to the entry price once in profit",
@@ -1028,226 +1142,229 @@ with form:
                                 "(down for a short) by one step. It never moves back.",
                                 "The step, in points."),
             }
-            for exit_key, label, declaration, amount in extra:
-                on = st.checkbox(label, value=exits.get(exit_key) is not None, key=ui.key(f"risk.exits.{exit_key}", ":on"),
-                                 help=extra_help[exit_key][0])
-                if on and exits.get(exit_key) is None:
-                    ui.rerun_after(lambda exit_key=exit_key, declaration=declaration:
-                                   risk.setdefault("exits", {}).__setitem__(exit_key, declaration["default"]))
-                if not on and exits.get(exit_key) is not None:
-                    def drop_exit(exit_key=exit_key):
-                        risk["exits"].pop(exit_key)
-                        ui.prune_variables()
-                    ui.rerun_after(drop_exit)
-                if on:
-                    ui.param_input(f"risk.exits.{exit_key}", declaration, label=amount, help=extra_help[exit_key][1])
-            if any(exits.get(name_) is not None for name_, *_ in extra) and \
-                    (stop_kind != "fixed" or (risk.get("stop") or {}).get("unit") == "pct"):
-                st.warning("The extra exits adjust a stop from its distance in points, so they need a fixed stop "
-                           "measured in points.")
+            any_exit = any(exits.get(name_) is not None for name_, *_ in extra)
+            with ui.section("Extra exits", "risk", "exits", expanded=any_exit, icon=":material/logout:"):
+                for exit_key, label, declaration, amount_label in extra:
+                    on = st.checkbox(label, value=exits.get(exit_key) is not None,
+                                     key=ui.key(f"risk.exits.{exit_key}", ":on"), help=extra_help[exit_key][0])
+                    if on and exits.get(exit_key) is None:
+                        ui.rerun_after(lambda exit_key=exit_key, declaration=declaration:
+                                       risk.setdefault("exits", {}).__setitem__(exit_key, declaration["default"]))
+                    if not on and exits.get(exit_key) is not None:
+                        def drop_exit(exit_key=exit_key):
+                            risk["exits"].pop(exit_key)
+                            ui.prune_variables()
+                        ui.rerun_after(drop_exit)
+                    if on:
+                        ui.param_input(f"risk.exits.{exit_key}", declaration, label=amount_label,
+                                       help=extra_help[exit_key][1])
+                if any_exit and (stop_kind != "fixed" or (risk.get("stop") or {}).get("unit", "points") != "points"):
+                    st.warning("The extra exits adjust a stop from its distance in points, so they need a fixed stop "
+                               "measured in points.")
 
-            st.markdown("**Order timing**")
+            # --- order timing ---
             orders = risk.get("orders") or {}
             intraday = is_intraday(spec)
-            for order_key, label, help_text in (
-                    ("good_for_day", "Entries are good for the day only",
-                     "An entry that would fill on the next day lapses instead: a signal on a day's last bar is dropped."),
-                    ("flat_by_day_end", "Close positions before the end of the day",
-                     "Exits on the bar before each day's last bar, so it fills at the last bar's open, and takes no new "
-                     "entries that would fill on that last bar.")):
-                on = st.checkbox(label, value=bool(orders.get(order_key)), key=ui.key(f"risk.orders.{order_key}"),
-                                 disabled=not intraday and not orders.get(order_key), help=help_text)
-                if on != bool(orders.get(order_key)):
-                    ui.set_value(f"risk.orders.{order_key}", on)
-            st.caption("For intraday bars. A day is the bars' calendar date (UTC). ⚠️ Every order fills at a bar's "
-                       "open, so closing before the end of the day fills at the last bar's open, not the close: "
-                       "vectorbtX has no market-on-close order yet." if intraday else
-                       "Order timing needs intraday bars (under one day).")
-            rule = engine.SAME_BAR_STOP_RULE
-            st.caption("Orders fill at the next bar's open. Stops and targets are measured from that open, and a "
-                       "stopped-out trade pays the spread on exit like any other. A bar that opens beyond the stop "
-                       "fills at its open. "
-                       + (f"When one bar's range holds both the stop and the target, the {rule} is taken."
-                          if rule else "Which of stop and target wins inside one bar has not been confirmed yet.")
-                       + " Points are price distances divided by the instrument's point size.")
-        if kind != "signals":
-            leverage_summary()
-            # call_plan passes the box's value either way (vectorbtX's own default is on).
-            budget = st.checkbox("Use a leverage budget", value=bool(risk.get("leverage_budget")),
-                                 key=ui.key("risk.leverage_budget"),
-                                 help="Scales the target weights down on any bar where the book's gross exposure "
-                                      "is above the leverage allowed. Only instruments whose leverage_type is "
-                                      "portfolio_level set that limit, so without one this changes nothing.")
-            if budget != bool(risk.get("leverage_budget")):
-                ui.set_value("risk.leverage_budget", budget)
+            with ui.section("Order timing", "risk", "orders", expanded=any(orders.values()),
+                            icon=":material/schedule:"):
+                for order_key, label, help_text in (
+                        ("good_for_day", "Entries are good for the day only",
+                         "An entry that would fill on the next day lapses instead: a signal on a day's last bar is "
+                         "dropped."),
+                        ("flat_by_day_end", "Close positions before the end of the day",
+                         "Exits on the bar before each day's last bar, so it fills at the last bar's open, and takes no "
+                         "new entries that would fill on that last bar.")):
+                    on = st.checkbox(label, value=bool(orders.get(order_key)), key=ui.key(f"risk.orders.{order_key}"),
+                                     disabled=not intraday and not orders.get(order_key), help=help_text)
+                    if on != bool(orders.get(order_key)):
+                        ui.set_value(f"risk.orders.{order_key}", on)
+                st.caption("For intraday bars. A day is the bars' calendar date (UTC). ⚠️ Every order fills at a bar's "
+                           "open, so closing before the end of the day fills at the last bar's open, not the close: "
+                           "vectorbtX has no market-on-close order yet." if intraday else
+                           "Order timing needs intraday bars (under one day).")
+                rule = engine.SAME_BAR_STOP_RULE
+                st.caption("Orders fill at the next bar's open. Stops and targets are measured from that open, and a "
+                           "stopped-out trade pays the spread on exit like any other. A bar that opens beyond the stop "
+                           "fills at its open. "
+                           + (f"When one bar's range holds both the stop and the target, the {rule} is taken."
+                              if rule else "Which of stop and target wins inside one bar has not been confirmed yet.")
+                           + " Points are price distances divided by the instrument's point size.")
 
     # --- account ----------------------------------------------------------------------
     with tabs["Account"]:
         account = spec.setdefault("account", {})
-        row = st.columns(2)
-        with row[0]:
-            ui.param_input("account.init_cash", {"type": "float", "default": 10000.0}, label="Starting cash",
-                           help="The account's opening balance, in the reporting currency below (or the "
-                                "instruments' own when none is set). With separate accounts, each symbol starts "
-                                "with this much.")
-        with row[1]:
-            freqs = sorted(set(FREQ.values()) | {account.get("freq", "D")})
-            ui.param_input("account.freq", {"type": "choice", "options": freqs, "default": FREQ[timeframe]},
-                           label="Bar frequency",
-                           help="How long one bar is, so annualised figures (Sharpe, yearly return) scale "
-                                "correctly. It follows the timeframe; change it only for unusual data.")
         # Read, not created: rendering must not change the spec. set_value makes it on the first write.
         extra = spec.get("engine_extra") or {}
+        random_priority = False
+
+        with ui.section("Cash and currency", "account", "cash", icon=":material/payments:"):
+            row = st.columns(2)
+            with row[0]:
+                ui.param_input("account.init_cash", {"type": "float", "default": 10000.0}, label="Starting cash",
+                               help="The account's opening balance, in the reporting currency below (or the "
+                                    "instruments' own when none is set). With separate accounts, each symbol starts "
+                                    "with this much.")
+            with row[1]:
+                freqs = sorted(set(FREQ.values()) | {account.get("freq", "D")})
+                ui.param_input("account.freq", {"type": "choice", "options": freqs, "default": FREQ[timeframe]},
+                               label="Bar frequency",
+                               help="How long one bar is, so annualised figures (Sharpe, yearly return) scale "
+                                    "correctly. It follows the timeframe; change it only for unusual data.")
+            base = st.text_input("Report in currency (optional)", value=account.get("base_currency") or "",
+                                 key=ui.key("account.base_currency"),
+                                 help="A three-letter code, such as GBP. Prices are converted into it with the FX "
+                                      "dataset below, paying the broker's conversion markup (Settings). Leave blank to "
+                                      "report in each instrument's currency.")
+            if (base or None) != account.get("base_currency"):
+                if base:
+                    ui.set_value("account.base_currency", base.upper())
+                else:
+                    ui.delete_key("account.base_currency")
+                    ui.delete_key("account.fx")
+            if base:
+                fx = account.get("fx") or {}
+                fx_symbol = st.selectbox("FX dataset to convert with", [None] + stored,
+                                         index=([None] + stored).index(fx.get("symbol")) if fx.get("symbol") in stored else 0,
+                                         key=ui.key("account.fx"), help="Store the pair (for example GBPUSD=X) on the Data page.")
+                if fx_symbol and fx.get("symbol") != fx_symbol:
+                    ui.set_value("account.fx", {"symbol": fx_symbol})
 
         # --- cash across symbols: one account per symbol, or one shared account ---
-        random_priority = False
         if kind == "signals" and len(symbols) > 1:
-            # The radio below has no label of its own, so the heading carries its ⓘ.
-            st.markdown("**Cash across symbols**",
-                        help="Separate accounts: each symbol trades its own copy of the starting cash, and the "
-                             "results add them up. One shared account: every symbol draws on the same cash, so "
-                             "entries can compete for it.")
-            cash_each = float(account.get("init_cash", 10000.0) or 0.0)
-            models = {"per_instrument": f"Each symbol trades its own copy of the account ({len(symbols)} × "
-                                        f"{cash_each:,.0f} = {len(symbols) * cash_each:,.0f} in all)",
-                      "shared": f"One account of {cash_each:,.0f}, shared by every symbol"}
-            current_cash = account.get("cash") or "per_instrument"
-            chosen_cash = st.radio("Cash across symbols", list(models), index=list(models).index(current_cash)
-                                   if current_cash in models else 0, format_func=models.get,
-                                   key=ui.key("account.cash"), label_visibility="collapsed")
-            if chosen_cash != current_cash:
-                def switch_cash():
-                    account["cash"] = chosen_cash
-                    if chosen_cash != "shared":
-                        # The priority only means something in a shared account (validate_spec says so).
-                        # What a trade too big to fund does (when_cash_short) stays as chosen on the
-                        # Risk tab; left unset, its default follows the account (spec.when_cash_short).
-                        account.pop("entry_priority", None)
-                ui.rerun_after(switch_cash)
-            if chosen_cash == "shared":
-                orders_by = {"symbols": "In symbol order", "random": "In a random order (seeded, so runs repeat)",
-                             "feature": "By a feature's value on the signal bar"}
-                priority = account.get("entry_priority") or {"by": "symbols"}
-                chosen_by = st.radio("When entries compete for the cash, fill them", list(orders_by),
-                                     index=list(orders_by).index(priority.get("by")) if priority.get("by") in orders_by
-                                     else 0, format_func=orders_by.get, key=ui.key("account.entry_priority", ":by"),
-                                     help="Exits always go first on a bar, so the cash they free is there for entries.")
-                if chosen_by != priority.get("by", "symbols"):
-                    def switch_priority():
-                        if chosen_by == "feature":
-                            first = next(iter(features), None)
-                            account["entry_priority"] = {"by": "feature", "highest_first": True,
-                                                         "score": {"feature": first} if first else {"price": "close"}}
-                        else:
-                            account["entry_priority"] = {"by": chosen_by}
-                    ui.rerun_after(switch_priority)
-                if chosen_by == "symbols":
-                    order = priority.get("order") or []
-                    picked_order = st.multiselect("Fill first, in this order (optional)", symbols,
-                                                  default=[symbol for symbol in order if symbol in symbols],
-                                                  key=ui.key("account.entry_priority.order"),
-                                                  help="Symbols left out follow, in the order of the symbol list.")
-                    if picked_order != order:
-                        if picked_order:
-                            ui.set_value("account.entry_priority", {"by": "symbols", "order": picked_order})
-                        else:
-                            ui.set_value("account.entry_priority", {"by": "symbols"})
-                elif chosen_by == "random":
-                    random_priority = True
-                    st.caption("Each bar's competing entries are shuffled with the random seed just below.")
+            with ui.section("Cash across symbols", "account", "across", icon=":material/call_split:"):
+                cash_each = float(account.get("init_cash", 10000.0) or 0.0)
+                models = {"per_instrument": f"Each symbol trades its own copy of the account ({len(symbols)} × "
+                                            f"{cash_each:,.0f} = {len(symbols) * cash_each:,.0f} in all)",
+                          "shared": f"One account of {cash_each:,.0f}, shared by every symbol"}
+                current_cash = account.get("cash") or "per_instrument"
+                chosen_cash = st.radio("How the cash is held", list(models), index=list(models).index(current_cash)
+                                       if current_cash in models else 0, format_func=models.get,
+                                       key=ui.key("account.cash"),
+                                   help="Separate accounts: each symbol trades its own copy of the starting cash, and "
+                                        "the results add them up. One shared account: every symbol draws on the same "
+                                        "cash, so entries can compete for it.")
+                if chosen_cash != current_cash:
+                    def switch_cash():
+                        account["cash"] = chosen_cash
+                        if chosen_cash != "shared":
+                            # The priority only means something in a shared account (validate_spec says so).
+                            # What a trade too big to fund does (when_cash_short) stays as chosen on the
+                            # Risk tab; left unset, its default follows the account (spec.when_cash_short).
+                            account.pop("entry_priority", None)
+                    ui.rerun_after(switch_cash)
+                if chosen_cash == "shared":
+                    orders_by = {"symbols": "In symbol order", "random": "In a random order (seeded, so runs repeat)",
+                                 "feature": "By a feature's value on the signal bar"}
+                    priority = account.get("entry_priority") or {"by": "symbols"}
+                    chosen_by = st.radio("When entries compete for the cash, fill them", list(orders_by),
+                                         index=list(orders_by).index(priority.get("by")) if priority.get("by") in orders_by
+                                         else 0, format_func=orders_by.get, key=ui.key("account.entry_priority", ":by"),
+                                         help="Exits always go first on a bar, so the cash they free is there for entries.")
+                    if chosen_by != priority.get("by", "symbols"):
+                        def switch_priority():
+                            if chosen_by == "feature":
+                                first = next(iter(features), None)
+                                account["entry_priority"] = {"by": "feature", "highest_first": True,
+                                                             "score": {"feature": first} if first else {"price": "close"}}
+                            else:
+                                account["entry_priority"] = {"by": chosen_by}
+                        ui.rerun_after(switch_priority)
+                    if chosen_by == "symbols":
+                        order = priority.get("order") or []
+                        picked_order = st.multiselect("Fill first, in this order (optional)", symbols,
+                                                      default=[symbol for symbol in order if symbol in symbols],
+                                                      key=ui.key("account.entry_priority.order"),
+                                                      help="Symbols left out follow, in the order of the symbol list.")
+                        if picked_order != order:
+                            if picked_order:
+                                ui.set_value("account.entry_priority", {"by": "symbols", "order": picked_order})
+                            else:
+                                ui.set_value("account.entry_priority", {"by": "symbols"})
+                    elif chosen_by == "random":
+                        random_priority = True
+                        st.caption("Each bar's competing entries are shuffled with the random seed (Engine details, below).")
+                    else:
+                        ui.ref_input("account.entry_priority.score", features, "Rank by",
+                                     help="The value that decides which competing entry is filled first, such as a "
+                                          "momentum or volatility feature.")
+                        highest = st.radio("Which goes first", [True, False],
+                                           index=0 if priority.get("highest_first", True) else 1,
+                                           format_func={True: "The highest value", False: "The lowest value"}.get,
+                                           horizontal=True, key=ui.key("account.entry_priority.highest_first"),
+                                           help="Whether the entry with the highest or the lowest value is filled "
+                                                "first.")
+                        if highest != priority.get("highest_first", True):
+                            ui.set_value("account.entry_priority.highest_first", highest)
+                        st.caption("The value on the bar the entry signal fires, before the fill at the next open.")
+                    st.caption("What an entry does when it needs more cash than is left (skip it, or fill part of it) is "
+                               f"set on the Risk tab: now {'skip it' if when_cash_short(spec) == 'skip' else 'fill part'}.")
+                st.caption("The optimiser's vectorised grid needs separate accounts; a shared account uses the ordinary grid.")
+
+        with ui.section("Holding costs", "account", "rates", icon=":material/percent:"):
+            rates = account.get("rates")
+            source = st.radio("Holding costs from interest rates", ["none", "static", "fred"],
+                              index=["none", "static", "fred"].index(rates["source"] if rates else "none"),
+                              format_func={"none": "None", "static": "Fixed rates", "fred": "FRED (needs a free key)"}.get,
+                              horizontal=True, key=ui.key("account.rates", ":source"),
+                              help="The overnight cost of holding a position: financing on borrowed money, and carry "
+                                   "on FX. None charges neither. Fixed rates use one yearly rate per currency for the "
+                                   "whole period. FRED uses the published overnight rates day by day.")
+            if source != (rates["source"] if rates else "none"):
+                ui.rerun_after(lambda: account.__setitem__("rates", None if source == "none" else
+                                                           {"source": source, "values": {"USD": 0.05}} if source == "static"
+                                                           else {"source": "fred"}))
+            if source == "static":
+                st.warning("A flat rate misreads any period that spans a rate cycle.")
+                values = rates.get("values") or {}
+                frame = pd.DataFrame({"currency": list(values.keys()), "rate": list(values.values())})
+                edited = st.data_editor(frame, num_rows="dynamic", key=ui.key("account.rates.values"), width="stretch",
+                                        hide_index=True, column_config={
+                                            "currency": st.column_config.TextColumn(
+                                                "currency", help="A three-letter code, such as USD."),
+                                            "rate": st.column_config.NumberColumn(
+                                                "rate", help="The yearly interest rate as a fraction (0.05 = 5%).")})
+                new_values = {str(code).strip().upper(): float(rate) for code, rate in zip(edited["currency"], edited["rate"])
+                              if isinstance(code, str) and code.strip() and pd.notna(rate)}
+                if new_values != values:
+                    ui.set_value("account.rates.values", new_values)
+            if source == "fred":
+                st.caption("FRED key found." if os.environ.get("FRED_API_KEY") else
+                           "No FRED key yet: set FRED_API_KEY or add it on the Settings page.")
+            st.caption("Carry on an FX instrument needs rates for both of its currencies, and the instrument must name both.")
+
+        # The engine's finer points: open when one of them is set, or a random entry order needs the seed.
+        with ui.section("Engine details", "account", "engine", icon=":material/settings:",
+                        expanded=random_priority or extra.get("seed") is not None
+                        or extra.get("upon_opposite_entry") is not None):
+            # The one random seed (vectorbt's seed=), which a random entry order needs.
+            seed_text = st.text_input("Random seed (needed for a random entry order)" if random_priority else
+                                      "Random seed (optional)",
+                                      value="" if extra.get("seed") is None else str(extra["seed"]),
+                                      key=ui.key("engine_extra.seed"),
+                                      help="A whole number that makes random choices repeat from run to run, such as a "
+                                           "random entry order. Blank: none set.")
+            seed = int(seed_text) if seed_text.strip().lstrip("-").isdigit() else None
+            if seed != extra.get("seed"):
+                if seed is None:
+                    ui.delete_key("engine_extra.seed")
                 else:
-                    ui.ref_input("account.entry_priority.score", features, "Rank by",
-                                 help="The value that decides which competing entry is filled first, such as a "
-                                      "momentum or volatility feature.")
-                    highest = st.radio("Which goes first", [True, False],
-                                       index=0 if priority.get("highest_first", True) else 1,
-                                       format_func={True: "The highest value", False: "The lowest value"}.get,
-                                       horizontal=True, key=ui.key("account.entry_priority.highest_first"),
-                                       help="Whether the entry with the highest or the lowest value is filled "
-                                            "first.")
-                    if highest != priority.get("highest_first", True):
-                        ui.set_value("account.entry_priority.highest_first", highest)
-                    st.caption("The value on the bar the entry signal fires, before the fill at the next open.")
-                st.caption("What an entry does when it needs more cash than is left (skip it, or fill part of it) is "
-                           f"set on the Risk tab: now {'skip it' if when_cash_short(spec) == 'skip' else 'fill part'}.")
-            st.caption("The optimiser's vectorised grid needs separate accounts; a shared account uses the ordinary grid.")
-        # The one random seed (vectorbt's seed=), right under the priority that may need it.
-        seed_text = st.text_input("Random seed (needed for a random entry order)" if random_priority else
-                                  "Random seed (optional)",
-                                  value="" if extra.get("seed") is None else str(extra["seed"]),
-                                  key=ui.key("engine_extra.seed"),
-                                  help="A whole number that makes random choices repeat from run to run, such as a "
-                                       "random entry order. Blank: none set.")
-        seed = int(seed_text) if seed_text.strip().lstrip("-").isdigit() else None
-        if seed != extra.get("seed"):
-            if seed is None:
-                ui.delete_key("engine_extra.seed")
-            else:
-                ui.set_value("engine_extra.seed", seed)
-        base = st.text_input("Report in currency (optional)", value=account.get("base_currency") or "",
-                             key=ui.key("account.base_currency"),
-                             help="A three-letter code, such as GBP. Prices are converted into it with the FX "
-                                  "dataset below, paying the broker's conversion markup (Settings). Leave blank to "
-                                  "report in each instrument's currency.")
-        if (base or None) != account.get("base_currency"):
-            if base:
-                ui.set_value("account.base_currency", base.upper())
-            else:
-                ui.delete_key("account.base_currency")
-                ui.delete_key("account.fx")
-        if base:
-            fx = account.get("fx") or {}
-            fx_symbol = st.selectbox("FX dataset to convert with", [None] + stored,
-                                     index=([None] + stored).index(fx.get("symbol")) if fx.get("symbol") in stored else 0,
-                                     key=ui.key("account.fx"), help="Store the pair (for example GBPUSD=X) on the Data page.")
-            if fx_symbol and fx.get("symbol") != fx_symbol:
-                ui.set_value("account.fx", {"symbol": fx_symbol})
-        rates = account.get("rates")
-        source = st.radio("Holding costs from interest rates", ["none", "static", "fred"],
-                          index=["none", "static", "fred"].index(rates["source"] if rates else "none"),
-                          format_func={"none": "None", "static": "Fixed rates", "fred": "FRED (needs a free key)"}.get,
-                          horizontal=True, key=ui.key("account.rates", ":source"),
-                          help="The overnight cost of holding a position: financing on borrowed money, and carry "
-                               "on FX. None charges neither. Fixed rates use one yearly rate per currency for the "
-                               "whole period. FRED uses the published overnight rates day by day.")
-        if source != (rates["source"] if rates else "none"):
-            ui.rerun_after(lambda: account.__setitem__("rates", None if source == "none" else
-                                                       {"source": source, "values": {"USD": 0.05}} if source == "static"
-                                                       else {"source": "fred"}))
-        if source == "static":
-            st.warning("A flat rate misreads any period that spans a rate cycle.")
-            values = rates.get("values") or {}
-            frame = pd.DataFrame({"currency": list(values.keys()), "rate": list(values.values())})
-            edited = st.data_editor(frame, num_rows="dynamic", key=ui.key("account.rates.values"), width="stretch",
-                                    hide_index=True, column_config={
-                                        "currency": st.column_config.TextColumn(
-                                            "currency", help="A three-letter code, such as USD."),
-                                        "rate": st.column_config.NumberColumn(
-                                            "rate", help="The yearly interest rate as a fraction (0.05 = 5%).")})
-            new_values = {str(code).strip().upper(): float(rate) for code, rate in zip(edited["currency"], edited["rate"])
-                          if isinstance(code, str) and code.strip() and pd.notna(rate)}
-            if new_values != values:
-                ui.set_value("account.rates.values", new_values)
-        if source == "fred":
-            st.caption("FRED key found." if os.environ.get("FRED_API_KEY") else
-                       "No FRED key yet: set FRED_API_KEY or add it on the Settings page.")
-        st.caption("Carry on an FX instrument needs rates for both of its currencies, and the instrument must name both.")
-        # Nothing is written here unless changed: a blank choice keeps vectorbt's default.
-        modes = [None, "ignore", "close", "closereduce", "reverse", "reversereduce"]
-        current_mode = extra.get("upon_opposite_entry")
-        opposite = st.selectbox("When an opposite entry arrives", modes,
-                                index=modes.index(current_mode) if current_mode in modes else 0,
-                                format_func=lambda mode: "Library default" if mode is None else mode,
-                                key=ui.key("engine_extra.upon_opposite_entry"),
-                                help="A long entry while short, or a short entry while long. ignore: keep the "
-                                     "position. close: close it. reverse: close it and open the other way. The "
-                                     "reduce forms differ only when positions add up, which the Studio does not "
-                                     "do. Library default: reversereduce.")
-        if opposite != current_mode:
-            if opposite is None:
-                ui.delete_key("engine_extra.upon_opposite_entry")
-            else:
-                ui.set_value("engine_extra.upon_opposite_entry", opposite)
+                    ui.set_value("engine_extra.seed", seed)
+            # Nothing is written here unless changed: a blank choice keeps vectorbt's default.
+            modes = [None, "ignore", "close", "closereduce", "reverse", "reversereduce"]
+            current_mode = extra.get("upon_opposite_entry")
+            opposite = st.selectbox("When an opposite entry arrives", modes,
+                                    index=modes.index(current_mode) if current_mode in modes else 0,
+                                    format_func=lambda mode: "Library default" if mode is None else mode,
+                                    key=ui.key("engine_extra.upon_opposite_entry"),
+                                    help="A long entry while short, or a short entry while long. ignore: keep the "
+                                         "position. close: close it. reverse: close it and open the other way. The "
+                                         "reduce forms differ only when positions add up, which the Studio does not "
+                                         "do. Library default: reversereduce.")
+            if opposite != current_mode:
+                if opposite is None:
+                    ui.delete_key("engine_extra.upon_opposite_entry")
+                else:
+                    ui.set_value("engine_extra.upon_opposite_entry", opposite)
 
     # --- preview ------------------------------------------------------------------------
     problems = validate_spec(spec)

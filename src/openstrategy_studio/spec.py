@@ -17,8 +17,9 @@ Its shape
                  or alternatives {"choose": label, "options": {label: rule}}.
     selection, weighting, schedule   (portfolio only)
     risk         sizing, stop, target, extra exits, order timing (signals only).
-                 sizing {one of SIZING_KEYS: number, "risk_of"?: "init_cash" | "balance" |
-                 "equity"}: risk_of says what risk_pct or notional_pct is a share of.
+                 sizing {one of SIZING_KEYS: number, "risk_of": "balance" | "equity"}: a fixed size
+                 (stake), a fixed value (notional) or risk (risk_amount), or a share of the
+                 account (notional_pct, risk_pct), which risk_of says is of the balance or equity.
                  stop {"kind": "none" | "fixed" | "trailing", "unit": "points" | "pct" |
                  "multiple" | "level", "points", "pct", "multiple", "line"} and target
                  {"kind": "none" | "fixed", "unit", ...}: a distance in points, a fraction of
@@ -72,11 +73,14 @@ TRADING = ["equity", "cfd", "spreadbet", "fx_spot"]
 PRICE_FIELDS = ["open", "high", "low", "close", "volume"]
 SIZING_KEYS = ["risk_pct", "risk_amount", "stake", "notional", "size", "notional_pct"]
 # What risk_pct (the risk) and notional_pct (the position's value) are a share of: vectorbtX's
-# risk_of (docs/UPSTREAM.md issues 23 and 30). The starting cash is the same amount on every
-# trade; the balance (cash after closed trades and every cost) and the equity (the balance
-# plus open trades at the close) are read at the close of the signal bar, so the trades grow
-# with profits and shrink after losses.
-RISK_OF = {"init_cash": "the starting cash", "balance": "the balance", "equity": "the equity"}
+# risk_of (docs/UPSTREAM.md issues 23 and 30). The balance (cash after closed trades and every
+# cost) and the equity (the balance plus open trades at the close) are read at the close of the
+# signal bar, so the trades grow with profits and shrink after losses. A share of the starting
+# cash is not offered (the owner's call, 20 November 2026): it is the same amount on every
+# trade, which a fixed amount (risk_amount, notional) already says, so one way is enough.
+# `size` (raw engine units, vectorbtX's escape hatch) stays valid for strategy files and tests,
+# but the Build page does not offer it.
+RISK_OF = {"balance": "the balance", "equity": "the equity"}
 # The sizing keys that are a share of the account, so take a risk_of.
 FRACTION_KEYS = ["risk_pct", "notional_pct"]
 EXIT_KEYS = ["time_bars", "breakeven_points", "step_points"]     # the numba exit templates (exit_rules.py)
@@ -544,8 +548,8 @@ def tunable_inputs(spec):
                         "label": f"Position size ({key})"})
     if any(key in sizing for key in FRACTION_KEYS):
         out.append({"path": "risk.sizing.risk_of", "group": "Risk", "type": "choice",
-                    "value": sizing.get("risk_of", "init_cash"), "options": list(RISK_OF), "labels": RISK_OF,
-                    "label": "Position size: a share of the starting cash, the balance or the equity"})
+                    "value": sizing.get("risk_of", "balance"), "options": list(RISK_OF), "labels": RISK_OF,
+                    "label": "Position size: a share of the balance or the equity"})
     # The stop and the target: whether there is one (its kind), how it is measured (its unit), and
     # its distances. Each keeps both distances while it is off or measured the other way, so a
     # trial that switches it has one to use.
@@ -909,11 +913,14 @@ def _check_risk(problems, spec, kind):
         problems.append(f"Unknown sizing setting: {', '.join(extra)}.")
     if "risk_of" in sizing:
         if sizing["risk_of"] not in RISK_OF:
-            problems.append("A position size is a share of the starting cash, the balance or the equity "
-                            "(risk_of init_cash, balance or equity).")
+            problems.append("A share of the account is a share of the balance or the equity (risk_of balance or "
+                            "equity). For the same amount on every trade, size by a fixed amount instead.")
         elif not any(key in sizing for key in FRACTION_KEYS):
             problems.append("Only a share of the account (risk a share, or a position worth a share) has a basis; "
                             "remove risk_of, or size by a share.")
+    elif any(key in sizing for key in FRACTION_KEYS):
+        problems.append("Say whether a share of the account is of the balance or of the equity (risk_of). For the "
+                        "same amount on every trade, size by a fixed amount (risk_amount or notional) instead.")
     # ⚠️ A stop or target written without its kind would be read as none: the trade would run
     # unprotected, or keep running past its target, with nothing to say so.
     if "kind" not in stop:

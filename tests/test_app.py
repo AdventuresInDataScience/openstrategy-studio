@@ -197,6 +197,19 @@ def current_key(app, suffix):
     return f"r{app.session_state['spec_rev']}:{suffix}"
 
 
+def open_cards(app, *paths):
+    """Open feature and condition cards before the next run (ui.is_open): closed, a card shows its title only."""
+    panels = dict(app.session_state["panels"]) if "panels" in app.session_state else {}
+    panels.update({path: True for path in paths})
+    app.session_state["panels"] = panels
+
+
+def card_titles(app):
+    """The text of every card's title row (ui.card_header), tags removed."""
+    import re
+    return [re.sub(r"<[^>]+>", " ", item.value) for item in app.markdown if "os-title" in item.value]
+
+
 def test_build_steps_edit_the_spec(tmp_path, monkeypatch):
     """The Build page as a user drives it: the nested picker, a condition and the logic line, the two Setup questions."""
     testing = pytest.importorskip("streamlit.testing.v1")
@@ -215,20 +228,24 @@ def test_build_steps_edit_the_spec(tmp_path, monkeypatch):
     assert not app.exception, [item.value for item in app.exception]
     kc = app.session_state["spec"]["features"]["kc"]
     assert kc["indicator"] == "talib:KC" and kc["params"] == {"timeperiod": 20, "atrperiod": 10, "nbdev": 2.0}
+    # It opens at once with its settings showing; the others stay closed.
+    assert app.number_input(key=current_key(app, "features.kc.params.timeperiod")).value == 20
+    assert not [box for box in app.number_input if box.key == current_key(app, "features.fast.params.timeperiod")]
     # The picker remembers where it was; the suggested name moves on.
     assert app.selectbox(key="pick:family:Indicator").value == "Bands and channels"
     # Rules: a second condition joins the logic line with "and", and the box shows it; a broken
     # line says what is wrong.
     app.button(key=current_key(app, "rules.long_entry:add")).click().run()
     rule = app.session_state["spec"]["rules"]["long_entry"]
-    assert set(rule["conditions"]) == {"A", "B"} and rule["logic"] == "A and B"
-    assert app.text_input(key=current_key(app, "rules.long_entry:logic")).value == "A and B"
-    app.text_input(key=current_key(app, "rules.long_entry:logic")).set_value("A or B or").run()
+    # A new condition is named condition1, not a letter (the owner's call, 20 November 2026).
+    assert set(rule["conditions"]) == {"A", "condition1"} and rule["logic"] == "A and condition1"
+    assert app.text_input(key=current_key(app, "rules.long_entry:logic")).value == "A and condition1"
+    app.text_input(key=current_key(app, "rules.long_entry:logic")).set_value("A or condition1 or").run()
     assert any("ends too soon" in item.value for item in app.error)
-    app.text_input(key=current_key(app, "rules.long_entry:logic")).set_value("A or not B").run()
-    assert app.session_state["spec"]["rules"]["long_entry"]["logic"] == "A or not B"
-    # Removing B takes it out of the logic line too.
-    app.button(key=current_key(app, "rules.long_entry.conditions.B:remove")).click().run()
+    app.text_input(key=current_key(app, "rules.long_entry:logic")).set_value("A or not condition1").run()
+    assert app.session_state["spec"]["rules"]["long_entry"]["logic"] == "A or not condition1"
+    # Its bin, on its title row, takes it out of the logic line too.
+    app.button(key=current_key(app, "rules.long_entry.conditions.condition1:remove")).click().run()
     rule = app.session_state["spec"]["rules"]["long_entry"]
     assert set(rule["conditions"]) == {"A"} and rule["logic"] == "A"
     assert not app.exception
@@ -312,6 +329,7 @@ def test_an_average_can_hand_its_type_to_the_optimiser(tmp_path, monkeypatch):
     app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
     app.session_state["spec"] = copy.deepcopy(before)
     app.session_state["spec_rev"] = 0
+    open_cards(app, "features.fast")
     app.run()
     app.button(key=current_key(app, "features.fast:any_type")).click().run()
     assert not app.exception, [item.value for item in app.exception]
@@ -360,6 +378,7 @@ def test_a_condition_is_renamed_in_its_name_box(tmp_path, monkeypatch):
     app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
     app.session_state["spec"] = spec
     app.session_state["spec_rev"] = 0
+    open_cards(app, "rules.long_entry.conditions.A")
     app.run()
     app.text_input(key=current_key(app, "rules.long_entry.conditions.A:name")).set_value("trend").run()
     assert not app.exception, [item.value for item in app.exception]
@@ -375,8 +394,8 @@ def test_a_condition_is_renamed_in_its_name_box(tmp_path, monkeypatch):
     assert app.session_state["spec"] == settled
     app.text_input(key=current_key(app, "rules.long_entry.conditions.trend:name")).set_value("trend").run()
     app.button(key=current_key(app, "rules.long_entry:add")).click().run()
-    assert app.session_state["spec"]["rules"]["long_entry"]["logic"] == "trend and A"
-    app.text_input(key=current_key(app, "rules.long_entry.conditions.A:name")).set_value("trend").run()
+    assert app.session_state["spec"]["rules"]["long_entry"]["logic"] == "trend and condition1"
+    app.text_input(key=current_key(app, "rules.long_entry.conditions.condition1:name")).set_value("trend").run()
     assert any("already has a condition called trend" in item.value for item in app.error)
     assert not app.exception, [item.value for item in app.exception]
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
@@ -391,6 +410,7 @@ def test_a_feature_is_renamed_in_its_name_box(tmp_path, monkeypatch):
     app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
     app.session_state["spec"] = load_template("ma_cross")
     app.session_state["spec_rev"] = 0
+    open_cards(app, "features.fast")
     app.run()
     app.text_input(key=current_key(app, "features.fast:name")).set_value("quick").run()
     assert not app.exception, [item.value for item in app.exception]
@@ -419,15 +439,16 @@ def test_a_feature_panel_title_shows_an_edit_at_once(tmp_path, monkeypatch):
     app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
     app.session_state["spec"] = load_template("ma_cross")
     app.session_state["spec_rev"] = 0
+    open_cards(app, "features.fast", "features.slow")
     app.run()
     app.number_input(key=current_key(app, "features.fast.params.timeperiod")).set_value(60).run()
     assert not app.exception, [item.value for item in app.exception]
-    labels = [panel.label for panel in app.expander]
-    assert "fast: Simple Moving Average · SMA(close, 60)" in labels, labels
+    titles = card_titles(app)
+    assert any(" fast " in title and "SMA(close, 60)" in title for title in titles), titles
     # An input too: the slow average applied to the open instead of the close.
     app.selectbox(key=current_key(app, "features.slow.inputs.close")).set_value("open").run()
-    labels = [panel.label for panel in app.expander]
-    assert "slow: Simple Moving Average · SMA(open, 200)" in labels, labels
+    titles = card_titles(app)
+    assert any(" slow " in title and "SMA(open, 200)" in title for title in titles), titles
     assert app.session_state["spec"]["features"]["slow"]["inputs"]["close"] == "open"
     assert not app.exception, [item.value for item in app.exception]
 
@@ -443,15 +464,17 @@ def test_conditions_take_every_kind_and_a_timing_in_any_rule(tmp_path, monkeypat
     app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
     app.session_state["spec"] = load_template("ma_cross")
     app.session_state["spec_rev"] = 0
+    open_cards(app, "rules.long_entry.conditions.A")
     app.run()
     app.button(key=current_key(app, "rules.long_exit:add")).click().run()
     rule = app.session_state["spec"]["rules"]["long_exit"]
-    assert set(rule["conditions"]) == {"A", "B"} and rule["logic"] == "A and B"
-    app.selectbox(key=current_key(app, "rules.long_exit.conditions.B:kind")).set_value("calendar").run()
-    assert app.session_state["spec"]["rules"]["long_exit"]["conditions"]["B"] == {"filter": "weekday",
-                                                                                   "days": [0, 1, 2, 3, 4]}
-    app.selectbox(key=current_key(app, "rules.long_exit.conditions.B:kind")).set_value("higher").run()
-    higher = app.session_state["spec"]["rules"]["long_exit"]["conditions"]["B"]
+    assert set(rule["conditions"]) == {"A", "condition1"} and rule["logic"] == "A and condition1"
+    new = "rules.long_exit.conditions.condition1"
+    app.selectbox(key=current_key(app, f"{new}:kind")).set_value("calendar").run()
+    assert app.session_state["spec"]["rules"]["long_exit"]["conditions"]["condition1"] == {
+        "filter": "weekday", "days": [0, 1, 2, 3, 4]}
+    app.selectbox(key=current_key(app, f"{new}:kind")).set_value("higher").run()
+    higher = app.session_state["spec"]["rules"]["long_exit"]["conditions"]["condition1"]
     assert higher["filter"] == "higher_timeframe" and higher["timeframe"] == "1w"     # the first above 1d
     assert validate_spec(app.session_state["spec"]) == []
     # The cross may have happened on any of the last 5 bars.
@@ -460,9 +483,11 @@ def test_conditions_take_every_kind_and_a_timing_in_any_rule(tmp_path, monkeypat
     app.number_input(key=current_key(app, "rules.long_entry.conditions.A.within_bars")).set_value(5).run()
     condition = app.session_state["spec"]["rules"]["long_entry"]["conditions"]["A"]
     assert condition["within_bars"] == 5 and condition["op"] == "crosses_above"
-    labels = [panel.label for panel in app.expander]
-    assert "A · fast crosses above slow, on any of the last 5 bars" in labels, labels
-    assert "Long entry · A" in labels and "Short entry · not used" in labels, labels
+    titles = card_titles(app)
+    assert any(" A " in title and "fast crosses above slow, on any of the last 5 bars" in title for title in titles), \
+        titles
+    assert any("Long entry" in title and " A " in title for title in titles), titles
+    assert any("Short entry" in title and "not used" in title for title in titles), titles
     app.selectbox(key=current_key(app, "rules.long_entry.conditions.A:timing")).set_value("now").run()
     assert "within_bars" not in app.session_state["spec"]["rules"]["long_entry"]["conditions"]["A"]
     assert not app.exception, [item.value for item in app.exception]
@@ -480,10 +505,12 @@ def test_a_rule_is_added_and_deleted_with_its_variables(tmp_path, monkeypatch):
     app.session_state["spec_rev"] = 0
     app.run()
     app.button(key=current_key(app, "rules.short_entry:add_rule")).click().run()
-    assert app.session_state["spec"]["rules"]["short_entry"]["logic"] == "A"
-    app.multiselect(key=current_key(app, "rules.short_entry.conditions.A:optimise")).select(
-        "rules.short_entry.conditions.A.op").run()
-    assert "rules.short_entry.conditions.A.op" in app.session_state["spec"]["optimise"]["variables"]
+    assert app.session_state["spec"]["rules"]["short_entry"]["logic"] == "condition1"
+    # Its comparison searched (added on the Optimise page, the one place a variable is added).
+    spec = app.session_state["spec"]
+    spec["optimise"]["variables"]["rules.short_entry.conditions.condition1.op"] = {"values": ["<", ">"]}
+    app.session_state["spec"] = spec
+    app.run()
     app.button(key=current_key(app, "rules.short_entry:delete_rule")).click().run()
     spec = app.session_state["spec"]
     assert spec["rules"]["short_entry"] is None
@@ -495,9 +522,10 @@ def test_a_rule_is_added_and_deleted_with_its_variables(tmp_path, monkeypatch):
     assert not app.exception, [item.value for item in app.exception]
 
 
-def test_a_conditions_values_are_optimised_from_its_panel(tmp_path, monkeypatch):
-    """Each condition's Optimise list adds its values to the Optimise page with a starting range,
-    bars ago at 0 included; taking one out, or deleting the condition, removes it."""
+def test_a_conditions_searched_values_show_in_its_card(tmp_path, monkeypatch):
+    """The Optimise page is the one place a value is added to the search (the owner's call, 20
+    November 2026); each condition's card only says what is searched, open or closed, and deleting
+    the condition takes its variables with it."""
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
     monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
@@ -506,24 +534,15 @@ def test_a_conditions_values_are_optimised_from_its_panel(tmp_path, monkeypatch)
     app.session_state["spec_rev"] = 0
     app.run()
     base = "rules.long_entry.conditions.A"
-    picker = app.multiselect(key=current_key(app, f"{base}:optimise"))
-    # Shown in words, each with its value now (AppTest lists the shown text).
-    assert picker.options == ["the comparison (now crosses above)", "bars ago (left) (now 0)",
-                              "the number (right) (now 30.0)"], picker.options
-    # The template already searches the number (15 to 40), so the list opens with it.
-    assert picker.value == [f"{base}.right.const"]
-    picker.select(f"{base}.left.shift").run()
-    found = app.session_state["spec"]["optimise"]["variables"]
-    assert found[f"{base}.right.const"] == {"start": 15, "stop": 40}
-    assert found[f"{base}.left.shift"] == {"start": 0, "stop": 2, "step": 1}         # 0, 1 and 2 bars ago
-    assert any("Searched: the number (right): 15 to 40; bars ago (left): 0 to 2 by 1" in item.value
+    # The template searches the number (15 to 40); the closed card says so, and offers no picker.
+    assert any("Optimised: the number (right) 15 to 40. Set on the Optimise page." in item.value
                for item in app.caption), [item.value for item in app.caption]
-    app.multiselect(key=current_key(app, f"{base}:optimise")).unselect(f"{base}.right.const").run()
-    found = app.session_state["spec"]["optimise"]["variables"]
-    assert f"{base}.right.const" not in found and f"{base}.left.shift" in found
+    assert not [box for box in app.multiselect if box.label == "Optimise"]
     # A trial's bars ago of 0, written back by Apply to the strategy, is left as it is.
+    open_cards(app, base)
     spec = app.session_state["spec"]
     spec["rules"]["long_entry"]["conditions"]["A"]["left"]["shift"] = 0
+    app.session_state["spec"] = spec
     before = copy.deepcopy(spec)
     app.run()
     assert app.session_state["spec"] == before
@@ -571,7 +590,7 @@ def test_the_backtest_results_page_shows_the_chart_before_every_metric(tmp_path,
 
 
 def spread_bet_on_spy(tmp_path):
-    """The owner's run (17 November 2026): SPY as a spread bet, 0.05 of the cash risked over a
+    """The owner's run (17 November 2026): SPY as a spread bet, 500 (5% of the cash) risked over a
     100-point stop, on stored daily prices near 600."""
     from openstrategy_studio import config, data as data_module
 
@@ -587,12 +606,12 @@ def spread_bet_on_spy(tmp_path):
     spec["features"]["slow"]["params"]["timeperiod"] = 30
     spec["instruments"] = {"SPY": {"point_size": 0.01}}
     spec["account"].pop("rates")
-    spec["risk"] = {"sizing": {"risk_pct": 0.05}, "stop": {"kind": "fixed", "points": 100.0}, "target": None}
+    spec["risk"] = {"sizing": {"risk_amount": 500.0}, "stop": {"kind": "fixed", "points": 100.0}, "target": None}
     return spec
 
 
 def test_the_risk_tab_shows_leverage_and_checks_the_trade_size(tmp_path, monkeypatch):
-    """What 0.05 means in money, the leverage a blank box gives, and the trade the run would cut down."""
+    """What the risk is as a share, the leverage a blank box gives, and the trade the run would cut down."""
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
     monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
@@ -603,7 +622,8 @@ def test_the_risk_tab_shows_leverage_and_checks_the_trade_size(tmp_path, monkeyp
     app.run()
     assert not app.exception, [item.value for item in app.exception]
     assert app.session_state["spec"] == spec
-    assert any(item.value.startswith("0.05 is 5.00% of the starting cash of 10,000: 500.00 lost") for item in app.caption)
+    assert any(item.value.startswith("500.00 lost on each trade that hits its stop, the same on every trade: 5.00% of "
+                                     "the starting cash of 10,000") for item in app.caption)
     warned = [item.value for item in app.warning if "leverage funds" in item.value]
     assert warned and "5x leverage funds 50,000" in warned[0] and "cut it down to 50,000" in warned[0], warned
     # The stop box says what its points are in price, in the market's words ...
@@ -726,8 +746,9 @@ def test_the_usual_terms_follow_the_way_of_trading(tmp_path, monkeypatch):
 
 
 def test_the_risk_tab_sizes_from_the_account_and_measures_a_stop_from_a_line(tmp_path, monkeypatch):
-    """vectorbtX 2b2d090 on the Risk tab: a share of the balance or equity (issues 23 and 30), risk
-    sizing with no stop (28), and a stop as a multiple of a line or at its level (26 and 31)."""
+    """Position size as two questions (what sets it, how much: the owner's call, 20 November 2026), a
+    share of the balance or equity (issues 23 and 30), risk sizing with no stop (28), and a stop as a
+    multiple of a line or at its level (26 and 31)."""
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
     monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
@@ -736,12 +757,20 @@ def test_the_risk_tab_sizes_from_the_account_and_measures_a_stop_from_a_line(tmp
     app.session_state["spec_rev"] = 0
     app.run()
     assert not app.exception, [item.value for item in app.exception]
-    # A share of the equity, then a position worth a share of it: the basis goes with the share.
-    app.radio(key=current_key(app, "risk.sizing.risk_of")).set_value("equity").run()
-    assert app.session_state["spec"]["risk"]["sizing"]["risk_of"] == "equity"
+    assert app.session_state["spec"]["risk"]["sizing"] == {"risk_amount": 100.0}
+    # A fixed risk of 100 becomes the share it is of the starting cash, of the equity.
+    app.radio(key=current_key(app, "risk.sizing:amount_of")).set_value("equity").run()
+    assert app.session_state["spec"]["risk"]["sizing"] == {"risk_pct": 0.01, "risk_of": "equity"}
     assert any("read at the close of each signal bar" in item.value for item in app.caption)
-    app.radio(key=current_key(app, "risk.sizing:kind")).set_value("notional_pct").run()
+    # Sized by its value instead, still a share of the equity; then a fixed value, the same money.
+    app.radio(key=current_key(app, "risk.sizing:by")).set_value("value").run()
     assert app.session_state["spec"]["risk"]["sizing"] == {"notional_pct": 0.1, "risk_of": "equity"}
+    app.radio(key=current_key(app, "risk.sizing:amount_of")).set_value("fixed").run()
+    assert app.session_state["spec"]["risk"]["sizing"] == {"notional": 1000.0}
+    # A fixed size counts the way of trading's own unit: money a point on a spread bet.
+    app.radio(key=current_key(app, "risk.sizing:by")).set_value("size").run()
+    assert app.session_state["spec"]["risk"]["sizing"] == {"stake": 1.0}
+    assert app.number_input(key=current_key(app, "risk.sizing.stake")).label.startswith("Stake per point")
     # A stop as a multiple of a line: the first feature, three times.
     app.radio(key=current_key(app, "risk.stop:unit")).set_value("multiple").run()
     stop = app.session_state["spec"]["risk"]["stop"]
@@ -754,10 +783,75 @@ def test_the_risk_tab_sizes_from_the_account_and_measures_a_stop_from_a_line(tmp
     assert validate_spec(app.session_state["spec"]) == []
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
     # Risk sizing with no stop: sized from the leverage, and the tab says what that means.
-    app.radio(key=current_key(app, "risk.sizing:kind")).set_value("risk_pct").run()
+    app.radio(key=current_key(app, "risk.sizing:by")).set_value("risk").run()
+    assert app.session_state["spec"]["risk"]["sizing"] == {"risk_amount": 100.0}
+    app.radio(key=current_key(app, "risk.sizing:amount_of")).set_value("balance").run()
     app.radio(key=current_key(app, "risk.stop:kind")).set_value("none").run()
-    assert app.session_state["spec"]["risk"]["sizing"] == {"risk_pct": 0.01, "risk_of": "equity"}
+    assert app.session_state["spec"]["risk"]["sizing"] == {"risk_pct": 0.01, "risk_of": "balance"}
     assert any("as if its margin were the risk" in item.value and "30x" in item.value for item in app.caption)
     assert validate_spec(app.session_state["spec"]) == []
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_a_fixed_size_is_counted_in_each_markets_unit(tmp_path, monkeypatch):
+    """Shares bought outright, money a point on a spread bet, lots on FX, contracts on other CFDs."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    for trading, asset_class, wanted in (("equity", "stocks", "Shares per trade"),
+                                         ("spreadbet", "fx", "Stake per point"),
+                                         ("fx_spot", "fx", "Lots per trade"),
+                                         ("cfd", "fx", "Lots per trade"),
+                                         ("cfd", "index", "Contracts per trade")):
+        spec = load_template("ma_cross")
+        spec["setup"]["trading"] = trading
+        spec["instruments"]["EURUSD=X"]["asset_class"] = asset_class
+        if trading in ("cfd", "fx_spot"):
+            spec["instruments"]["EURUSD=X"]["contract_size"] = 100000.0 if asset_class == "fx" else 1.0
+        spec["risk"]["sizing"] = {"stake": 1.0}
+        app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+        app.session_state["spec"] = spec
+        app.session_state["spec_rev"] = 0
+        app.run()
+        assert not app.exception, (trading, [item.value for item in app.exception])
+        assert app.number_input(key=current_key(app, "risk.sizing.stake")).label.startswith(wanted), trading
+
+
+def test_a_new_symbol_starts_with_every_value_filled_in(tmp_path, monkeypatch):
+    """No blank cells (the owner's call, 20 November 2026): a symbol added gets its market's usual values,
+    and an older strategy's blank cells fill in on one press, leaving typed values alone."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import config, data as data_module
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    data_dir = config.data_dir(config.load_settings())
+    synthetic = data_module.synthetic_ohlcv(["EURUSD=X"], n=300, seed=4)
+    frame = pd.DataFrame({field: synthetic[field]["EURUSD=X"] for field in ("open", "high", "low", "close", "volume")})
+    data_module.store_dataset(data_dir, "EURUSD=X", "1d", frame, "yahoo")
+    spec = blank_spec()
+    spec["setup"]["trading"] = "cfd"
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = spec
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.multiselect(key=current_key(app, "data.symbols")).select("EURUSD=X").run()
+    assert not app.exception, [item.value for item in app.exception]
+    fields = app.session_state["spec"]["instruments"]["EURUSD=X"]
+    # An FX CFD: the pair read from its ticker, a lot of 100,000, 30x, a pip, and every cost written out.
+    assert fields["asset_class"] == "fx" and fields["base_currency"] == "EUR" and fields["quote_currency"] == "USD"
+    assert fields["contract_size"] == 100000.0 and fields["leverage"] == 30.0 and fields["point_size"] == 0.0001
+    assert fields["commission_flat"] == 0.0 and fields["slippage"] == 0.0 and fields["rounding"] == "floor"
+    assert not [button for button in app.button if button.key == current_key(app, "instruments:fill")]
+    # An older strategy with blanks: one press fills them, a typed spread stays.
+    spec = app.session_state["spec"]
+    spec["instruments"]["EURUSD=X"] = {"spread_points": 0.6, "point_size": 0.0001}
+    app.session_state["spec"] = spec
+    app.session_state["spec_rev"] = 30
+    app.run()
+    app.button(key=current_key(app, "instruments:fill")).click().run()
+    fields = app.session_state["spec"]["instruments"]["EURUSD=X"]
+    assert fields["spread_points"] == 0.6 and fields["contract_size"] == 100000.0 and fields["leverage"] == 30.0
     assert not app.exception, [item.value for item in app.exception]
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)

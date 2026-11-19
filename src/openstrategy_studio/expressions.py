@@ -168,6 +168,18 @@ def next_letter(existing):
         index += 1
 
 
+def next_condition_name(existing):
+    """The first free default name for a new condition: condition1, condition2 ...
+
+    Words, not letters (the owner's call, 20 November 2026: "A" read as confusing). Any name
+    can still be typed in its Name box, and a strategy's older lettered names keep working.
+    """
+    number = 1
+    while f"condition{number}" in existing:
+        number += 1
+    return f"condition{number}"
+
+
 def append_letter(logic, letter, op="and"):
     """The logic line with a new condition joined on with `op`."""
     if not (logic or "").strip():
@@ -277,7 +289,10 @@ def condition_text(condition):
 
 def _number(value):
     if isinstance(value, float):
-        return f"{value:,.4g}"
+        # A whole number reads as one (10,000, not 1e+04, which ".4g" gave for a starting cash).
+        if value.is_integer() and abs(value) < 1e15:
+            return f"{int(value):,}"
+        return f"{value:,.6g}" if 1e-4 <= abs(value) < 1e9 else f"{value:.4g}"
     if isinstance(value, int):
         return f"{value:,}"
     return str(value)

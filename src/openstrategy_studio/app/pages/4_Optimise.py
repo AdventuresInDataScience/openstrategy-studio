@@ -47,16 +47,26 @@ def shown(row, value):
     return (row.get("labels") or {}).get(value, value)
 
 
+# The one place a value is added to the search or taken out of it (the owner's call, 20 November
+# 2026): the Build page only shows, under each condition, what is searched here.
+st.caption("Pick what the optimiser searches here, from any part of the strategy. The Build page shows what is "
+           "searched under each rule's conditions.")
 candidates = [row for row in rows if row["path"] not in found]
 if candidates:
-    left, right = st.columns([5, 1])
     groups = sorted({row["group"] for row in candidates}, key=["Features", "Rules", "Risk", "Portfolio"].index)
+    # Narrow a long list to one part of the strategy; nothing picked shows every part.
+    part = st.segmented_control("Show", groups, default=None, key=ui.key("optimise", ":part"),
+                                help="Show only one part of the strategy's values in the list below: its features' "
+                                     "settings, its rules' numbers and comparisons, or its risk dials. Press it "
+                                     "again to show every part.")
+    if part:
+        candidates = [row for row in candidates if row["group"] == part]
+    left, right = st.columns([5, 1], vertical_alignment="bottom")
     picked = left.selectbox("Add a variable", candidates,
                             format_func=lambda row: f"{row['group']}: {row['label']} (now {shown(row, row['value'])})",
                             key=ui.key("optimise", ":add"),
                             help=f"Every value of the strategy that can vary: {', '.join(groups).lower()}.")
-    right.write("")
-    if right.button("Add", type="primary", key=ui.key("optimise", ":add:go")):
+    if right.button("Add", type="primary", key=ui.key("optimise", ":add:go"), icon=":material/add:", width="stretch"):
         spec.setdefault("optimise", {}).setdefault("variables", {})[picked["path"]] = default_variable(picked)
         write_variables()
         ui.renew_widgets()

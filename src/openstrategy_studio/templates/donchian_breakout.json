@@ -129,7 +129,7 @@
   },
   "risk": {
     "sizing": {
-      "risk_pct": 0.01
+      "risk_amount": 100.0
     },
     "stop": {
       "kind": "fixed",

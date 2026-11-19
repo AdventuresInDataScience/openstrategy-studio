@@ -1,4 +1,4 @@
-# Daylight: the Studio's default page theme.
+# Daylight: light and airy. (Midnight is the default page theme.)
 #
 # A page theme is this one file. To make your own, open the Settings page, pick a
 # theme and press "Make an editable copy": the copy lands in your themes folder
@@ -58,4 +58,11 @@ glow = "radial-gradient(1100px 520px at 12% -8%, rgba(79, 70, 229, 0.10), transp
 positive = "#059669"                        # gains in the chart theme's heatmaps
 negative = "#E11D48"                        # losses, and the diagram's risk node
 chart_theme = "page"                        # "page": charts drawn from these colours; or a chart theme, like "nord"
+# The section tones: the colour each part of the Build page's cards wears (a left bar, a tint, the title).
+tone_setup = "#4F46E5"                      # setup: symbols, dates, instruments
+tone_feature = "#0891B2"                    # features
+tone_entry = "#059669"                      # entry rules
+tone_exit = "#E11D48"                       # exit rules
+tone_risk = "#D97706"                       # sizing, stops, targets, exits
+tone_account = "#7C3AED"                    # the account
 # css = """ extra rules, added after the stylesheet """

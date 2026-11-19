@@ -56,9 +56,17 @@ def test_a_share_of_the_account_names_its_basis(ma_spec):
     assert problems_for(ma_spec, risk__sizing={"notional_pct": 0.5, "risk_of": "balance"}) == []
     says(problems_for(ma_spec, risk__sizing={"risk_pct": 0.01, "risk_of": "margin"}), "the balance or the equity")
     says(problems_for(ma_spec, risk__sizing={"stake": 1.0, "risk_of": "equity"}), "remove risk_of")
+    # A share of the starting cash is a fixed amount, so it is not offered twice (the owner's call,
+    # 20 November 2026): a share must name the balance or the equity.
+    says(problems_for(ma_spec, risk__sizing={"risk_pct": 0.01}), "of the balance or of the equity")
+    says(problems_for(ma_spec, risk__sizing={"notional_pct": 0.5, "risk_of": "init_cash"}), "size by a fixed amount")
+    shared = dict(ma_spec, risk=dict(ma_spec["risk"], sizing={"risk_pct": 0.01, "risk_of": "equity"}))
+    rows = {row["path"]: row for row in S.tunable_inputs(S.apply_params(shared))}
+    assert rows["risk.sizing.risk_of"]["options"] == ["balance", "equity"]
+    assert rows["risk.sizing.risk_of"]["value"] == "equity"
+    # The templates risk a fixed amount, so they have no basis to search.
     rows = {row["path"]: row for row in S.tunable_inputs(S.apply_params(ma_spec))}
-    assert rows["risk.sizing.risk_of"]["options"] == ["init_cash", "balance", "equity"]
-    assert "risk.sizing.risk_of" not in rows or rows["risk.sizing.risk_of"]["value"] == "init_cash"
+    assert "risk.sizing.risk_of" not in rows and "risk.sizing.risk_amount" in rows
 
 
 def test_a_stop_from_a_line_reads_a_feature_or_a_price(ma_spec):
@@ -338,7 +346,7 @@ def test_tunable_inputs_include_the_risk_dials(ma_spec):
     spec = copy.deepcopy(ma_spec)
     spec["risk"]["exits"] = {"time_bars": 20}
     paths = {row["path"]: row for row in S.tunable_inputs(spec)}
-    for path in ("features.fast.params.timeperiod", "risk.stop.points", "risk.target.points", "risk.sizing.risk_pct",
+    for path in ("features.fast.params.timeperiod", "risk.stop.points", "risk.target.points", "risk.sizing.risk_amount",
                  "risk.exits.time_bars"):
         assert path in paths, path
     assert paths["risk.exits.time_bars"]["type"] == "int" and paths["risk.stop.points"]["value"] == 60

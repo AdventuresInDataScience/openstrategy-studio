@@ -125,8 +125,27 @@
 
 /* --- tabs ------------------------------------------------------------------- */
 
+/* Tabs read as a bar of places to go: each a soft pill, the open one tinted in the primary colour. */
+[data-testid="stTabs"] [role="tablist"] {
+  gap: 0.15rem;
+}
+
+[data-testid="stTab"] {
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--os-radius) var(--os-radius) 0 0;
+}
+
+[data-testid="stTab"] p {
+  font-size: 0.95rem;
+}
+
+[data-testid="stTab"][aria-selected="true"] {
+  background: color-mix(in srgb, var(--os-primary) 16%, transparent);
+}
+
 [data-testid="stTab"][aria-selected="true"] p {
-  font-weight: 600;
+  font-weight: 650;
+  color: var(--os-primary);
 }
 
 [data-testid="stTab"]:hover p {
@@ -160,6 +179,162 @@
 [data-testid="stBaseButton-secondaryFormSubmit"]:not(:disabled):hover {
   border-color: var(--os-primary);
   box-shadow: var(--os-shadow-hover);
+}
+
+/* --- section cards ----------------------------------------------------------- */
+
+/* Each part of a strategy has a tone (the theme's tone_* keys): setup, features, entry rules,
+   exit rules, risk and the account. A card is a keyed container named os-card-TONE-NAME
+   (ui.card): a bar in its tone on the left, a faint tint, and its title in the tone. A card
+   inside a card (a condition inside a rule) is os-sub-NAME (ui.sub_card) and keeps its
+   parent's tone, so the nesting shows. A collapsible section is an expander keyed
+   os-exp-TONE-NAME (ui.section). */
+[class*="st-key-os-card-setup-"],
+[class*="st-key-os-exp-setup-"] {
+  --os-tone: var(--os-tone-setup);
+}
+
+[class*="st-key-os-card-feature-"],
+[class*="st-key-os-exp-feature-"] {
+  --os-tone: var(--os-tone-feature);
+}
+
+[class*="st-key-os-card-entry-"] {
+  --os-tone: var(--os-tone-entry);
+}
+
+[class*="st-key-os-card-exit-"] {
+  --os-tone: var(--os-tone-exit);
+}
+
+[class*="st-key-os-card-risk-"],
+[class*="st-key-os-exp-risk-"] {
+  --os-tone: var(--os-tone-risk);
+}
+
+[class*="st-key-os-card-account-"],
+[class*="st-key-os-exp-account-"] {
+  --os-tone: var(--os-tone-account);
+}
+
+[class*="st-key-os-card-add-"] {
+  --os-tone: var(--os-accent);
+}
+
+[class*="st-key-os-card-"] {
+  background: color-mix(in srgb, var(--os-tone) 7%, var(--os-surface));
+  border: 1px solid color-mix(in srgb, var(--os-tone) 30%, var(--os-border));
+  border-left: 4px solid var(--os-tone);
+  border-radius: var(--os-radius);
+  padding: 0.65rem 1rem 0.85rem;
+  box-shadow: var(--os-shadow);
+}
+
+/* The card to add something: dashed, so it reads as a place to make a thing, not a thing made. */
+[class*="st-key-os-card-add-"] {
+  border-style: dashed;
+  border-left-style: solid;
+  background: color-mix(in srgb, var(--os-tone) 4%, transparent);
+  box-shadow: none;
+}
+
+[class*="st-key-os-sub-"] {
+  background: color-mix(in srgb, var(--os-tone, var(--os-primary)) 5%, var(--os-bg));
+  border: 1px solid var(--os-border);
+  border-left: 3px solid color-mix(in srgb, var(--os-tone, var(--os-primary)) 75%, transparent);
+  border-radius: var(--os-radius);
+  padding: 0.3rem 0.75rem 0.45rem;
+}
+
+/* A card's header row (ui.card_header): the title in the tone, its details muted beside it,
+   and its buttons at the right. */
+[class*="st-key-os-head-"] [data-testid="stMarkdownContainer"] p {
+  margin: 0;
+}
+
+.os-title {
+  font-family: var(--os-heading-font);
+  font-weight: 650;
+  font-size: 1.05rem;
+  color: var(--os-tone, var(--os-text));
+}
+
+[class*="st-key-os-sub-"] .os-title {
+  font-size: 0.95rem;
+}
+
+.os-meta {
+  color: var(--os-muted);
+  font-size: 0.86rem;
+  margin-left: 0.5rem;
+}
+
+.os-code {
+  font-family: var(--os-code-font);
+  font-size: 0.8rem;
+  color: var(--os-text);
+  background: color-mix(in srgb, var(--os-tone, var(--os-primary)) 14%, transparent);
+  border-radius: 0.35rem;
+  padding: 0.08rem 0.45rem;
+  margin-left: 0.5rem;
+}
+
+.os-off {
+  color: var(--os-muted);
+  font-style: italic;
+  font-size: 0.86rem;
+  margin-left: 0.5rem;
+}
+
+/* The header's icon buttons: quiet until pointed at; a delete turns the losses colour. */
+[class*="st-key-os-head-"] [data-testid="stBaseButton-tertiary"] {
+  color: var(--os-muted);
+}
+
+[class*="st-key-os-head-"] [data-testid="stBaseButton-tertiary"]:hover {
+  color: var(--os-tone, var(--os-primary));
+}
+
+[class*="st-key-os-head-"] [class*="-delete"] [data-testid="stBaseButton-tertiary"]:hover {
+  color: var(--os-negative);
+}
+
+/* A heading inside a tab (ui.heading): a word in the section's tone with a rule under it. */
+.os-heading {
+  font-family: var(--os-heading-font);
+  font-weight: 700;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--os-tone, var(--os-muted));
+  border-bottom: 1px solid color-mix(in srgb, var(--os-tone, var(--os-border)) 35%, transparent);
+  padding-bottom: 0.25rem;
+  margin-top: 0.4rem;
+}
+
+.os-tone-setup { --os-tone: var(--os-tone-setup); }
+.os-tone-feature { --os-tone: var(--os-tone-feature); }
+.os-tone-entry { --os-tone: var(--os-tone-entry); }
+.os-tone-exit { --os-tone: var(--os-tone-exit); }
+.os-tone-risk { --os-tone: var(--os-tone-risk); }
+.os-tone-account { --os-tone: var(--os-tone-account); }
+
+/* Collapsible sections: an expander in its tone, its title in the tone. */
+[data-testid="stMain"] [class*="st-key-os-exp-"] details {
+  background: color-mix(in srgb, var(--os-tone) 6%, var(--os-surface));
+  border: 1px solid color-mix(in srgb, var(--os-tone) 30%, var(--os-border));
+  border-left: 4px solid var(--os-tone);
+}
+
+[class*="st-key-os-exp-"] summary p {
+  font-family: var(--os-heading-font);
+  font-weight: 650;
+  font-size: 1.02rem;
+  color: var(--os-tone);
+}
+
+[class*="st-key-os-exp-"] summary [data-testid="stExpanderIcon"] {
+  color: var(--os-tone);
 }
 
 /* --- the Build page's At a glance panel ------------------------------------- */

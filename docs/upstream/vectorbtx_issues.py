@@ -816,6 +816,76 @@ def check_stop_levels():
     return bool(failures), "; ".join(failures) or "on the level across the gap; wrong side rejected; trail ratchets"
 
 
+# ---------------------------------------------------------------------------
+# 32, 33 and 34. The leverage cap (max_size): closes, the starting cash, the increment
+# ---------------------------------------------------------------------------
+
+def _orders(pf):
+    """[(bar, side, size)] for a one-column portfolio."""
+    records = pf.orders.records_readable
+    return [(int(pf.wrapper.index.get_loc(stamp)), side, round(float(size), 4))
+            for stamp, side, size in zip(records["Timestamp"], records["Side"], records["Size"])]
+
+
+def _held_at_end(pf):
+    return round(float(np.asarray(pf.assets()).ravel()[-1]), 4)
+
+
+def check_cap_cuts_closing_orders():
+    # 100 shares bought at 100 (a notional of 10,000 at 1x). The exit fills at 100.5, where
+    # 1 x 10,000 buys 99.50 shares: the exit must still sell all 100, and the second round trip
+    # must happen. Then a weights book: a target of 1.0 bought at 100, cut to 0 at 150, must
+    # sell everything, not the 66.67 shares 10,000 buys at 150.
+    opens = [100, 100, 100, 100.5, 100.5, 100.5, 100, 100, 100, 100]
+    o, h, l, c = frames(opens)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": EQUITY},
+                                 entries=mask(c.index, ["X"], [("X", 0), ("X", 6)]),
+                                 exits=mask(c.index, ["X"], [("X", 2), ("X", 8)]),
+                                 notional=10_000, init_cash=10_000, freq="D")
+    rule_orders = _orders(pf)
+    rule_held = _held_at_end(pf)
+    opens = [100, 100, 120, 140, 150, 150, 150, 150]
+    o, h, l, c = frames(opens)
+    weights = pd.DataFrame({"X": [1.0] * 5 + [0.0] * 3}, index=c.index)
+    schedule = pd.Series([True, False, False, False, False, True, False, False], index=c.index)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l,
+                                 instruments={"X": dict(EQUITY, allow_fractional=True)},
+                                 weights=weights, schedule=schedule, leverage_budget=False,
+                                 init_cash=10_000, freq="D")
+    book_held = _held_at_end(pf)
+    want = [(1, "Buy", 100.0), (3, "Sell", 100.0), (7, "Buy", 100.0), (9, "Sell", 100.0)]
+    present = rule_orders != want or rule_held != 0 or book_held != 0
+    return present, (f"rule strategy: orders {rule_orders}, {rule_held} held at the end "
+                     f"(should be {want}, flat); weights cut to 0: {book_held} held (should be 0)")
+
+
+def check_cap_from_the_account():
+    # A short from 100 covered at 80 leaves equity of 12,000. The long that follows, at 80, is
+    # worth the whole equity (notional_pct=1.0, risk_of="equity"): 150 shares, inside 1x of
+    # 12,000. A cap of 1 x the starting cash (10,000 / 80) allows only 125.
+    opens = [100, 100, 90, 80, 80, 80, 80, 80]
+    o, h, l, c = frames(opens)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": EQUITY},
+                                 entries=mask(c.index, ["X"], [("X", 4)]), exits=mask(c.index, ["X"], []),
+                                 short_entries=mask(c.index, ["X"], [("X", 0)]),
+                                 short_exits=mask(c.index, ["X"], [("X", 2)]),
+                                 notional_pct=1.0, risk_of="equity", init_cash=10_000, freq="D")
+    equity = round(float(np.asarray(pf.value()).ravel()[4]), 2)
+    buys = [size for bar, side, size in _orders(pf) if side == "Buy" and bar == 5]
+    return buys != [150.0], f"equity {equity} at the signal bar; the long bought {buys} (should be [150.0])"
+
+
+def check_cut_orders_on_the_increment():
+    # 100 whole shares asked for at 150 with 10,000 of cash, cut down to what is funded
+    # (when_cash_short="partial"): 66 shares, a whole number, not 66.67.
+    o, h, l, c = frames([150.0] * 6)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": EQUITY},
+                                 entries=mask(c.index, ["X"], [("X", 0)]), exits=mask(c.index, ["X"], []),
+                                 size=100, when_cash_short="partial", init_cash=10_000, freq="D")
+    bought = [size for _, side, size in _orders(pf) if side == "Buy"]
+    return bought != [66.0], f"bought {bought} shares (should be [66.0]: the increment is one share)"
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -849,6 +919,9 @@ CHECKS = [
     (29, "Points on a converted price are applied in the account currency", check_points_on_converted_prices),
     (30, "notional_pct: a position worth a share of the account (issue 23, optional)", check_notional_pct),
     (31, "Stops and targets at a price level (issue 26, item 4)", check_stop_levels),
+    (32, "The leverage cap (max_size) cuts the orders that close a position", check_cap_cuts_closing_orders),
+    (33, "The leverage cap is leverage x the starting cash, not the account", check_cap_from_the_account),
+    (34, "An order cut down to what is funded is not rounded to the increment", check_cut_orders_on_the_increment),
 ]
 
 

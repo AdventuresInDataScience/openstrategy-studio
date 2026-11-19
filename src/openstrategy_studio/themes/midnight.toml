@@ -1,4 +1,4 @@
-# Midnight: deep navy, violet and cyan light. See daylight.toml for what each key does.
+# Midnight: deep navy, violet and cyan light. The default page theme. See daylight.toml for what each key does.
 
 [theme]
 base = "dark"
@@ -42,3 +42,9 @@ glow = "radial-gradient(1000px 560px at 8% -10%, rgba(139, 124, 255, 0.18), tran
 positive = "#34D399"
 negative = "#FB7185"
 chart_theme = "page"
+tone_setup = "#60A5FA"
+tone_feature = "#22D3EE"
+tone_entry = "#34D399"
+tone_exit = "#FB7185"
+tone_risk = "#FBBF24"
+tone_account = "#C084FC"
