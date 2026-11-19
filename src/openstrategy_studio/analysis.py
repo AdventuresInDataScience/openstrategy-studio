@@ -332,7 +332,9 @@ WARNING_HINTS = {
                                         "tab), or 0 if the borrow really is free.",
     "Carry skipped": "In the Studio: name both base_currency and quote_currency in the instrument grid (Build page, "
                      "Setup tab).",
-    "default maximum": "In the Studio: the leverage is set on the Build page's Risk tab.",
+    # vectorbtX's leverage warning says "usual maximum" since 1de5744 (bought outright and FX spot default to 1x).
+    "usual maximum": "In the Studio: each instrument's leverage is set in the leverage column of the instrument grid "
+                     "(Build page, Setup tab).",
     "do not bracket close": "In the Studio: the Data page's check on import lists the bars whose high or low is "
                             "inside the open or close.",
     "pip convention": "In the Studio: set point_size in the instrument grid (Build page, Setup tab).",

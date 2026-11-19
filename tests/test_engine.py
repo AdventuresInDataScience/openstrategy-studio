@@ -8,7 +8,8 @@ import pandas as pd
 import pytest
 
 from openstrategy_studio import engine
-from openstrategy_studio.spec import apply_params
+from openstrategy_studio.compile import export_script
+from openstrategy_studio.spec import apply_params, validate_spec
 
 from conftest import make_ohlcv
 
@@ -602,8 +603,11 @@ def test_trailing_stop_follows_the_peak():
     risk = {"sizing": {"size": 1}, "stop": {"kind": "trailing", "points": 3}}
     run = engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", len(closes) - 1, risk=risk), data)
     when, price = exit_of(run["pf"])
-    assert when > data["close"].index[5], "the trailing stop must not fire while price rises"
-    assert price < 110 and price > 104, "it exits a few points below the peak"
+    # Exactly 3 points (point size 1.0) behind the peak of 110.5. Before vectorbtX 1de5744 the
+    # trail was a fraction of the fill (3 / 102 of the peak), so it sat 3.25 behind instead
+    # (docs/UPSTREAM.md issue 27).
+    assert when == data["close"].index[7]
+    assert price == pytest.approx(110.5 - 3)
 
 
 # ---------------------------------------------------------------------------
@@ -768,3 +772,91 @@ def test_the_usual_point_size_is_the_markets_convention(ma_spec):
     pence = copy.deepcopy(ma_spec)
     pence["instruments"]["EURUSD=X"] = {"asset_class": "stocks", "quote_currency": "GBp"}
     assert engine.point_meaning(pence) == {"EURUSD=X": "1p (1.0: the price is in pence)"}
+
+
+# ---------------------------------------------------------------------------
+# vectorbtX 2b2d090: sizing from the account, risk sizing with no stop, stops from a line
+# ---------------------------------------------------------------------------
+
+DIPS = dict(opens=[100.0] * 8, highs=[100.5] * 8, lows=[99.5, 99.5, 99.5, 97.0, 96.0, 99.5, 99.5, 99.5],
+            closes=[100.0] * 8)
+
+
+def with_line(spec, name, value):
+    """A Python feature that is `value` on every bar, for a stop to read."""
+    spec["features"][name] = {"indicator": "studio:python", "inputs": {},
+                              "params": {"code": f"return close * 0.0 + {value!r}"}}
+    return spec
+
+
+def test_a_stop_at_a_lines_level_sits_on_the_signal_bars_value():
+    """Signal at bar 1, filled at bar 2's open (100); the line is 97.3, and bar 3 trades to 97."""
+    pytest.importorskip("vectorbtx")
+    risk = {"sizing": {"size": 1}, "stop": {"kind": "fixed", "unit": "level", "points": 50.0, "line": {"feature": "lvl"}}}
+    spec = with_line(pulse_spec("long_entry", 1, "long_exit", 7, risk=risk), "lvl", 97.3)
+    assert validate_spec(spec) == []
+    run = engine.run_backtest(spec, bars(**DIPS))
+    assert run["plan"]["args"]["stop_price"] == ("var", "stop_price")
+    when, price = exit_of(run["pf"])
+    assert when == run["data"]["close"].index[3] and price == pytest.approx(97.3)
+
+
+def test_a_stop_at_a_multiple_of_a_line_is_that_far_from_the_fill():
+    """2 x a line of 1.5 is 3: the stop sits at 97 below the 100 fill (point size 1.0)."""
+    pytest.importorskip("vectorbtx")
+    risk = {"sizing": {"size": 1},
+            "stop": {"kind": "fixed", "unit": "multiple", "points": 50.0, "multiple": 2.0, "line": {"feature": "rng"}}}
+    spec = with_line(pulse_spec("long_entry", 1, "long_exit", 7, risk=risk), "rng", 1.5)
+    run = engine.run_backtest(spec, bars(**DIPS))
+    assert run["plan"]["args"]["stop_points"] == ("var", "stop_points")
+    when, price = exit_of(run["pf"])
+    assert when == run["data"]["close"].index[3] and price == pytest.approx(97.0)
+
+
+def test_risk_is_sized_from_a_stop_level_and_the_check_agrees():
+    """100 at risk, filled at 100 with the stop at 98: 50 shares, in the run and the trade-size check."""
+    pytest.importorskip("vectorbtx")
+    risk = {"sizing": {"risk_amount": 100.0},
+            "stop": {"kind": "fixed", "unit": "level", "points": 50.0, "line": {"feature": "lvl"}}}
+    spec = with_line(pulse_spec("long_entry", 1, "long_exit", 7, risk=risk), "lvl", 98.0)
+    data = bars(**DIPS)
+    run = engine.run_backtest(spec, data)
+    assert float(run["pf"].orders.records_readable["Size"].iloc[0]) == pytest.approx(50.0)
+    (row,) = engine.sizing_check(spec, data)
+    assert row["size"] == pytest.approx(50.0) and row["stop_price"] == pytest.approx(2.0) and not row["implied_stop"]
+
+
+def test_risk_sizing_with_no_stop_is_worth_the_risk_times_the_leverage():
+    """1% of 10,000 with no stop, bought outright at 1x: a position worth 100, an implied stop at zero."""
+    pytest.importorskip("vectorbtx")
+    risk = {"sizing": {"risk_pct": 0.01}, "stop": {"kind": "none"}}
+    spec = pulse_spec("long_entry", 1, "long_exit", 7, risk=risk)
+    assert validate_spec(spec) == []
+    data = bars(**DIPS)
+    run = engine.run_backtest(spec, data)
+    order = run["pf"].orders.records_readable.iloc[0]
+    assert float(order["Size"] * order["Price"]) == pytest.approx(100.0)
+    assert any("NO STOP IS PLACED" in note for note in run["warnings"])
+    (row,) = engine.sizing_check(spec, data)
+    assert row["implied_stop"] and row["stop_price"] == pytest.approx(100.0)        # 1 / 1x of the price
+
+
+def test_the_plan_names_a_share_of_the_account_and_its_basis():
+    for sizing in ({"risk_pct": 0.01, "risk_of": "equity"}, {"notional_pct": 0.5, "risk_of": "balance"}):
+        spec = pulse_spec("long_entry", 1, "long_exit", 7, risk={"sizing": sizing, "stop": {"kind": "none"}})
+        args = engine.call_plan(apply_params(spec))["args"]
+        key = next(name for name in sizing if name != "risk_of")
+        assert args[key] == ("lit", sizing[key]) and args["risk_of"] == ("lit", sizing["risk_of"])
+
+
+def test_a_spread_bet_keeps_its_own_price_when_the_account_converts():
+    """docs/UPSTREAM.md issue 29's check: a spread bet's stake is money per point, so its price is
+    never converted (vectorbtX's D4). Bought outright, the same instrument is."""
+    data = bars(opens=[100.0] * 4, highs=[101.0] * 4, lows=[99.0] * 4, closes=[100.0] * 4)
+    data["fx"] = pd.Series(1.25, index=data["close"].index, name="GBPUSD=X")
+    spec = pulse_spec("long_entry", 1, "long_exit", 3)
+    spec["account"].update(base_currency="GBP", fx={"symbol": "GBPUSD=X"})
+    assert float(engine.prepare_data(spec, data)["close"].iloc[0, 0]) == pytest.approx(80.0)
+    spec["setup"]["trading"] = "spreadbet"
+    assert float(engine.prepare_data(spec, data)["close"].iloc[0, 0]) == pytest.approx(100.0)
+    assert "to_base_currency" not in export_script(spec)

@@ -44,8 +44,38 @@ def test_fixed_plus_trailing_stop(ma_spec):
          "cannot be used together")
 
 
-def test_risk_pct_needs_fixed_stop(ma_spec):
-    says(problems_for(ma_spec, risk__stop={"kind": "none"}), "needs a fixed stop")
+def test_risk_sizing_takes_any_stop_or_none(ma_spec):
+    """vectorbtX sizes a risk from any stop, and with none from the leverage (issues 26 and 28)."""
+    assert problems_for(ma_spec, risk__stop={"kind": "none"}) == []
+    assert problems_for(ma_spec, risk__stop={"kind": "trailing", "unit": "points", "points": 40.0}) == []
+    assert problems_for(ma_spec, risk__stop={"kind": "fixed", "unit": "pct", "points": 40.0, "pct": 0.01}) == []
+
+
+def test_a_share_of_the_account_names_its_basis(ma_spec):
+    assert problems_for(ma_spec, risk__sizing={"risk_pct": 0.01, "risk_of": "equity"}) == []
+    assert problems_for(ma_spec, risk__sizing={"notional_pct": 0.5, "risk_of": "balance"}) == []
+    says(problems_for(ma_spec, risk__sizing={"risk_pct": 0.01, "risk_of": "margin"}), "the balance or the equity")
+    says(problems_for(ma_spec, risk__sizing={"stake": 1.0, "risk_of": "equity"}), "remove risk_of")
+    rows = {row["path"]: row for row in S.tunable_inputs(S.apply_params(ma_spec))}
+    assert rows["risk.sizing.risk_of"]["options"] == ["init_cash", "balance", "equity"]
+    assert "risk.sizing.risk_of" not in rows or rows["risk.sizing.risk_of"]["value"] == "init_cash"
+
+
+def test_a_stop_from_a_line_reads_a_feature_or_a_price(ma_spec):
+    """A multiple of a line (3 x ATR) or the line's own level (an EMA, the signal bar's low)."""
+    multiple = {"kind": "fixed", "unit": "multiple", "points": 40.0, "multiple": 3.0, "line": {"feature": "slow"}}
+    assert problems_for(ma_spec, risk__stop=multiple) == []
+    level = {"kind": "trailing", "unit": "level", "points": 40.0, "line": {"price": "low", "shift": 1}}
+    assert problems_for(ma_spec, risk__stop=level) == []
+    target = {"kind": "fixed", "unit": "level", "points": 80.0, "line": {"feature": "fast"}}
+    assert problems_for(ma_spec, risk__target=target) == []
+    says(problems_for(ma_spec, risk__stop=dict(multiple, line={"feature": "atr"})), "'atr' that does not exist")
+    says(problems_for(ma_spec, risk__stop=dict(multiple, multiple=0)), "Stop multiple")
+    says(problems_for(ma_spec, risk__stop=dict(level, line={"const": 1.1})), "expected a feature, a price")
+    rows = {row["path"]: row for row in S.tunable_inputs(S.apply_params(dict(ma_spec, risk=dict(
+        ma_spec["risk"], stop=dict(multiple, pct=0.02)))))}
+    assert rows["risk.stop.unit"]["options"] == ["points", "pct", "multiple", "level"]
+    assert rows["risk.stop.multiple"]["value"] == 3.0
 
 
 def test_dangling_feature_reference(ma_spec):
@@ -364,16 +394,14 @@ def test_the_stop_and_target_can_be_switched_on_and_off_by_the_optimiser():
     assert S.validate_spec(spec) == []
 
 
-def test_a_stop_in_percent_is_a_fraction_of_the_price_and_cannot_size_a_risk_yet(ma_spec):
+def test_a_stop_in_percent_is_a_fraction_of_the_price(ma_spec):
     spec = copy.deepcopy(ma_spec)
     paths = {row["path"]: row for row in S.tunable_inputs(spec)}
-    # Risk-sized, so the stop stays fixed and in points; the target may switch either way.
-    assert "risk.stop.unit" not in paths and paths["risk.target.unit"]["options"] == ["points", "pct"]
+    # Risk sizing reads any stop now (issue 26), so the stop's unit may be searched beside it.
+    assert paths["risk.stop.unit"]["options"] == ["points", "pct"]
+    assert paths["risk.target.unit"]["options"] == ["points", "pct"]
     assert "not used now" in paths["risk.stop.pct"]["label"]
     spec["risk"]["stop"]["unit"] = "pct"
-    assert any("cannot size a trade from a stop in %" in problem or "cannot size from a stop in %" in problem
-               for problem in S.validate_spec(spec))
-    spec["risk"]["sizing"] = {"stake": 1.0}
     assert S.validate_spec(spec) == []
     spec["risk"]["stop"]["pct"] = 2                         # meant 2%, typed as 200%
     assert any("0.02 is 2%" in problem for problem in S.validate_spec(spec))

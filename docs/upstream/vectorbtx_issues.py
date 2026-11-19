@@ -713,6 +713,109 @@ def check_risk_sizing_without_a_stop():
     return present, f"position values {values} (should be 100 at 1x and 500 at 5x)"
 
 
+# ---------------------------------------------------------------------------
+# 29. Points on a price converted to the account currency
+# ---------------------------------------------------------------------------
+
+def check_points_on_converted_prices():
+    # A USD share at 100, converted to a GBP account at 0.8 (80 pounds). A point is a cent,
+    # so a 50-point stop is 50 cents (99.50 dollars, 79.60 pounds), 100 pounds at risk over
+    # it is 250 shares (40 pence a share), and a 1-point spread buys at 100.005 dollars
+    # (80.004 pounds). Points applied to the converted price make the stop 50 pence instead.
+    index = pd.bdate_range("2024-01-01", periods=8)
+    native = pd.DataFrame({"X": [100.0] * 8}, index=index)
+    low = native * 0.9975
+    low.iloc[3] = 99.0
+    terms = {"mode": "equity", "point_size": 0.01, "quote_currency": "USD", "spread_points": 0.0,
+             "leverage": 1.0, "allow_fractional": True}
+    universe = vbt.x.load_universe({"X": vbt.x.Instrument(**terms)})
+    fx = pd.Series(0.8, index=index, name="USDGBP")
+    o, h, l, c = [vbt.x.to_base_currency(f, base="GBP", fx=fx, instruments=universe, fx_markup=0.0)
+                  for f in (native, native * 1.0025, low, native)]
+    entries = mask(index, ["X"], [("X", 0)])
+    none = mask(index, ["X"], [])
+    common = dict(close=c, open=o, high=h, low=l, entries=entries, exits=none, account_currency="GBP",
+                  fx=fx, freq="D")
+    pf = vbt.x.PortfolioBacktest(instruments={"X": terms}, size=10, stop_points=50, init_cash=10_000, **common)
+    stop = float(pf.orders.records_readable["Price"].iloc[1])
+    pf = vbt.x.PortfolioBacktest(instruments={"X": terms}, risk_amount=100, stop_points=50, init_cash=100_000,
+                                 **common)
+    risked = float(pf.orders.records_readable["Size"].iloc[0])
+    pf = vbt.x.PortfolioBacktest(instruments={"X": dict(terms, spread_points=1.0)}, size=1, init_cash=10_000,
+                                 **common)
+    spread = float(pf.orders.records_readable["Price"].iloc[0])
+    present = abs(stop - 79.6) > 1e-6 or abs(risked - 250) > 1e-6 or abs(spread - 80.004) > 1e-6
+    return present, f"USD share at 100 in a GBP account at 0.8: 50-point stop fills at {stop:.4f} (should be " \
+                    f"79.60), 100 at risk over it buys {risked:g} (should be 250), a 1-point spread buys at " \
+                    f"{spread:.4f} (should be 80.004)"
+
+
+# ---------------------------------------------------------------------------
+# 30. notional_pct: a position worth a share of the account (issue 23's optional rule)
+# ---------------------------------------------------------------------------
+
+def check_notional_pct():
+    # Half the account each time. The first trade (50 shares at 100) is stopped out at 90
+    # for a loss of 500, so from the equity the second is half of 9,500: 47.5 shares.
+    lows = [99.5] * 10
+    lows[3] = 89.0
+    o, h, l, c = frames([100.0] * 10, lows=lows)
+    entries = mask(c.index, ["X"], [("X", 1), ("X", 5)])
+    none = mask(c.index, ["X"], [])
+    try:
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none, notional_pct=0.5,
+                                     stop_points=10, risk_of="equity", init_cash=10_000, freq="D",
+                                     **dict(EQUITY, allow_fractional=True))
+    except Exception as error:                                           # noqa: BLE001
+        return True, f"notional_pct= is not accepted ({type(error).__name__}: {str(error)[:80]})"
+    buys = pf.orders.records_readable
+    sizes = [round(float(size), 4) for size in buys[buys["Side"] == "Buy"]["Size"]]
+    return sizes != [50.0, 47.5], f"buy sizes {sizes} (should be [50.0, 47.5])"
+
+
+# ---------------------------------------------------------------------------
+# 31. Stops at a price level (issue 26's optional item 4)
+# ---------------------------------------------------------------------------
+
+def check_stop_levels():
+    # The signal bar closes at 101 with its EMA at 97.3; the next bar opens at 100. The stop
+    # should sit on the EMA (97.3), not 3.7 below the fill (96.3, a distance taken at the
+    # close). A long whose stop level is above its fill is rejected. A trailing level moves
+    # up with each completed bar and never back.
+    index = pd.bdate_range("2024-01-01", periods=8)
+    closes = [100.0, 101.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+    o, h, l, c = frames([100.0] * 8, [101.5] * 8, [99.5, 99.5, 99.5, 97.0, 96.0, 99.5, 99.5, 99.5], closes)
+    entries = mask(index, ["X"], [("X", 1)])
+    none = mask(index, ["X"], [])
+    common = dict(close=c, open=o, high=h, low=l, entries=entries, exits=none, instruments={"X": EQUITY},
+                  size=1, init_cash=10_000, freq="D")
+    failures = []
+    try:
+        level = pd.DataFrame({"X": [90.0, 97.3, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0]}, index=index)
+        pf = vbt.x.PortfolioBacktest(stop_price=level, **common)
+        sells = pf.orders.records_readable.query("Side == 'Sell'")
+        stop = float(sells["Price"].iloc[0]) if len(sells) else None
+        if stop != 97.3:
+            failures.append(f"stop at the signal bar's EMA: sold at {stop}, should be 97.3")
+        pf = vbt.x.PortfolioBacktest(stop_price=101.0, **common)
+        if len(pf.orders.records):
+            failures.append("a long with its stop level above the fill was placed; it should be rejected")
+        opens = [100.0, 100.0, 102.0, 104.0, 106.0, 108.0, 107.0, 105.0, 103.0, 101.0]
+        to, th, tl, tc = frames(opens, [v + 0.5 for v in opens], [v - 0.5 for v in opens])
+        trail = pd.DataFrame({"X": [v - 3 for v in opens]}, index=tc.index)
+        trail.iloc[6] = 104.6                                     # a dip that must not loosen it
+        pf = vbt.x.PortfolioBacktest(close=tc, open=to, high=th, low=tl, entries=mask(tc.index, ["X"], [("X", 1)]),
+                                     exits=mask(tc.index, ["X"], []), instruments={"X": EQUITY}, size=1,
+                                     trail_price=trail, init_cash=10_000, freq="D")
+        sells = pf.orders.records_readable.query("Side == 'Sell'")
+        exit_price = float(sells["Price"].iloc[0]) if len(sells) else None
+        if exit_price != 105.0:
+            failures.append(f"trailing level: sold at {exit_price}, should be 105 (the stop never loosens)")
+    except Exception as error:                                           # noqa: BLE001
+        return True, f"stop_price= / trail_price= not accepted ({type(error).__name__}: {str(error)[:80]})"
+    return bool(failures), "; ".join(failures) or "on the level across the gap; wrong side rejected; trail ratchets"
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -743,6 +846,9 @@ CHECKS = [
      check_stops_that_vary),
     (27, "A trailing stop in points widens as the price rises", check_trailing_points_stay_a_distance),
     (28, "Risk sizing without a stop, from the leverage (required feature)", check_risk_sizing_without_a_stop),
+    (29, "Points on a converted price are applied in the account currency", check_points_on_converted_prices),
+    (30, "notional_pct: a position worth a share of the account (issue 23, optional)", check_notional_pct),
+    (31, "Stops and targets at a price level (issue 26, item 4)", check_stop_levels),
 ]
 
 

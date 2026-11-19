@@ -145,3 +145,36 @@ def test_export_equivalence_stops_in_percent(ma_spec, ohlcv):
     in_app = engine.run_backtest(spec, ohlcv, params=params)["pf"]
     assert int(in_app.trades.count().sum()) > 0
     pd.testing.assert_series_equal(in_app.stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())
+
+
+
+def test_export_equivalence_stops_from_a_line_and_a_share_of_the_equity(ma_spec, ohlcv):
+    """A stop at a line's level, a target at a multiple of an ATR, risk sized from the equity; then a
+    trailing stop at a multiple of the ATR with positions worth a multiple of the balance."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import indicators
+
+    params = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}
+    spec = copy.deepcopy(ma_spec)
+    spec["features"]["atr"] = indicators.new_feature("talib:ATR")
+    # 5%: over a stop as wide as the slow MA, 1% of 10,000 is under the 1-a-point minimum stake.
+    spec["risk"]["sizing"] = {"risk_pct": 0.05, "risk_of": "equity"}
+    spec["risk"]["stop"].update(kind="fixed", unit="level", line={"feature": "slow"})
+    spec["risk"]["target"].update(kind="fixed", unit="multiple", multiple=4.0, line={"feature": "atr"})
+    assert S.validate_spec(spec) == []
+    source = export_script(spec)
+    assert "stop_price = full(F[" in source and "target_points = 4.0 * full(F[" in source
+    assert "risk_of='equity'" in source
+    in_app = engine.run_backtest(spec, ohlcv, params=params)["pf"]
+    assert int(in_app.trades.count().sum()) > 0
+    pd.testing.assert_series_equal(in_app.stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())
+
+    # Worth twice the balance (funded by the 30x leverage): half of 10,000 is under a 1-a-point stake.
+    spec["risk"]["sizing"] = {"notional_pct": 2.0, "risk_of": "balance"}
+    spec["risk"]["stop"].update(kind="trailing", unit="multiple", multiple=2.0, line={"feature": "atr"})
+    spec["risk"]["target"]["kind"] = "none"
+    assert S.validate_spec(spec) == []
+    assert "trail_points = 2.0 * full(F[" in export_script(spec)
+    in_app = engine.run_backtest(spec, ohlcv, params=params)["pf"]
+    assert int(in_app.trades.count().sum()) > 0
+    pd.testing.assert_series_equal(in_app.stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())

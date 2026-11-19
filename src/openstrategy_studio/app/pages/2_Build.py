@@ -13,10 +13,11 @@ import streamlit as st
 
 from openstrategy_studio import analysis, engine, indicators, store, style, ui
 from openstrategy_studio.compile import compile_features, compile_signals, compile_weights, export_script
-from openstrategy_studio.spec import (CALENDAR_FREQS, DISTANCE_DEFAULTS, FREQ, SELECTION_MODES, SIZING_KEYS, STOP_UNITS,
-                                      TIMEFRAMES, TRADING, WEIGHT_SCHEMES, apply_params, blank_spec, is_choice,
-                                      is_intraday, list_templates, load_template, spec_hash, strategy_kind,
-                                      trading_mode, validate_spec, when_cash_short)
+from openstrategy_studio.spec import (CALENDAR_FREQS, DISTANCE_DEFAULTS, FRACTION_KEYS, FREQ, LINE_UNITS, RISK_OF,
+                                      SELECTION_MODES, SIZING_KEYS, STOP_UNITS, TIMEFRAMES, TRADING, WEIGHT_SCHEMES,
+                                      apply_params, blank_spec, is_choice, is_intraday, list_templates,
+                                      load_template, spec_hash, strategy_kind, trading_mode, validate_spec,
+                                      when_cash_short)
 
 settings, data_dir = ui.boot("Build")
 ui.page_help("build")
@@ -92,20 +93,27 @@ TRADING_HELP = {
     "fx_spot": "Currency pairs in lots, on margin. Costs: the spread, commission, and carry on both currencies.",
 }
 SIZING_LABELS = {
-    "equity": {"risk_pct": "Risk a share of starting cash per trade (0.01 = 1%)",
+    "equity": {"risk_pct": "Risk a share of the account per trade (0.01 = 1%)",
                "risk_amount": "Risk a cash amount per trade", "stake": "Shares per trade",
-               "notional": "A cash amount per trade"},
-    "cfd": {"risk_pct": "Risk a share of starting cash per trade (0.01 = 1%)",
+               "notional": "A cash amount per trade", "notional_pct": "A share of the account per trade (0.1 = 10%)"},
+    "cfd": {"risk_pct": "Risk a share of the account per trade (0.01 = 1%)",
             "risk_amount": "Risk a cash amount per trade", "stake": "Contracts per trade",
-            "notional": "Position value per trade"},
-    "spreadbet": {"risk_pct": "Risk a share of starting cash per trade (0.01 = 1%)",
+            "notional": "Position value per trade", "notional_pct": "Position worth a share of the account (0.1 = 10%)"},
+    "spreadbet": {"risk_pct": "Risk a share of the account per trade (0.01 = 1%)",
                   "risk_amount": "Risk a cash amount per trade", "stake": "Stake per point",
-                  "notional": "Position value per trade"},
-    "fx_spot": {"risk_pct": "Risk a share of starting cash per trade (0.01 = 1%)",
+                  "notional": "Position value per trade",
+                  "notional_pct": "Position worth a share of the account (0.1 = 10%)"},
+    "fx_spot": {"risk_pct": "Risk a share of the account per trade (0.01 = 1%)",
                 "risk_amount": "Risk a cash amount per trade", "stake": "Lots per trade",
-                "notional": "Position value per trade"},
+                "notional": "Position value per trade", "notional_pct": "Position worth a share of the account (0.1 = 10%)"},
 }
-SIZING_DEFAULTS = {"risk_pct": 0.01, "risk_amount": 100.0, "stake": 1.0, "notional": 1000.0, "size": 1.0}
+SIZING_DEFAULTS = {"risk_pct": 0.01, "risk_amount": 100.0, "stake": 1.0, "notional": 1000.0, "size": 1.0,
+                   "notional_pct": 0.1}
+# How a share of the account reads on the Risk tab (spec.RISK_OF holds the keys).
+BASIS_LABELS = {"init_cash": "The starting cash", "balance": "The balance", "equity": "The equity"}
+# How each way of measuring a stop or target reads (spec.STOP_UNITS holds the keys).
+UNIT_LABELS = {"points": "In points", "pct": "In % of the price", "multiple": "A multiple of a line",
+               "level": "At a line's level"}
 
 
 def feature(indicator_id, **params):
@@ -208,24 +216,39 @@ def points_in_price(points):
     return "; ".join(parts) + "." if parts else "Pick a symbol on the Setup tab to see it in price."
 
 
+def default_line():
+    """The line a stop or target from a line starts from: the first feature, else the close."""
+    for name_ in features:
+        return {"feature": name_}
+    return {"price": "close"}
+
+
 def distance_inputs(part, help_points, help_pct, trailing=False):
     """On the Risk tab: how the stop or the target (`part`) is measured, and its distance.
 
-    In points, or as a fraction of the price. Both distances stay in the spec whichever is in
-    use, so the optimiser can switch the unit (risk.<part>.unit); only the one in use is shown.
+    In points, as a fraction of the price, as a multiple of a line (3 x an ATR) or at a line's
+    level (an EMA, the signal bar's low), the line read on the signal bar. Every distance stays
+    in the spec whichever is in use, so the optimiser can switch the unit (risk.<part>.unit);
+    only the one in use is shown.
     """
     node = spec["risk"][part]
     unit = node.get("unit", "points")
     units = list(STOP_UNITS)
+    words = "stop" if part == "stop" else "target"
     chosen = st.radio("Measured", units, index=units.index(unit) if unit in units else 0,
-                      format_func={"points": "In points", "pct": "In % of the price"}.get, horizontal=True,
-                      key=ui.key(f"risk.{part}", ":unit"),
-                      help="In points (a fixed price distance: cents on a share, pips on FX), or in % of the price "
-                           "the trade fills at. How it is measured can be searched on the Optimise page too.")
+                      format_func=UNIT_LABELS.get, horizontal=True, key=ui.key(f"risk.{part}", ":unit"),
+                      help=f"In points (a fixed price distance: cents on a share, pips on FX); in % of the price the "
+                           f"trade fills at; as a multiple of a line read on the signal bar (3 x an ATR: a distance "
+                           f"that follows volatility); or at a line's level (an EMA, the signal bar's low: where the "
+                           f"{words} sits, whatever the gap to the next open). How it is measured can be searched on "
+                           f"the Optimise page too.")
     if chosen != unit:
         def switch_unit():
             node["unit"] = chosen
-            node.setdefault(chosen, DISTANCE_DEFAULTS[part][chosen])
+            if chosen in LINE_UNITS:
+                node.setdefault("line", default_line())
+            if chosen != "level":
+                node.setdefault(chosen, DISTANCE_DEFAULTS[part][chosen])
             ui.prune_variables()
         ui.rerun_after(switch_unit)
     if chosen == "points":
@@ -233,7 +256,7 @@ def distance_inputs(part, help_points, help_pct, trailing=False):
                                label="Distance (points)", help=help_points)
         if isinstance(value, (int, float)):
             st.caption(points_in_price(value))
-    else:
+    elif chosen == "pct":
         value = ui.param_input(f"risk.{part}.pct", {"type": "float", "default": DISTANCE_DEFAULTS[part]["pct"]},
                                label="Distance (a fraction of the price: 0.02 = 2%)", help=help_pct)
         if isinstance(value, (int, float)):
@@ -241,6 +264,33 @@ def distance_inputs(part, help_points, help_pct, trailing=False):
             st.caption(f"{value:g} is {value:.2%} of " + ("the best price since the entry (at first, the fill "
                                                           "price): the stop trails that far behind it."
                                                           if trailing else "the price the trade fills at."))
+    else:
+        ui.ref_input(f"risk.{part}.line", features, "Line", allow_const=False,
+                     help=f"The line the {words} is measured from, read at the close of the bar the signal fires "
+                          f"on: a feature (an ATR for a multiple; an EMA, a band or a pivot for a level), or a price "
+                          f"(the signal bar's low, or an earlier bar's with bars ago). Add the feature on the "
+                          f"Features tab first.")
+        if chosen == "multiple":
+            value = ui.param_input(f"risk.{part}.multiple",
+                                   {"type": "float", "default": DISTANCE_DEFAULTS[part]["multiple"]},
+                                   label="Multiple",
+                                   help=f"How many times the line the {words} sits from the fill price: 3 with an "
+                                        f"ATR puts it three ATRs away, the ATR read on the signal bar. It can be "
+                                        f"searched on the Optimise page.")
+            if isinstance(value, (int, float)):
+                st.caption(f"The {words} sits {value:g} x the line from the price the trade fills at"
+                           + (", and then stays that far behind the best price since the entry." if trailing else ".")
+                           + " The line is read on the bar the signal fires on, so nothing from the fill bar is used. "
+                             "A bar where the line has no value yet (an indicator warming up) places no "
+                           + ("stop on that trade; with risk sizing, no trade." if part == "stop" else "target."))
+        else:
+            side = ("below the price a long fills at (above a short's)" if part == "stop" else
+                    "above the price a long fills at (below a short's)")
+            st.caption(f"The {words} sits on the line's value at the signal bar's close, from the fill on"
+                       + (", and then moves to each completed bar's value, never loosening (a chandelier exit)."
+                          if trailing else ".")
+                       + f" It must be {side}: an entry whose level is on the wrong side is an order a broker rejects, "
+                         f"so it is not placed, and the run says how many.")
 
 
 def leverage_summary():
@@ -301,7 +351,8 @@ def trade_size_check():
         return
     frames, _, compiled = result
     entries = compiled["entries"] | compiled["short_entries"]
-    rows = ui.run_guarded("Checking the trade size", lambda: engine.sizing_check(spec, frames, entries, data_dir))
+    rows = ui.run_guarded("Checking the trade size",
+                          lambda: engine.sizing_check(spec, frames, entries, data_dir, compiled=compiled))
     if not rows:
         return
     table = pd.DataFrame([{"symbol": row["symbol"], "fills on": str(row["bar"])[:16], "price": row["price"],
@@ -315,8 +366,17 @@ def trade_size_check():
         "trade value": st.column_config.NumberColumn(format="localized"),
         "× cash": st.column_config.NumberColumn(format="%.1f"),
         "funded": st.column_config.NumberColumn(format="localized")})
-    sizing_key = next((name_ for name_ in SIZING_KEYS if name_ in ((spec.get("risk") or {}).get("sizing") or {})), "")
-    lower = "lower the risk or widen the stop" if sizing_key.startswith("risk") else "lower the amount"
+    sizing_now = (spec.get("risk") or {}).get("sizing") or {}
+    sizing_key = next((name_ for name_ in SIZING_KEYS if name_ in sizing_now), "")
+    lower = ("lower the risk or widen the stop" if sizing_key.startswith("risk") else
+             "lower the share" if sizing_key == "notional_pct" else "lower the amount")
+    if any(row["implied_stop"] for row in rows):
+        st.caption("With no stop, the stop shown is implied: 1 / leverage of the price, the move that would take the "
+                   "trade's whole margin. No stop is placed.")
+    if sizing_key in FRACTION_KEYS and sizing_now.get("risk_of", "init_cash") != "init_cash":
+        st.caption(f"Sized here from the starting cash. In the run each trade is sized from "
+                   f"{RISK_OF[sizing_now['risk_of']]} at its signal bar, so it grows with profits and shrinks after "
+                   "losses.")
     for row in rows:
         if row["below_minimum"]:
             st.warning(f"{row['symbol']}: the size works out at {row['asked']:.4g} {row['unit']}, below the smallest "
@@ -331,7 +391,8 @@ def trade_size_check():
                        f"times the starting cash, but {row['leverage']:g}x leverage funds {row['funded']:,.0f}. The "
                        f"run will {cut}. To trade it in full, {lower}, or raise the leverage in the instrument grid "
                        "(Setup tab).")
-        if row["stop_price"] and row["typical_range"] and row["stop_price"] < row["typical_range"]:
+        if row["stop_price"] and not row["implied_stop"] and row["typical_range"] and \
+                row["stop_price"] < row["typical_range"]:
             st.warning(f"{row['symbol']}: the stop is {row['stop_price']:.4g} from the entry ({row['stop_pct']:.2%} of "
                        f"the price), but a bar here usually spans {row['typical_range']:.4g} from high to low, so most "
                        "trades will be stopped out within a bar or two. Points are price moves divided by the point "
@@ -792,13 +853,12 @@ with form:
                     ui.set_value("schedule.threshold", None)
             ui.param_input("schedule.min_trade", {"type": "float", "default": 0.005},
                            label="Skip trades smaller than (share of value)",
-                           # ⚠️ vectorbtX's to_targets compares each new target with the last one, not with
-                           # the drifted holding, so a small trade back to an unchanged target is still made
-                           # (docs/UPSTREAM.md, issue 21). Reword this when it is fixed.
-                           help="When an asset's target weight changes by less than this (0.005 = 0.5% of the "
-                                "account), it keeps its previous target. ⚠️ The new target is compared with the "
-                                "last one, not with the drifted holding, so a small trade back to an unchanged "
-                                "target is still made.")
+                           # vectorbtX 1de5744 compares each target with the holding as it has drifted, measured
+                           # on the simulation (docs/UPSTREAM.md issue 21, fixed).
+                           help="On a rebalance, an asset whose holding has drifted to within this of its target "
+                                "weight (0.005 = 0.5% of the account) is left alone, so small trades and their costs "
+                                "are skipped. The first rebalance always buys the whole book. What is left undone "
+                                "is reported as drift.")
 
     # --- risk ------------------------------------------------------------------------
     with tabs["Risk"]:
@@ -813,19 +873,25 @@ with form:
                 labels[used] = "Units (raw size)"
             chosen_sizing = st.radio("Position size", list(labels), index=list(labels).index(used),
                                      format_func=labels.get, key=ui.key("risk.sizing", ":kind"),
-                                     # ⚠️ Risk sizing with no stop (from the leverage) waits on vectorbtX
-                                     # (docs/UPSTREAM.md issue 28); reword this when it is built.
                                      help="How big each new position is. The two risk choices size the trade so "
-                                          "that hitting the stop loses that much, so they need a fixed stop in "
-                                          "points. Sizing a risk with no stop (from the leverage: the move that "
-                                          "would take the trade's whole margin) waits on vectorbtX.")
+                                          "that hitting the stop loses that much, from whichever stop is set (in "
+                                          "points, in %, trailing, or from a line); with no stop, the trade is sized "
+                                          "as if its margin were the risk. A share of the account sizes the "
+                                          "position's value instead. A share can be of the starting cash, the "
+                                          "balance or the equity.")
             if chosen_sizing != used:
                 def switch_sizing():
+                    basis = sizing.get("risk_of")
                     risk["sizing"] = {chosen_sizing: SIZING_DEFAULTS[chosen_sizing]}
+                    if basis and chosen_sizing in FRACTION_KEYS:
+                        risk["sizing"]["risk_of"] = basis
                     ui.prune_variables()
                 ui.rerun_after(switch_sizing)
-            amount_help = {"risk_pct": "The share of the starting cash lost if the stop is hit (0.01 = 1%): a fixed "
-                                       "amount on every trade, not a share of the equity or balance at the time.",
+            amount_help = {"risk_pct": "The share of the account lost if the stop is hit (0.01 = 1%), of the "
+                                       "starting cash, the balance or the equity (chosen below).",
+                           "notional_pct": "The share of the account each new position is worth (0.1 = 10%), of the "
+                                           "starting cash, the balance or the equity (chosen below). Above 1 is a "
+                                           "levered position, which the instrument's leverage must fund.",
                            "risk_amount": "The cash lost if the stop is hit, in the account's currency.",
                            "stake": f"{labels.get('stake', 'Units')}: the instrument's own unit, the same on every "
                                     "trade." + (" A spread bet's stake is money per point: per cent of price on a "
@@ -834,17 +900,39 @@ with form:
                            "notional": "The position's full value when it opens, the same on every trade.",
                            "size": "A raw size in the engine's own units."}
             amount = ui.param_input(f"risk.sizing.{used}", {"type": "float", "default": 1.0},
-                                    label="Amount (a fraction: 0.01 = 1%)" if used == "risk_pct" else "Amount",
+                                    label="Amount (a fraction: 0.01 = 1%)" if used in FRACTION_KEYS else "Amount",
                                     help=amount_help.get(used))
             cash = float((spec.get("account") or {}).get("init_cash") or 0.0)
+            basis = sizing.get("risk_of", "init_cash")
+            if used in FRACTION_KEYS:
+                # What the share is of (vectorbtX's risk_of): the starting cash, the same amount on every
+                # trade, or the balance or equity at the signal bar, read from the run as it goes.
+                bases = list(RISK_OF)
+                chosen_basis = st.radio("A share of", bases, index=bases.index(basis) if basis in bases else 0,
+                                        format_func=BASIS_LABELS.get, horizontal=True, key=ui.key("risk.sizing.risk_of"),
+                                        help="The starting cash: the same amount on every trade. The balance: the "
+                                             "cash after closed trades and every cost so far. The equity: the balance "
+                                             "plus the open trades' profit or loss. The balance and the equity are "
+                                             "read at the close of the bar the signal fires on, so the trades grow "
+                                             "with profits and shrink after losses. It can be searched on the "
+                                             "Optimise page.")
+                if chosen_basis != basis:
+                    ui.set_value("risk.sizing.risk_of", chosen_basis)
+                    basis = chosen_basis
             # What the number means in money, under the box: 0.05 is 5%, not 0.05%.
-            # ⚠️ vectorbtX sizes risk_pct off init_cash, before the run (frontend/prepare.py resolve_size):
-            # the same money on every trade, whatever the account has made or lost since.
-            if used == "risk_pct" and isinstance(amount, (int, float)):
-                st.caption(f"{amount:g} is {amount:.2%} of the starting cash of {cash:,.0f}: {amount * cash:,.2f} lost "
-                           "on each trade that hits its stop. That amount is fixed for the whole backtest: it is not "
-                           "a share of the account's equity or balance at the time, so it does not grow with profits "
-                           "or shrink after losses.")
+            if used in FRACTION_KEYS and isinstance(amount, (int, float)):
+                what = (f"{amount * cash:,.2f} lost on each trade that hits its stop" if used == "risk_pct" else
+                        f"each position is worth {amount * cash:,.2f}")
+                if basis == "init_cash":
+                    text = (f"{amount:g} is {amount:.2%} of the starting cash of {cash:,.0f}: {what}, the same on "
+                            "every trade.")
+                else:
+                    text = (f"{amount:g} is {amount:.2%} of {RISK_OF[basis]}, read at the close of each signal bar: "
+                            f"{what} while the account is at its starting {cash:,.0f}, more after profits and less "
+                            "after losses.")
+                if used == "notional_pct" and amount > 1:
+                    text += " Above 100% is a levered position: the instrument's leverage must fund it."
+                st.caption(text)
             elif used == "risk_amount" and isinstance(amount, (int, float)) and cash:
                 st.caption(f"{amount:,.2f} lost on each trade that hits its stop, the same on every trade: "
                            f"{amount / cash:.2%} of the starting cash of {cash:,.0f}.")
@@ -855,9 +943,9 @@ with form:
                                  horizontal=True, key=ui.key("risk.stop", ":kind"),
                                  help="Fixed and trailing stops cannot be combined: a trailing stop replaces the fixed "
                                       "one. Whether there is a stop, which kind, how it is measured and its distance "
-                                      "can all be searched on the Optimise page (risk sizing and the extra exits need "
-                                      "a fixed stop in points, so with either only the distance is). A stop from a "
-                                      "feature, such as 3 x ATR or an EMA, waits on vectorbtX taking a stop per bar.")
+                                      "can all be searched on the Optimise page (the extra exits need a fixed stop in "
+                                      "points, so with them only the distance is). A stop can be measured from a "
+                                      "line, such as 3 x an ATR or an EMA.")
             if stop_kind != stop.get("kind", "none"):
                 def switch_stop():
                     # The unit and both distances stay while the stop is off, so the optimiser can switch it on.
@@ -865,23 +953,26 @@ with form:
                     risk["stop"].setdefault("points", DISTANCE_DEFAULTS["stop"]["points"])
                     ui.prune_variables()
                 ui.rerun_after(switch_stop)
+            if stop_kind == "none" and used in ("risk_pct", "risk_amount"):
+                # vectorbtX 1de5744 sizes a risk with no stop from the leverage (docs/UPSTREAM.md issue 28).
+                levers = ui.run_guarded("Reading the leverage", lambda: engine.default_leverage(spec)) or {}
+                parts = [f"{symbol} at {lever:g}x: worth {lever:g} x the risk, an implied stop "
+                         f"{100.0 / lever:.4g}% of the price away" for symbol, lever in levers.items() if lever]
+                st.caption("With no stop, each trade is sized as if its margin were the risk"
+                           + (": " + "; ".join(parts) if parts else "") + ". No stop is placed: a move past that point "
+                           "loses more than the risk, and a real account would meet a margin call first, which the "
+                           "backtest does not model.")
             if stop_kind != "none":
                 distance_inputs(
                     "stop", trailing=stop_kind == "trailing",
                     help_points="How far from the fill price the stop sits, in points: the price distance divided by "
                                 "the point size. On a share a point is 1 cent, so a 1.00 move is 100 points; on FX it "
-                                "is a pip (0.0001, or 0.01 on a yen pair). ⚠️ A trailing stop in points starts this "
-                                "far behind the fill, but vectorbtX turns the distance into a share of the fill price, "
-                                "so it widens as the price rises: at twice the entry price it trails twice as far. A "
-                                "trailing stop in % of the price does not drift.",
+                                "is a pip (0.0001, or 0.01 on a yen pair). A trailing stop in points stays this many "
+                                "points behind the best price since the entry.",
                     help_pct="How far from the fill price the stop sits, as a fraction of that price: 0.02 puts it 2% "
                              "below a long's fill (above a short's). A trailing stop keeps that share of the best "
                              "price since the entry behind it. vectorbt's own stop, measured from the fill like a "
                              "stop in points.")
-                if (risk["stop"].get("unit") == "pct" and
-                        any(key in (risk.get("sizing") or {}) for key in ("risk_pct", "risk_amount"))):
-                    st.warning("Risk sizing needs the stop in points: vectorbtX cannot size a trade from a stop in % "
-                               "of the price yet. Measure the stop in points, or size by stake or notional.")
             target = risk.get("target") or {"kind": "none"}
             had_target = target.get("kind") == "fixed"
             use_target = st.checkbox("Take profit", value=had_target, key=ui.key("risk.target", ":on"),

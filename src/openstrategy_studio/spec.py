@@ -17,11 +17,16 @@ Its shape
                  or alternatives {"choose": label, "options": {label: rule}}.
     selection, weighting, schedule   (portfolio only)
     risk         sizing, stop, target, extra exits, order timing (signals only).
-                 stop {"kind": "none" | "fixed" | "trailing", "unit": "points" | "pct",
-                 "points", "pct"} and target {"kind": "none" | "fixed", "unit", "points",
-                 "pct"}: a distance in points, or a fraction of the price (0.02 = 2%). Each
-                 keeps both distances while it is off or measured the other way, so the
-                 optimiser can switch it (risk.stop.kind, risk.stop.unit, ...).
+                 sizing {one of SIZING_KEYS: number, "risk_of"?: "init_cash" | "balance" |
+                 "equity"}: risk_of says what risk_pct or notional_pct is a share of.
+                 stop {"kind": "none" | "fixed" | "trailing", "unit": "points" | "pct" |
+                 "multiple" | "level", "points", "pct", "multiple", "line"} and target
+                 {"kind": "none" | "fixed", "unit", ...}: a distance in points, a fraction of
+                 the price (0.02 = 2%), a multiple of a line (3 x an ATR feature), or the
+                 line's own level (an EMA), where "line" is a feature or price reference read
+                 on the signal bar. Each keeps every distance while it is off or measured
+                 another way, so the optimiser can switch it (risk.stop.kind, risk.stop.unit,
+                 ...).
     account, engine_extra
     optimise     {"variables": {dotted path: {"start", "stop", "step"} | {"values": [...]}}}
 
@@ -65,20 +70,35 @@ KINDS = ["signals", "portfolio"]
 # How a strategy is traded: vectorbtX's instrument modes, one per strategy.
 TRADING = ["equity", "cfd", "spreadbet", "fx_spot"]
 PRICE_FIELDS = ["open", "high", "low", "close", "volume"]
-SIZING_KEYS = ["risk_pct", "risk_amount", "stake", "notional", "size"]
+SIZING_KEYS = ["risk_pct", "risk_amount", "stake", "notional", "size", "notional_pct"]
+# What risk_pct (the risk) and notional_pct (the position's value) are a share of: vectorbtX's
+# risk_of (docs/UPSTREAM.md issues 23 and 30). The starting cash is the same amount on every
+# trade; the balance (cash after closed trades and every cost) and the equity (the balance
+# plus open trades at the close) are read at the close of the signal bar, so the trades grow
+# with profits and shrink after losses.
+RISK_OF = {"init_cash": "the starting cash", "balance": "the balance", "equity": "the equity"}
+# The sizing keys that are a share of the account, so take a risk_of.
+FRACTION_KEYS = ["risk_pct", "notional_pct"]
 EXIT_KEYS = ["time_bars", "breakeven_points", "step_points"]     # the numba exit templates (exit_rules.py)
 # A stop's and a target's kinds and units, and how each reads on the Optimise page. A distance is
-# in points (vectorbtX's stop_points, target_points, trail_points) or a fraction of the price
+# in points (vectorbtX's stop_points, target_points, trail_points), a fraction of the price
 # (vectorbt's own sl_stop and tp_stop, which the front door anchors at the fill like a point
-# stop). ⚠️ Both take one number for the whole run, so a stop from a feature (3 x ATR, an EMA)
-# waits on vectorbtX taking a value per bar (docs/UPSTREAM.md issue 26).
+# stop), a multiple of a line read on the signal bar (3 x ATR: a per-bar stop_points frame), or
+# the line's own level (an EMA, the signal bar's low: vectorbtX's stop_price, target_price and,
+# trailing, trail_price). The per-bar ones come from compile_signals on the signal bar, and the
+# front door shifts them with the signals (vectorbtX 1de5744 and 2b2d090; docs/UPSTREAM.md
+# issues 26 and 31).
 STOP_KINDS = {"none": "no stop", "fixed": "a fixed stop", "trailing": "a trailing stop"}
 TARGET_KINDS = {"none": "no take profit", "fixed": "a take profit"}
-STOP_UNITS = {"points": "in points", "pct": "in % of the price"}
+STOP_UNITS = {"points": "in points", "pct": "in % of the price", "multiple": "as a multiple of a line",
+              "level": "at a line's level"}
+# The units that read a line (a feature or a price), node["line"].
+LINE_UNITS = ["multiple", "level"]
 # The distances a stop and a take profit start from, in each unit: on the Risk tab, in a new
-# strategy, and when a strategy switches to trading on signals. Both are kept while a stop or
+# strategy, and when a strategy switches to trading on signals. All are kept while a stop or
 # target is off, so the optimiser can switch it on.
-DISTANCE_DEFAULTS = {"stop": {"points": 50.0, "pct": 0.02}, "target": {"points": 100.0, "pct": 0.04}}
+DISTANCE_DEFAULTS = {"stop": {"points": 50.0, "pct": 0.02, "multiple": 3.0},
+                     "target": {"points": 100.0, "pct": 0.04, "multiple": 6.0}}
 # Order timing for intraday strategies (docs/UPSTREAM.md issue 20 explains the approximations).
 ORDER_KEYS = ["good_for_day", "flat_by_day_end"]
 COMPARISON_OPS = [">", "<", ">=", "<=", "crosses_above", "crosses_below", "between", "rising", "falling"]
@@ -518,20 +538,23 @@ def tunable_inputs(spec):
             _rule_inputs(out, f"rules.{slot}", node, SLOT_LABELS[slot], timeframe)
     risk = spec.get("risk") or {}
     sizing = risk.get("sizing") or {}
-    for key, value in sizing.items():
-        out.append({"path": f"risk.sizing.{key}", "group": "Risk", "type": "float", "value": value,
-                    "label": f"Position size ({key})"})
+    for key in SIZING_KEYS:
+        if key in sizing:
+            out.append({"path": f"risk.sizing.{key}", "group": "Risk", "type": "float", "value": sizing[key],
+                        "label": f"Position size ({key})"})
+    if any(key in sizing for key in FRACTION_KEYS):
+        out.append({"path": "risk.sizing.risk_of", "group": "Risk", "type": "choice",
+                    "value": sizing.get("risk_of", "init_cash"), "options": list(RISK_OF), "labels": RISK_OF,
+                    "label": "Position size: a share of the starting cash, the balance or the equity"})
     # The stop and the target: whether there is one (its kind), how it is measured (its unit), and
     # its distances. Each keeps both distances while it is off or measured the other way, so a
     # trial that switches it has one to use.
-    stop = risk.get("stop") or {}
     exits = risk.get("exits") or {}
-    # Risk sizing reads a fixed stop's distance in points (vectorbtX's resolve_size takes
-    # stop_points only), and the extra exits adjust a fixed stop from its distance in points, so
-    # with either the stop stays fixed and in points: its kind and unit are offered only where
-    # every option is valid, and validate_spec need never reject a trial's.
-    fixed_only = any(key in sizing for key in ("risk_pct", "risk_amount")) or \
-        any(exits.get(key) is not None for key in EXIT_KEYS)
+    # The extra exits adjust a fixed stop from its distance in points (exit_rules.runtime_values),
+    # so with them the stop stays fixed and in points: its kind and unit are offered only where
+    # every option is valid, and validate_spec need never reject a trial's. Risk sizing reads any
+    # stop, or none (vectorbtX 1de5744, docs/UPSTREAM.md issues 26 and 28), so it restricts nothing.
+    fixed_only = any(exits.get(key) is not None for key in EXIT_KEYS)
     for part, kinds, words in (("stop", STOP_KINDS, "Stop"), ("target", TARGET_KINDS, "Take profit")):
         node = risk.get(part) or {}
         if "points" not in node:
@@ -543,11 +566,16 @@ def tunable_inputs(spec):
             out.append({"path": f"risk.{part}.kind", "group": "Risk", "type": "choice", "value": kind,
                         "options": list(kinds), "labels": kinds,
                         "label": "Stop: none, fixed or trailing" if part == "stop" else "Take profit: on or off"})
-        if free and "pct" in node:
+        # The units a trial may switch to: those the node holds what they need for (a line for a
+        # multiple or a level, and a number for a multiple).
+        units = [name for name in STOP_UNITS if (name in node if name != "level" else "line" in node)
+                 and (name not in LINE_UNITS or "line" in node)]
+        if free and len(units) > 1:
             out.append({"path": f"risk.{part}.unit", "group": "Risk", "type": "choice", "value": unit,
-                        "options": list(STOP_UNITS), "labels": STOP_UNITS,
-                        "label": f"{words}: in points or in % of the price"})
-        for key, measured in (("points", "points"), ("pct", "a fraction of the price: 0.02 = 2%")):
+                        "options": units, "labels": {name: STOP_UNITS[name] for name in units},
+                        "label": f"{words}: how it is measured"})
+        for key, measured in (("points", "points"), ("pct", "a fraction of the price: 0.02 = 2%"),
+                              ("multiple", "a multiple of its line")):
             if key in node:
                 used = kind != "none" and unit == key
                 out.append({"path": f"risk.{part}.{key}", "group": "Risk", "type": "float", "value": node[key],
@@ -862,6 +890,7 @@ def _check_risk(problems, spec, kind):
     exits = risk.get("exits") or {}
     used_exits = [key for key in EXIT_KEYS if exits.get(key) is not None]
     orders = risk.get("orders") or {}
+    features = spec.get("features") or {}
     if kind == "portfolio":
         if used or stop_kind != "none" or target_kind != "none" or used_exits or any(orders.values()):
             problems.append("A portfolio is sized by its weights; remove the sizing, stops, target and order settings.")
@@ -875,9 +904,16 @@ def _check_risk(problems, spec, kind):
         problems.append(f"Choose one way to size positions, not {len(used)} ({', '.join(used)}).")
     for key in used:
         _check_number(problems, f"Sizing {key}", sizing[key], minimum=0, allow_zero=False)
-    extra = sorted(set(sizing) - set(SIZING_KEYS))
+    extra = sorted(set(sizing) - set(SIZING_KEYS) - {"risk_of"})
     if extra:
         problems.append(f"Unknown sizing setting: {', '.join(extra)}.")
+    if "risk_of" in sizing:
+        if sizing["risk_of"] not in RISK_OF:
+            problems.append("A position size is a share of the starting cash, the balance or the equity "
+                            "(risk_of init_cash, balance or equity).")
+        elif not any(key in sizing for key in FRACTION_KEYS):
+            problems.append("Only a share of the account (risk a share, or a position worth a share) has a basis; "
+                            "remove risk_of, or size by a share.")
     # ⚠️ A stop or target written without its kind would be read as none: the trade would run
     # unprotected, or keep running past its target, with nothing to say so.
     if "kind" not in stop:
@@ -888,13 +924,23 @@ def _check_risk(problems, spec, kind):
         problems.append("The take profit must say its kind: none or fixed.")
     elif target_kind not in TARGET_KINDS:
         problems.append("The take profit must be none or fixed.")
-    # A distance in points, or a fraction of the price. No unit is points, as it was before there was a choice.
+    # How each is measured. No unit is points, as it was before there was a choice.
     stop_unit = stop.get("unit", "points")
     target_unit = target.get("unit", "points")
     for words, unit in (("stop", stop_unit), ("take profit", target_unit)):
         if unit not in STOP_UNITS:
-            problems.append(f"The {words} is measured in points or in % of the price (unit points or pct).")
-    if stop_kind in ("fixed", "trailing"):
+            problems.append(f"The {words} is measured in points, in % of the price, as a multiple of a line or at "
+                            f"a line's level (unit points, pct, multiple or level).")
+    for words, node, on in (("Stop", stop, stop_kind in ("fixed", "trailing")),
+                            ("Take profit", target, target_kind == "fixed")):
+        if not on or node.get("unit") not in LINE_UNITS:
+            continue
+        # The line is read on the signal bar, like the conditions: a feature's output or a price,
+        # with bars ago if wanted. A number would be a fixed price level for the whole run.
+        _check_ref(problems, f"{words} line", node.get("line"), features, allow_const=False)
+        if node.get("unit") == "multiple":
+            _check_number(problems, f"{words} multiple", node.get("multiple"), minimum=0, allow_zero=False)
+    if stop_kind in ("fixed", "trailing") and stop_unit not in LINE_UNITS:
         if stop_unit == "pct":
             # ⚠️ A fraction, like vectorbt's own sl_stop: 0.02 is 2%, and 2 would be 200%.
             _check_number(problems, "Stop distance (a fraction of the price)", stop.get("pct"), minimum=0,
@@ -906,13 +952,10 @@ def _check_risk(problems, spec, kind):
         if "trailing_points" in stop:
             # ⚠️ trail_points overwrites stop_points in vectorbtX: they cannot combine.
             problems.append("A fixed stop and a trailing stop cannot be used together; pick one.")
-    if used and used[0] in ("risk_pct", "risk_amount") and stop_kind != "fixed":
-        problems.append(f"{used[0]} sizes from the stop distance, so it needs a fixed stop.")
-    elif used and used[0] in ("risk_pct", "risk_amount") and stop_unit == "pct":
-        # vectorbtX's risk sizers read stop_points only (docs/UPSTREAM.md issue 26).
-        problems.append(f"{used[0]} sizes from the stop distance in points: vectorbtX cannot size from a stop in % "
-                        "of the price yet. Measure the stop in points, or size by stake or notional.")
-    if target_kind == "fixed":
+    # Risk sizing reads whichever stop is set (vectorbtX 1de5744: points, a fraction of the price,
+    # a trailing stop's first distance, a per-bar stop; 2b2d090: a level), and with no stop sizes
+    # from the leverage (docs/UPSTREAM.md issues 26, 28 and 31). So it asks nothing of the stop.
+    if target_kind == "fixed" and target_unit not in LINE_UNITS:
         if target_unit == "pct":
             _check_number(problems, "Take profit (a fraction of the price)", target.get("pct"), minimum=0,
                           allow_zero=False)

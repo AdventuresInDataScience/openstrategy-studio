@@ -21,7 +21,7 @@ dependencies = [
     # 1.50+ for width="stretch" (use_container_width is deprecated), st.fragment
     # with run_every, and streamlit.testing.v1.AppTest.
     "streamlit>=1.50",
-    "ta_patterns>=1.2.1",
+    "ta-patterns>=1.2.2",
     "butchc>=0.6.1",
     "optuna>=4",
     "scipy>=1.15", # rng= replaces seed= in qmc and optimize

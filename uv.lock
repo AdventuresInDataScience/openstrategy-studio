@@ -980,7 +980,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.15" },
     { name = "streamlit", specifier = ">=1.50" },
     { name = "ta-lib", specifier = ">=0.8.3" },
-    { name = "ta-patterns", specifier = ">=1.2.1" },
+    { name = "ta-patterns", specifier = ">=1.2.2" },
     { name = "vectorbt", specifier = "==1.1.0" },
     { name = "vectorbtx", extras = ["excel", "rates"], git = "https://github.com/AdventuresInDataScience/vectorbtx" },
     { name = "yfinance" },
@@ -1901,14 +1901,14 @@ wheels = [
 
 [[package]]
 name = "ta-patterns"
-version = "1.2.1"
+version = "1.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/c6/988ff17904fbe26c3d091b131840131f50764d214f63de93d407c5c9f306/ta_patterns-1.2.1.tar.gz", hash = "sha256:a6af78869ca8a864679324362946c0848cf7e7cad08383d0f595a01e4136b71c", size = 80763, upload-time = "2026-09-22T16:06:02.839Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bd/b9/003c6ccf83c9182863e86bebbc7c9e22bc2e9c7f976b7f9b4631f491d2c4/ta_patterns-1.2.2.tar.gz", hash = "sha256:5b5c7f7cbe2605a0e0341e6c2f2b6248913c6293f095a9269fdb9c9c1e5b0ed6", size = 82129, upload-time = "2026-11-19T12:12:20.887Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/57/23/ad290820dc4d079229dd5c3c0b97d29fb2d8c398c00ba09cb8ef63974032/ta_patterns-1.2.1-py3-none-any.whl", hash = "sha256:2c48c1e4498f0207e90142569aa98099d3828b2dcdd1ffe5f8b6bc7402aa2c47", size = 81210, upload-time = "2026-09-22T16:06:01.222Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/37/458c2018032597a78db8f1489336a5b434111da531aa3a1bfba026154e64/ta_patterns-1.2.2-py3-none-any.whl", hash = "sha256:f762c209e9e1bf2fc4d9ecaed5d9f5556e09b3db2d492897af4080cd81e51c55", size = 81524, upload-time = "2026-11-19T12:12:19.492Z" },
 ]
 
 [[package]]
@@ -2024,7 +2024,7 @@ wheels = [
 [[package]]
 name = "vectorbtx"
 version = "0.1.0"
-source = { git = "https://github.com/AdventuresInDataScience/vectorbtx#9fa427e4d81df9840f8cc1a34f5088d30bd11ba0" }
+source = { git = "https://github.com/AdventuresInDataScience/vectorbtx#2b2d09001c45b51fa38759e1057e66f7c762b706" }
 dependencies = [
     { name = "numpy" },
     { name = "pandas" },

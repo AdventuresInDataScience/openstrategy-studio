@@ -297,6 +297,18 @@ def _rule_rows(label, rule):
     return rows
 
 
+def _distance_text(node):
+    """How far a stop or target sits, in words: "50 pts", "2.00% of the price", "3 x atr", "at ema"."""
+    unit = node.get("unit", "points")
+    if unit == "pct":
+        return f"{node['pct']:.2%} of the price"
+    if unit == "multiple":
+        return f"{_number(node['multiple'])} x {ref_text(node.get('line') or {})}"
+    if unit == "level":
+        return f"at {ref_text(node.get('line') or {})}"
+    return f"{_number(node['points'])} pts"
+
+
 def summary(spec):
     """The strategy as (label, text) rows, for the Build page's At a glance panel."""
     from .indicators import describe
@@ -316,18 +328,23 @@ def summary(spec):
             rows += _rule_rows(label, (spec.get("rules") or {}).get(slot))
         risk = spec.get("risk") or {}
         parts = []
-        for key, value in (risk.get("sizing") or {}).items():
-            parts.append({"risk_pct": f"risk {value:.2%} a trade" if isinstance(value, (int, float)) else str(value),
-                          "risk_amount": f"risk {_number(value)} a trade", "stake": f"stake {_number(value)}",
-                          "notional": f"positions of {_number(value)}", "size": f"size {_number(value)}"}[key])
+        sizing = risk.get("sizing") or {}
+        # A share of the account says what it is a share of (risk_of), when that is not the starting cash.
+        of = {"balance": " of the balance", "equity": " of the equity"}.get(sizing.get("risk_of"), "")
+        for key, value in sizing.items():
+            if key == "risk_of":
+                continue
+            share = f"{value:.2%}" if isinstance(value, (int, float)) else str(value)
+            parts.append({"risk_pct": f"risk {share}{of} a trade", "risk_amount": f"risk {_number(value)} a trade",
+                          "stake": f"stake {_number(value)}", "notional": f"positions of {_number(value)}",
+                          "size": f"size {_number(value)}",
+                          "notional_pct": f"positions worth {share}{of}"}.get(key, f"{key} {value}"))
         stop = risk.get("stop") or {}
         if stop.get("kind") in ("fixed", "trailing"):
-            parts.append(f"{stop['kind']} stop " + (f"{stop['pct']:.2%} of the price" if stop.get("unit") == "pct"
-                                                    else f"{_number(stop['points'])} pts"))
+            parts.append(f"{stop['kind']} stop " + _distance_text(stop))
         target = risk.get("target") or {}
         if target.get("kind") == "fixed":
-            parts.append("target " + (f"{target['pct']:.2%} of the price" if target.get("unit") == "pct"
-                                      else f"{_number(target['points'])} pts"))
+            parts.append("target " + _distance_text(target))
         exits = risk.get("exits") or {}
         if exits.get("time_bars") is not None:
             parts.append(f"out after {exits['time_bars']} bars")

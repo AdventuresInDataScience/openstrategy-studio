@@ -723,3 +723,41 @@ def test_the_usual_terms_follow_the_way_of_trading(tmp_path, monkeypatch):
     assert fields["leverage"] == 1.0 and fields["point_size"] == 0.0001
     assert any("on EURUSD=X, 1 pip (0.0001)" in item.value for item in app.caption)
     assert not app.exception, [item.value for item in app.exception]
+
+
+def test_the_risk_tab_sizes_from_the_account_and_measures_a_stop_from_a_line(tmp_path, monkeypatch):
+    """vectorbtX 2b2d090 on the Risk tab: a share of the balance or equity (issues 23 and 30), risk
+    sizing with no stop (28), and a stop as a multiple of a line or at its level (26 and 31)."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    # A share of the equity, then a position worth a share of it: the basis goes with the share.
+    app.radio(key=current_key(app, "risk.sizing.risk_of")).set_value("equity").run()
+    assert app.session_state["spec"]["risk"]["sizing"]["risk_of"] == "equity"
+    assert any("read at the close of each signal bar" in item.value for item in app.caption)
+    app.radio(key=current_key(app, "risk.sizing:kind")).set_value("notional_pct").run()
+    assert app.session_state["spec"]["risk"]["sizing"] == {"notional_pct": 0.1, "risk_of": "equity"}
+    # A stop as a multiple of a line: the first feature, three times.
+    app.radio(key=current_key(app, "risk.stop:unit")).set_value("multiple").run()
+    stop = app.session_state["spec"]["risk"]["stop"]
+    assert stop["unit"] == "multiple" and stop["multiple"] == 3.0 and stop["line"] == {"feature": "fast"}
+    assert any("3 x the line from the price the trade fills at" in item.value for item in app.caption)
+    # At the line's level, read on the signal bar; one on the wrong side of the fill is rejected.
+    app.radio(key=current_key(app, "risk.stop:unit")).set_value("level").run()
+    assert app.session_state["spec"]["risk"]["stop"]["unit"] == "level"
+    assert any("on the wrong side is an order a broker rejects" in item.value for item in app.caption)
+    assert validate_spec(app.session_state["spec"]) == []
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+    # Risk sizing with no stop: sized from the leverage, and the tab says what that means.
+    app.radio(key=current_key(app, "risk.sizing:kind")).set_value("risk_pct").run()
+    app.radio(key=current_key(app, "risk.stop:kind")).set_value("none").run()
+    assert app.session_state["spec"]["risk"]["sizing"] == {"risk_pct": 0.01, "risk_of": "equity"}
+    assert any("as if its margin were the risk" in item.value and "30x" in item.value for item in app.caption)
+    assert validate_spec(app.session_state["spec"]) == []
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)

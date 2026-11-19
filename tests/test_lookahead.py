@@ -231,3 +231,24 @@ def test_weights_are_causal(momentum_spec, ohlcv_multi):
     for cut in CUTS:
         part = C.compile_weights(spec, {field: frame.iloc[:cut] for field, frame in ohlcv_multi.items()})
         pd.testing.assert_frame_equal(full["weights"].iloc[:cut], part["weights"])
+
+
+def test_a_stop_from_a_line_is_causal_and_on_the_signal_bar(ohlcv):
+    """A trailing stop at 3 x an ATR and a target at an EMA: no lookahead, and unshifted. The front
+    door shifts them with the signals (vectorbtX 1de5744, 2b2d090), so a shift here would read a
+    stale value, and a value from the fill bar would be lookahead."""
+    pytest.importorskip("vectorbtx")
+    features = dict(FEATURES, atr=feature("talib:ATR", timeperiod=14), ema=feature("talib:EMA", timeperiod=20))
+    spec = signal_spec(features, OPERATOR_RULES[">"])
+    spec["instruments"] = {"EURUSD=X": {"point_size": 0.0001}}
+    spec["risk"] = {"sizing": {"stake": 1.0},
+                    "stop": {"kind": "trailing", "unit": "multiple", "points": 50.0, "multiple": 3.0,
+                             "line": {"feature": "atr"}},
+                    "target": {"kind": "fixed", "unit": "level", "points": 100.0, "line": {"feature": "ema"}}}
+    applied = apply_params(spec)
+    full = C.compile_signals(applied, ohlcv)
+    computed = C.compile_features(applied["features"], ohlcv)
+    atr, ema = (next(iter(computed[name].values())) for name in ("atr", "ema"))
+    pd.testing.assert_frame_equal(full["trail_points"], 3.0 * atr / 0.0001)    # points: 3 ATRs over the pip
+    pd.testing.assert_frame_equal(full["target_price"], ema)
+    assert_causal(applied, ohlcv, keys=("trail_points", "target_price"))

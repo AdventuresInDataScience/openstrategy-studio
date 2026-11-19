@@ -18,8 +18,8 @@ import pandas as pd
 from . import engine, indicators
 from .data import resample_frames
 from .expressions import parse_logic
-from .spec import (PRICE_FIELDS, RESAMPLE_RULE, RULE_SLOTS, TIMING_KEYS, apply_params, canonical_json, cash_model,
-                   feature_order, strategy_kind)
+from .spec import (LINE_UNITS, PRICE_FIELDS, RESAMPLE_RULE, RULE_SLOTS, TIMING_KEYS, apply_params, canonical_json,
+                   cash_model, feature_order, strategy_kind)
 
 # ---------------------------------------------------------------------------
 # Feature cache
@@ -270,15 +270,17 @@ def day_boundaries(index):
 # Signal strategies
 # ---------------------------------------------------------------------------
 
-def compile_signals(spec, data):
+def compile_signals(spec, data, data_dir=None):
     """{"entries", "exits", "short_entries", "short_exits"}: boolean frames like close.
 
     Plus "entry_priority", a float frame like close, when a shared account ranks
-    competing entries by a feature.
+    competing entries by a feature; and a stop's or target's frame when it is measured
+    from a line (stop_lines): "stop_points", "trail_points", "target_points",
+    "stop_price", "trail_price" or "target_price", named as the front door's argument.
 
     `spec` must already have its parameters applied. All of them are on the bar the
     signal is computed on: the front door shifts every one of them to the next bar's
-    open itself, so none is shifted here.
+    open itself, so none is shifted here. `data_dir` finds a universe file's point sizes.
     """
     close = data["close"]
     fingerprint = data_fingerprint(data)
@@ -333,12 +335,92 @@ def compile_signals(spec, data):
         score = _full(resolve_ref(priority["score"], data, features, spec_features), close)
         out["entry_priority"] = score if priority.get("highest_first", True) else -score
 
+    # 6. A stop or target from a line, on the signal bar like everything above.
+    out.update(stop_lines(spec, data, features, spec_features, data_dir))
+
     # ⚠️ No shift here, for any of them. The front door shifts entries, exits, short
     # entries and short exits to the next bar's open itself (vectorbtX 16293a2,
     # docs/UPSTREAM.md issue 1, which used to leave the shorts unshifted), and shifts a
     # priority score with them. Shifting here as well would delay every signal two bars.
     # test_engine.py::test_short_signal_fills_next_open checks the outcome.
     return out
+
+
+def point_value(spec, close, data_dir=None):
+    """What one point is in the price `close` is written in, per bar and symbol.
+
+    The point size, times the rate the price was converted into the account currency at
+    (vectorbtX's fx_rate_of reads it off a converted frame; 1 when nothing was converted).
+    ⚠️ A point is a unit of the instrument's own price: on a USD share converted to pounds
+    it is a cent times the rate, not a penny (docs/UPSTREAM.md issue 29).
+    """
+    from vectorbtx.fx.convert import fx_rate_of
+
+    sizes = pd.Series(engine.point_sizes(spec, list(close.columns), data_dir), index=close.columns, dtype=float)
+    rate = fx_rate_of(close, index=close.index, columns=close.columns)
+    if rate is None:
+        return pd.DataFrame(np.broadcast_to(sizes.to_numpy(), close.shape), index=close.index,
+                            columns=close.columns)
+    return rate.mul(sizes, axis=1)
+
+
+def stop_lines(spec, data, features, spec_features, data_dir=None):
+    """{front-door argument: frame} for a stop or target measured from a line, on the signal bar.
+
+    A multiple of a line (3 x an ATR) is a distance in price, sent as points
+    (stop_points, or trail_points when the stop trails, target_points for a target): the
+    distance divided by the point value, which vectorbtX multiplies back at the fill. A
+    line's level (an EMA, the signal bar's low) is sent as a price (stop_price,
+    trail_price, target_price). The front door shifts each frame with the signals, so the
+    value at the signal bar's close is the one used from the fill (docs/UPSTREAM.md
+    issues 26 and 31). A missing value (an indicator warming up) places no stop on that
+    entry; with risk sizing, no entry.
+    """
+    close = data["close"]
+    risk = spec.get("risk") or {}
+    out = {}
+    for part, kinds in (("stop", ("fixed", "trailing")), ("target", ("fixed",))):
+        node = risk.get(part) or {}
+        unit = node.get("unit", "points")
+        if node.get("kind", "none") not in kinds or unit not in LINE_UNITS:
+            continue
+        line = _full(resolve_ref(node["line"], data, features, spec_features), close)
+        name = engine.STOP_LINE_ARGS[unit]["target" if part == "target" else node["kind"]]
+        if unit == "level":
+            out[name] = line
+        else:
+            out[name] = float(node["multiple"]) * line / point_value(spec, close, data_dir)
+    return out
+
+
+def stop_line_code(spec, spec_features, data_dir=None):
+    """The export's lines for stop_lines: the same frames, from the same line."""
+    risk = spec.get("risk") or {}
+    body = []
+    for part, kinds in (("stop", ("fixed", "trailing")), ("target", ("fixed",))):
+        node = risk.get(part) or {}
+        unit = node.get("unit", "points")
+        if node.get("kind", "none") not in kinds or unit not in LINE_UNITS:
+            continue
+        name = engine.STOP_LINE_ARGS[unit]["target" if part == "target" else node["kind"]]
+        line = f"full({_ref_code(node['line'], spec_features)}, close)"
+        if unit == "level":
+            body.append(f"{name} = {line}")
+        else:
+            if not any(text.startswith("point_value = ") for text in body):
+                sizes = engine.point_sizes(spec, list(spec["data"]["symbols"]), data_dir)
+                body += ["# A point in the price as converted: the point size times the conversion rate (1 if none).",
+                         "from vectorbtx.fx.convert import fx_rate_of",
+                         f"_sizes = pd.Series({sizes!r}, index=close.columns)",
+                         "_rate = fx_rate_of(close, index=close.index, columns=close.columns)",
+                         "point_value = _rate.mul(_sizes, axis=1) if _rate is not None else "
+                         "pd.DataFrame(np.broadcast_to(_sizes.to_numpy(), close.shape), index=close.index, "
+                         "columns=close.columns)"]
+            body.append(f"{name} = {float(node['multiple'])!r} * {line} / point_value")
+    if body:
+        body.insert(0, "# The stop or target from a line, on the signal bar like the signals: the front door shifts it "
+                       "with them.")
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -729,11 +811,13 @@ def export_script(spec, data_dir=None):
     lines += ["", "", "def run(open_, high, low, close, volume, fx=None):",
               "    P = {'open': open_, 'high': high, 'low': low, 'close': close, 'volume': volume}"]
     body = []
-    if account.get("fx") and account.get("base_currency"):
-        body += ["# Convert open, high, low AND close with the same FX table BEFORE any signal.",
-                 f"universe = {engine.universe_code(spec, data_dir)}",
+    quotes = engine.conversion_quotes(spec, data_dir) if account.get("fx") and account.get("base_currency") else None
+    if quotes is not None:
+        body += ["# Convert open, high, low AND close with the same FX table BEFORE any signal. A spread bet",
+                 "# keeps its own price (its stake is money per point), so it is given the account currency.",
+                 f"quotes = {quotes!r}",
                  "for _field in ('open', 'high', 'low', 'close'):",
-                 f"    P[_field] = vbt.x.to_base_currency(P[_field], base={account['base_currency']!r}, fx=fx, instruments=universe)",
+                 f"    P[_field] = vbt.x.to_base_currency(P[_field], base={account['base_currency']!r}, fx=fx, quote_currency=quotes)",
                  "open_, high, low, close = P['open'], P['high'], P['low'], P['close']"]
     body.append("F = compute_features(open_, high, low, close, volume)")
     if kind == "signals":
@@ -756,6 +840,7 @@ def export_script(spec, data_dir=None):
                          "short_exits = short_exits | mask_frame(_second_last, close)"]
             body += ["entries = entries & mask_frame(~_blocked, close)",
                      "short_entries = short_entries & mask_frame(~_blocked, close)"]
+        body += stop_line_code(spec, spec_features, data_dir)
         if plan["args"].get("entry_priority") == ("var", "entry_priority"):
             priority = account["entry_priority"]
             sign = "" if priority.get("highest_first", True) else "-"
@@ -771,7 +856,9 @@ def export_script(spec, data_dir=None):
     if plan["single"]:
         symbol = spec["data"]["symbols"][0]
         body.append("# SingleBacktest takes Series and flat instrument keywords.")
-        for var in ("close", "open_", "high", "low", "volume", "entries", "exits", "short_entries", "short_exits"):
+        lines_used = [value for how, value in plan["args"].values() if how == "var" and value in engine.STOP_ARGS]
+        for var in ("close", "open_", "high", "low", "volume", "entries", "exits", "short_entries", "short_exits",
+                    *lines_used):
             if var in ("close", "open_", "high", "low", "volume") or kind == "signals":
                 body.append(f"{var} = {var}[{symbol!r}]")
     if "adjust_sl_func_nb" in plan["args"]:

@@ -26,7 +26,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .spec import SIZING_KEYS, apply_params, cash_model, strategy_kind, trading_mode, when_cash_short
+from .spec import (FRACTION_KEYS, SIZING_KEYS, apply_params, cash_model, strategy_kind, trading_mode,
+                   when_cash_short)
+
+# A stop or target from a line: the vectorbtX argument each unit goes to, by whether the stop
+# trails (or it is the target). compile_signals names its frames the same.
+STOP_LINE_ARGS = {"multiple": {"fixed": "stop_points", "trailing": "trail_points", "target": "target_points"},
+                  "level": {"fixed": "stop_price", "trailing": "trail_price", "target": "target_price"}}
+# Every stop and target argument a plan may send.
+STOP_ARGS = ("stop_points", "target_points", "trail_points", "sl_stop", "tp_stop", "sl_trail",
+             "stop_price", "target_price", "trail_price")
 
 # ⚠️ warnings.catch_warnings swaps process-wide state, so two runs at once (a second
 # browser tab, or the start-up warm-up below beside a user's run) would swap each other's
@@ -268,7 +277,8 @@ def usual_point_size(mode, asset_class=None, quote_currency=None):
     FX: the pip for the quote currency (vectorbtX's fx_pip: 0.0001, or 0.01 for yen and a few
     others), in every way of trading. An index: 1.0, an index point. A share priced in pence
     (Yahoo's .L quotes, GBp): 1.0, a penny. Anything else: 0.01, a cent (or a penny). vectorbtX
-    gives an index 0.01 and knows nothing of pence (docs/UPSTREAM.md issue 25).
+    fills in the same since 1de5744 (docs/UPSTREAM.md issue 25); the Studio still names it
+    itself, because an instrument still being typed into the grid may not build yet.
     ⚠️ VERIFY per broker for commodities: gold and oil spread bets quote points of 0.1 or 0.01.
     """
     from vectorbtx.instruments.defaults import fx_pip
@@ -285,13 +295,13 @@ def usual_leverage(mode, asset_class=None, kind="signals"):
     """The leverage the Studio fills in for a way of trading, an asset class and a kind of strategy.
 
     The owner's rule (17 November 2026): unlevered unless it is a spread bet or a CFD.
-    Spread bets and CFDs trade at the usual retail limits, vectorbtX's table by asset class
-    (30x FX, 10x indices and commodities, 5x single stocks). Everything else is 1x, no
-    borrowing: shares bought outright, FX spot and every portfolio ("most portfolios and
-    naked trading are non-margin"). vectorbtX's own default is 2x bought outright and on FX
-    spot (docs/UPSTREAM.md issue 24).
+    Spread bets and CFDs trade at the usual retail limits (30x FX, 10x indices and
+    commodities, 5x single stocks). Everything else is 1x, no borrowing: shares bought
+    outright and FX spot ("most portfolios and naked trading are non-margin"). That is
+    vectorbtX's own table since 1de5744 (docs/UPSTREAM.md issue 24), so it is read from
+    there. Every portfolio is 1x too, which is the Studio's rule, not vectorbtX's.
     """
-    if mode not in ("cfd", "spreadbet") or kind == "portfolio":
+    if kind == "portfolio":
         return 1.0
     # Read from vectorbtX's table, not by building an Instrument: one that is still incomplete (a
     # CFD with no contract size, which the grid already flags) would refuse to build.
@@ -344,22 +354,31 @@ def default_leverage(spec):
     return out
 
 
-def sizing_check(spec, data, entries=None, data_dir=None):
+def sizing_check(spec, data, entries=None, data_dir=None, compiled=None):
     """One trade of a rule strategy against what its account can fund, per symbol, before any run.
 
-    The sizes are vectorbtX's own (resolve_size, then quantize_engine_size, at the open the
-    order fills at), so this says what the run will do: a trade worth more than cash x
+    The sizes are vectorbtX's own (its stop_plan, resolve_size and quantize_engine_size, at the
+    open the order fills at), so this says what the run will do: a trade worth more than cash x
     leverage is cut down (or skipped), and one below the minimum size is not placed at all.
-    `entries`: the signal-bar entry masks (long or short); each fills at the next bar's open,
-    and the largest of those trades is shown. Without them, the last bar's.
+    Every stop is read as the run reads it: points, % of the price, a trailing stop's first
+    distance, a multiple of a line or a line's level (from `compiled`, compile_signals' output;
+    computed here when not given). With risk sizing and no stop, a trade is sized from its
+    leverage, and the implied stop (1 / leverage of the price) is shown, marked as implied.
+    `entries`: the signal-bar entry masks (long or short); each fills at the next bar's open, and
+    the largest of those trades is shown. Without them, the entries in `compiled`, else the last
+    bar's.
+
+    ⚠️ A share of the balance or the equity (risk_of) is estimated from the starting cash here:
+    the real one is only known from the run, and the Risk tab says so.
 
     [{"symbol", "price", "bar", "typical_range" (the median high-to-low of the 20 bars before),
-      "stop_price", "stop_pct", "size" (as traded), "asked" (before
-      rounding to the increment), "min_size", "unit", "value", "times_cash", "leverage", "funded",
-      "fits", "below_minimum"}], or [] when nothing is sized. Sizes are in the instrument's own
-      unit: shares, lots, or a stake per point.
+      "stop_price", "stop_pct", "implied_stop", "size" (as traded), "asked" (before rounding to
+      the increment), "min_size", "unit", "value", "times_cash", "leverage", "funded", "fits",
+      "below_minimum"}], or [] when nothing is sized. Sizes are in the instrument's own unit:
+      shares, lots, or a stake per point.
     """
-    from vectorbtx.frontend.prepare import quantize_engine_size, resolve_size
+    from vectorbtx.frontend.prepare import quantize_engine_size, resolve_size, stop_plan
+    from vectorbtx.fx.convert import fx_rate_of
     from vectorbtx.modes.base import get_adapter
 
     spec = apply_params(spec)
@@ -367,35 +386,57 @@ def sizing_check(spec, data, entries=None, data_dir=None):
     sizing = {key: value for key, value in (risk.get("sizing") or {}).items() if key in SIZING_KEYS}
     if strategy_kind(spec) != "signals" or not sizing:
         return []
-    stop = risk.get("stop") or {}
-    on = stop.get("kind") in ("fixed", "trailing")
-    # A stop in points, or a fraction of the fill price (whose distance depends on the bar).
-    stop_points = stop.get("points") if on and stop.get("unit", "points") == "points" else None
-    stop_fraction = stop.get("pct") if on and stop.get("unit", "points") == "pct" else None
     init_cash = float(spec["account"]["init_cash"])
     prepared = prepare_data(spec, data, data_dir)
+    if compiled is None:
+        from .compile import compile_signals   # compile imports this module
+
+        compiled = compile_signals(spec, prepared, data_dir=data_dir)
+    # The conversion rate rides on the converted frames, so it is read before they are coerced.
+    point_fx = fx_rate_of(prepared["open"], index=pd.DataFrame(prepared["open"]).index,
+                          columns=pd.DataFrame(prepared["open"]).columns)
     fill = pd.DataFrame(prepared["open"])
     columns = list(fill.columns)
     universe = load_universe(spec, data_dir)
-    # resolve_size takes only fixed-stop points for risk sizing (validate_spec requires one).
-    wanted = resolve_size(universe, fill, columns, stop_points=stop_points if stop.get("kind") == "fixed" else None,
-                          init_cash=init_cash, **sizing)
+
+    # The stops exactly as the run passes them, and the bars entries fill on (the next open).
+    plan = call_plan(spec, data_dir)
+    stop_args = {}
+    for name in STOP_ARGS:
+        if name in plan["args"]:
+            how, value = plan["args"][name]
+            stop_args[name] = compiled[value] if how == "var" else value
+
+    def filled(mask):
+        frame = pd.DataFrame(mask).reindex(index=fill.index, columns=columns).fillna(False).astype(bool)
+        return frame.shift(1, fill_value=False)
+
+    long_open, short_open = filled(compiled["entries"]), filled(compiled["short_entries"])
+    stops = stop_plan(universe, fill, columns, point_fx=point_fx, long_open=long_open, short_open=short_open,
+                      **stop_args)
+    placed = long_open | short_open
+    if stops["rejected"] is not None:
+        placed = placed & ~stops["rejected"]
     with RUN_LOCK, warnings.catch_warnings():
-        # The sizes below the minimum are reported in the rows; vectorbtX's own warning would
-        # go to the console. (The lock: catch_warnings is process-wide, see RUN_LOCK.)
+        # Sizes below the minimum, entries with no stop distance and sizing from the leverage are
+        # reported in the rows and on the Risk tab; vectorbtX's own warnings would go to the
+        # console. (The lock: catch_warnings is process-wide, see RUN_LOCK.)
         warnings.simplefilter("ignore")
+        wanted = resolve_size(universe, fill, columns, init_cash=init_cash, stop_distance=stops["risk_distance"],
+                              stop_columns=stops["stop_columns"], order_bars=placed, **sizing)
         traded = quantize_engine_size(universe, wanted, columns)
+    risk_sized = any(key in sizing for key in ("risk_pct", "risk_amount"))
+    if entries is not None:
+        chosen = filled(entries)
+    else:
+        chosen = placed
     rows = []
     for column in columns:
         instrument = universe[column].filled()
         adapter = get_adapter(instrument.mode)
-        # The bar the trade fills on: the next open after an entry signal.
-        if entries is not None and column in entries:
-            fills = pd.Series(entries[column].to_numpy(dtype=bool), index=entries.index).shift(1, fill_value=False)
-            fills = fills.reindex(fill.index, fill_value=False).to_numpy()
-        else:
-            fills = np.zeros(len(fill), dtype=bool)
+        fills = chosen[column].to_numpy() if column in chosen else np.zeros(len(fill), dtype=bool)
         if not fills.any():
+            fills = np.zeros(len(fill), dtype=bool)
             fills[-1] = True
         values = (traded[column].abs() * fill[column]).to_numpy()
         candidates = np.where(fills & np.isfinite(wanted[column].to_numpy()))[0]
@@ -411,18 +452,22 @@ def sizing_check(spec, data, entries=None, data_dir=None):
         asked = float(adapter.from_engine_units(np.asarray([wanted[column].iloc[bar]], dtype=float), instrument)[0])
         value = abs(float(traded[column].iloc[bar])) * price
         leverage = float(instrument.leverage or 1.0)
-        if stop_points:
-            distance = float(stop_points) * float(instrument.point_size)
-        elif stop_fraction:
-            distance = float(stop_fraction) * price
-        else:
-            distance = None
+        implied = False
+        distance = None
+        if column in stops["stop_columns"] and stops["risk_distance"] is not None:
+            found = float(pd.DataFrame(stops["risk_distance"])[column].iloc[bar])
+            distance = found if np.isfinite(found) and found > 0 else None
+        elif risk_sized:
+            # No stop: the trade is sized as if its margin were the risk, which a move of
+            # 1 / leverage of the price takes (vectorbtX 1de5744, docs/UPSTREAM.md issue 28).
+            distance, implied = price / leverage, True
         # How far price usually travels in one bar here: the median high-to-low range of the 20
         # bars before the fill. A stop inside it is likely hit within a bar or two of the entry.
         ranges = (pd.DataFrame(prepared["high"])[column] - pd.DataFrame(prepared["low"])[column]).iloc[max(0, bar - 20):bar]
         typical_range = float(ranges.median()) if len(ranges.dropna()) else None
         rows.append({"symbol": column, "price": price, "bar": fill.index[bar], "typical_range": typical_range,
                      "stop_price": distance, "stop_pct": distance / price if distance else None,
+                     "implied_stop": implied,
                      "size": size, "asked": asked, "min_size": float(instrument.min_size or 0.0),
                      "unit": adapter.unit_name(instrument), "value": value,
                      "times_cash": value / init_cash, "leverage": leverage, "funded": init_cash * leverage,
@@ -496,7 +541,9 @@ def prepare_data(spec, data, data_dir=None):
     account = spec.get("account") or {}
     if not (account.get("fx") and account.get("base_currency")):
         return data
-    universe = load_universe(spec, data_dir)
+    quotes = conversion_quotes(spec, data_dir)
+    if quotes is None:
+        return data
     out = dict(data)
     for field in ("open", "high", "low", "close"):
         # Signature (vectorbtX 16293a2): to_base_currency(data, base, fx_table=None,
@@ -507,9 +554,33 @@ def prepare_data(spec, data, data_dir=None):
         # slippage on every fill of a converted column (docs/UPSTREAM.md issue 9, fixed).
         # ⚠️ So these frames must reach the front door as ConvertedFrames: slicing them
         # with .loc keeps the attribute (tests/test_engine.py checks the fill price).
+        # ⚠️ Points on a converted price are priced at point_size x the conversion rate, which
+        # vectorbtX reads off these ConvertedFrames (docs/UPSTREAM.md issue 29, fixed in 1de5744).
         out[field] = vectorbtx().x.to_base_currency(data[field], base=account["base_currency"],
-                                                    fx=data["fx"], instruments=universe)
+                                                    fx=data["fx"], quote_currency=quotes)
     return out
+
+
+def conversion_quotes(spec, data_dir=None):
+    """{symbol: the currency its price is converted from}, or None when nothing is converted.
+
+    ⚠️ A spread bet keeps its own price. Its stake is money per point in the account's
+    currency, so its profit is stake x points whatever currency the market is quoted in;
+    converting the price would multiply that profit by the exchange rate. vectorbtX's own
+    design converts bought-outright and FX spot prices only (its docs/dev/PLAN.md, D4); a CFD
+    quoted in a foreign currency is converted too, one quoted in the account's is not. A
+    spread bet is given the account currency here, so its rate is 1. A universe file may
+    mix ways of trading, so this goes by each instrument's own mode.
+    """
+    base = (spec.get("account") or {})["base_currency"]
+    universe = load_universe(spec, data_dir)
+    quotes = {}
+    for symbol in spec["data"]["symbols"]:
+        instrument = universe[symbol]
+        quotes[symbol] = base if instrument.mode == "spreadbet" else instrument.quote_currency
+    if all(quote == base for quote in quotes.values()):
+        return None
+    return quotes
 
 
 # ---------------------------------------------------------------------------
@@ -578,41 +649,54 @@ def call_plan(spec, data_dir=None):
         # strategy never passes it, and validate_spec rejects one.
         args["leverage_budget"] = ("lit", bool(risk.get("leverage_budget")))
 
-    # Sizing: exactly one of risk_pct, risk_amount, stake, notional, size.
-    # ⚠️ risk_pct sizes off init_cash, not compounding equity.
+    # Sizing: exactly one of risk_pct, risk_amount, stake, notional, size, notional_pct. A share
+    # of the account (risk_pct, notional_pct) is of the starting cash unless risk_of says the
+    # balance or the equity at the signal bar (vectorbtX 1de5744 and 2b2d090, docs/UPSTREAM.md
+    # issues 23 and 30). With no stop, a risk is sized from the leverage (issue 28).
     sizing = risk.get("sizing") or {}
     for key in SIZING_KEYS:
         if key in sizing:
             args[key] = ("lit", sizing[key])
+    if sizing.get("risk_of") and any(key in sizing for key in FRACTION_KEYS):
+        args["risk_of"] = ("lit", sizing["risk_of"])
     # Stops: fixed or trailing, never both (trail_points overwrites stop_points). A stop or target
     # that is off, or measured the other way, keeps its other distance in the spec (the optimiser
     # can switch it): only its kind and unit say what is sent.
-    # In points: vectorbtX's own keywords, converted to fractions of the fill price.
-    # ⚠️ trail_points is converted once, against the fill price, and vectorbt then applies that
-    # fraction to the best price, so a trail in points widens as the price rises from the entry
-    # (docs/UPSTREAM.md issue 27).
+    # In points: vectorbtX's own keywords, converted to fractions of the fill price. A trailing
+    # stop in points stays that many points behind the best price (vectorbtX 1de5744 keeps the
+    # distance in price; docs/UPSTREAM.md issue 27, fixed).
     # In % of the price: vectorbt's own sl_stop / tp_stop (0.02 = 2%), with sl_trail for a
     # trailing stop. The front door anchors them at the fill (stop_entry_price="price"), pays the
     # spread on the exit and checks them on the entry bar, exactly as it does point stops.
+    # From a line (a feature or a price, read on the signal bar): a multiple of it is a per-bar
+    # distance in points, and its level is where the stop sits (vectorbtX's stop_price, and
+    # trailing, trail_price, which moves to each completed bar's level and never loosens). Both
+    # are frames from compile_signals on the signal bar, which the front door shifts with the
+    # signals (docs/UPSTREAM.md issues 26 and 31). A level on the wrong side of the fill (a long's
+    # stop at or above it) is an order a broker rejects: vectorbtX does not place that entry.
     stop = risk.get("stop") or {}
     stop_unit = stop.get("unit", "points")
-    if stop.get("kind") == "fixed":
+    if stop.get("kind") in ("fixed", "trailing"):
+        trailing = stop["kind"] == "trailing"
         if stop_unit == "pct":
             args["sl_stop"] = ("lit", stop["pct"])
+            if trailing:
+                args["sl_trail"] = ("lit", True)
+        elif stop_unit == "points":
+            args["trail_points" if trailing else "stop_points"] = ("lit", stop["points"])
         else:
-            args["stop_points"] = ("lit", stop["points"])
-    elif stop.get("kind") == "trailing":
-        if stop_unit == "pct":
-            args["sl_stop"] = ("lit", stop["pct"])
-            args["sl_trail"] = ("lit", True)
-        else:
-            args["trail_points"] = ("lit", stop["points"])
+            name = STOP_LINE_ARGS[stop_unit]["trailing" if trailing else "fixed"]
+            args[name] = ("var", name)
     target = risk.get("target") or {}
     if target.get("kind") == "fixed":
-        if target.get("unit", "points") == "pct":
+        target_unit = target.get("unit", "points")
+        if target_unit == "pct":
             args["tp_stop"] = ("lit", target["pct"])
-        else:
+        elif target_unit == "points":
             args["target_points"] = ("lit", target["points"])
+        else:
+            name = STOP_LINE_ARGS[target_unit]["target"]
+            args[name] = ("var", name)
     # Extra exits: fixed numba templates that adjust the stop (and, for a time
     # stop, the target) on every bar. See exit_rules.py.
     from .exit_rules import FAR_TARGET_POINTS, exit_settings
@@ -623,7 +707,7 @@ def call_plan(spec, data_dir=None):
         if extra_exits["time_bars"] == extra_exits["time_bars"]:
             args["adjust_tp_func_nb"] = ("var", "adjust_tp_func_nb")
             args["adjust_tp_args"] = ("var", "adjust_tp_args")
-            if "target_points" not in args and "tp_stop" not in args:
+            if not any(name in args for name in ("target_points", "tp_stop", "target_price")):
                 # A far target is accepted, so adjust_tp_nb is called on every bar
                 # (verified by the phase 3 gate in tests/test_exit_rules.py).
                 args["target_points"] = ("lit", FAR_TARGET_POINTS)
@@ -710,7 +794,7 @@ def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=Fa
     prepared = prepare_data(spec, data, data_dir)
     plan = call_plan(spec, data_dir)
     if plan["kind"] == "signals":
-        compiled = compile_signals(spec, prepared)
+        compiled = compile_signals(spec, prepared, data_dir=data_dir)
     elif plan["kind"] == "portfolio":
         compiled = compile_weights(spec, prepared)
     else:
@@ -814,9 +898,11 @@ def run_vectorised(spec, data, params_list, window=None, data_dir=None, offline=
     columns = [f"trial_{number}" for number in range(len(params_list))]
     signals = {key: {} for key in ("entries", "exits", "short_entries", "short_exits")}
     for column, params in zip(columns, params_list):
-        compiled = compile_signals(apply_params(spec, params), prepared)
-        for key in signals:
-            signals[key][column] = compiled[key][symbol]
+        compiled = compile_signals(apply_params(spec, params), prepared, data_dir=data_dir)
+        for key, frame in compiled.items():
+            # The signals, and a stop or target from a line, which a trial's features change too.
+            if key in signals or key in STOP_ARGS:
+                signals.setdefault(key, {})[column] = frame[symbol]
     runtime = {key: pd.DataFrame(values) for key, values in signals.items()}
     for field, name in (("open", "open_"), ("high", "high"), ("low", "low"), ("close", "close"), ("volume", "volume")):
         runtime[name] = pd.DataFrame({column: prepared[field][symbol] for column in columns})
