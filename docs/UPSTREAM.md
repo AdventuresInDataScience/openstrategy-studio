@@ -480,7 +480,9 @@ Found with 32, on the same run.
 
 Found by the lookahead audit in `tests/test_indicators.py::test_no_entry_looks_ahead`, which computes every catalogue entry on full data and on truncated copies and requires the shared bars to agree. ta_patterns 1.2.1; the local checkout (`../ta_patterns`, `ce791c6`) is identical.
 
-### P1. The flag and pennant detectors read the last close on their first bar
+### P1. The flag and pennant detectors read the last close on their first bar (fixed in 1.2.2)
+
+* **What was done** (ta_patterns 1.2.2, which `uv.lock` pins since `3ca7651`). The suggested guard, `if i <= pole_bars: return -1, 0`. The Studio side was done on 20 November 2026: the four lines left `indicators.EXCLUDED`, the catalogue was regenerated (556 entries, with 1.2.2's new `double_bottom_ugly`), and `test_no_entry_looks_ahead` passes with all four in the menu.
 
 * **Where.** `chart_patterns/classic.py:872`, `_flagpole(c, i, min_move, pole_bars)`, called with `i - window` by `flag_bull` (909), `flag_bear` (952), `pennant_bull` (1030) and `pennant_bear` (1066).
 * **What happens.** The guard is `if i < pole_bars: return -1, 0`, then `pole_end = i - 1` and `pole_start = pole_end - pole_bars`. When `i == pole_bars` (the first bar each detector evaluates, `pole_bars + window`), `pole_start` is `-1`, and `c[-1]` is **the last close in the whole array**. So that bar's signal depends on the final bar of the history: lookahead. Evidence: `flag_bear` on a 400-bar random walk gives a different signal at bar 40 when computed on the first 150 bars than on all 400.

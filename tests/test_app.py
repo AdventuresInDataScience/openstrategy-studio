@@ -205,9 +205,31 @@ def open_cards(app, *paths):
 
 
 def card_titles(app):
-    """The text of every card's title row (ui.card_header), tags removed."""
+    """The text of every card's title row (ui.card_header), tags removed: a folding card's title is
+    its fold button's label, followed by the details beside it."""
     import re
-    return [re.sub(r"<[^>]+>", " ", item.value) for item in app.markdown if "os-title" in item.value]
+    titles = []
+
+    def walk(node):
+        children = getattr(node, "children", None)
+        if not isinstance(children, dict):
+            return
+        parts, is_title_row = [], False
+        for child in children.values():
+            if child.type == "button" and str(child.key or "").endswith(":open"):
+                parts.append(child.label)
+                is_title_row = True
+            elif child.type == "markdown" and ("os-title" in child.value or "os-code" in child.value
+                                               or "os-meta" in child.value or "os-off" in child.value):
+                parts.append(re.sub(r"<[^>]+>", " ", child.value))
+                is_title_row = True
+        if is_title_row:
+            titles.append(" " + " ".join(parts) + " ")
+        for child in children.values():
+            walk(child)
+
+    walk(app.main)
+    return titles
 
 
 def test_build_steps_edit_the_spec(tmp_path, monkeypatch):
@@ -855,3 +877,29 @@ def test_a_new_symbol_starts_with_every_value_filled_in(tmp_path, monkeypatch):
     assert fields["spread_points"] == 0.6 and fields["contract_size"] == 100000.0 and fields["leverage"] == 30.0
     assert not app.exception, [item.value for item in app.exception]
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_every_card_folds_by_its_title(tmp_path, monkeypatch):
+    """A rule card folds and opens by its name, like an expander (the owner's call, 20 November 2026: a
+    small icon at the right was not found); folded, its title still shows its logic line."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    spec = copy.deepcopy(app.session_state["spec"])
+    logic = lambda: [box for box in app.text_input if box.key == current_key(app, "rules.long_entry:logic")]
+    title = app.button(key=current_key(app, "rules.long_entry:open"))
+    assert title.label == "Long entry" and logic()                     # rules start open
+    title.click().run()
+    assert not logic() and any("Long entry" in text and " A " in text for text in card_titles(app))
+    app.button(key=current_key(app, "rules.long_entry:open")).click().run()
+    assert logic()
+    # A feature's card the same way, closed to start with.
+    assert not [box for box in app.number_input if box.key == current_key(app, "features.fast.params.timeperiod")]
+    app.button(key=current_key(app, "features.fast:open")).click().run()
+    assert app.number_input(key=current_key(app, "features.fast.params.timeperiod")).value == 50
+    assert app.session_state["spec"] == spec                            # folding changes nothing in the strategy
+    assert not app.exception, [item.value for item in app.exception]

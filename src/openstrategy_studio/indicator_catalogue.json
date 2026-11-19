@@ -6903,6 +6903,57 @@
   "description": "BULLISH (+1 / 0). Double bottom where both troughs are rounded Eve formations."
  },
  {
+  "id": "pattern:chart:double_bottom_ugly",
+  "source": "pattern",
+  "function": "chart:double_bottom_ugly",
+  "label": "Double bottom ugly",
+  "menu": [
+   "Chart pattern",
+   "Double and multiple tops and bottoms"
+  ],
+  "inputs": [],
+  "defaults": {},
+  "params": {
+   "mode": {
+    "type": "choice",
+    "default": "confirmed",
+    "options": [
+     "confirmed",
+     "forming"
+    ]
+   },
+   "window": {
+    "type": "int",
+    "default": 60
+   },
+   "pivot_n": {
+    "type": "int",
+    "default": 5
+   },
+   "pivot_pct": {
+    "type": "float",
+    "default": null
+   },
+   "tol": {
+    "type": "float",
+    "default": 0.06
+   },
+   "asymmetry": {
+    "type": "float",
+    "default": 0.03
+   },
+   "min_separation": {
+    "type": "int",
+    "default": 5
+   }
+  },
+  "outputs": [
+   "signal"
+  ],
+  "direction": "bullish",
+  "description": "BULLISH (+1 / 0). 'Ugly' double bottom: the two troughs are NOT at the same level — the second trough is slightly lower or higher than the first (within *asymmetry* of each other but clearly not equal). Still bullish if price subsequently confirms above the neckline."
+ },
+ {
   "id": "pattern:chart:double_key_reversal",
   "source": "pattern",
   "function": "chart:double_key_reversal",
@@ -7363,6 +7414,108 @@
   ],
   "direction": "bullish",
   "description": "BULLISH (+1 / 0). Both trendlines falling but converging (upper falls faster)."
+ },
+ {
+  "id": "pattern:chart:flag_bear",
+  "source": "pattern",
+  "function": "chart:flag_bear",
+  "label": "Flag bear",
+  "menu": [
+   "Chart pattern",
+   "Classic"
+  ],
+  "inputs": [],
+  "defaults": {},
+  "params": {
+   "mode": {
+    "type": "choice",
+    "default": "confirmed",
+    "options": [
+     "confirmed",
+     "forming"
+    ]
+   },
+   "window": {
+    "type": "int",
+    "default": 30
+   },
+   "pole_bars": {
+    "type": "int",
+    "default": 10
+   },
+   "min_pole": {
+    "type": "float",
+    "default": 0.05
+   },
+   "pivot_n": {
+    "type": "int",
+    "default": 3
+   },
+   "pivot_pct": {
+    "type": "float",
+    "default": null
+   },
+   "max_retrace": {
+    "type": "float",
+    "default": 0.5
+   }
+  },
+  "outputs": [
+   "signal"
+  ],
+  "direction": "bearish",
+  "description": "BEARISH (-1 / 0). Sharp downward move followed by a shallow upward channel."
+ },
+ {
+  "id": "pattern:chart:flag_bull",
+  "source": "pattern",
+  "function": "chart:flag_bull",
+  "label": "Flag bull",
+  "menu": [
+   "Chart pattern",
+   "Classic"
+  ],
+  "inputs": [],
+  "defaults": {},
+  "params": {
+   "mode": {
+    "type": "choice",
+    "default": "confirmed",
+    "options": [
+     "confirmed",
+     "forming"
+    ]
+   },
+   "window": {
+    "type": "int",
+    "default": 30
+   },
+   "pole_bars": {
+    "type": "int",
+    "default": 10
+   },
+   "min_pole": {
+    "type": "float",
+    "default": 0.05
+   },
+   "pivot_n": {
+    "type": "int",
+    "default": 3
+   },
+   "pivot_pct": {
+    "type": "float",
+    "default": null
+   },
+   "max_retrace": {
+    "type": "float",
+    "default": 0.5
+   }
+  },
+  "outputs": [
+   "signal"
+  ],
+  "direction": "bullish",
+  "description": "BULLISH (+1 / 0). Sharp upward move (flagpole) followed by a shallow downward parallel channel (flag). Confirmed on breakout above the flag's upper trendline."
  },
  {
   "id": "pattern:chart:flag_high_tight",
@@ -8602,6 +8755,100 @@
   ],
   "direction": "bearish",
   "description": "BEARISH (-1 / 0). Within a consolidation pattern (triangle/rectangle), price makes a partial rise toward resistance but fails to reach it — often precedes a downside breakout."
+ },
+ {
+  "id": "pattern:chart:pennant_bear",
+  "source": "pattern",
+  "function": "chart:pennant_bear",
+  "label": "Pennant bear",
+  "menu": [
+   "Chart pattern",
+   "Classic"
+  ],
+  "inputs": [],
+  "defaults": {},
+  "params": {
+   "mode": {
+    "type": "choice",
+    "default": "confirmed",
+    "options": [
+     "confirmed",
+     "forming"
+    ]
+   },
+   "pole_bars": {
+    "type": "int",
+    "default": 10
+   },
+   "min_pole": {
+    "type": "float",
+    "default": 0.05
+   },
+   "window": {
+    "type": "int",
+    "default": 15
+   },
+   "pivot_n": {
+    "type": "int",
+    "default": 3
+   },
+   "pivot_pct": {
+    "type": "float",
+    "default": null
+   }
+  },
+  "outputs": [
+   "signal"
+  ],
+  "direction": "bearish",
+  "description": "BEARISH (-1 / 0). Bear pennant: sharp drop then converging triangle."
+ },
+ {
+  "id": "pattern:chart:pennant_bull",
+  "source": "pattern",
+  "function": "chart:pennant_bull",
+  "label": "Pennant bull",
+  "menu": [
+   "Chart pattern",
+   "Classic"
+  ],
+  "inputs": [],
+  "defaults": {},
+  "params": {
+   "mode": {
+    "type": "choice",
+    "default": "confirmed",
+    "options": [
+     "confirmed",
+     "forming"
+    ]
+   },
+   "pole_bars": {
+    "type": "int",
+    "default": 10
+   },
+   "min_pole": {
+    "type": "float",
+    "default": 0.05
+   },
+   "window": {
+    "type": "int",
+    "default": 15
+   },
+   "pivot_n": {
+    "type": "int",
+    "default": 3
+   },
+   "pivot_pct": {
+    "type": "float",
+    "default": null
+   }
+  },
+  "outputs": [
+   "signal"
+  ],
+  "direction": "bullish",
+  "description": "BULLISH (+1 / 0). Like a bull flag but the consolidation forms a symmetrical triangle (converging trendlines rather than parallel)."
  },
  {
   "id": "pattern:chart:pipe_bottom",

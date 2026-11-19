@@ -45,10 +45,11 @@ def test_every_pattern_is_offered_once():
     patterns = [item for item in catalogue().values() if item["source"] == "pattern"]
     candles = {item["function"].split(":")[1] for item in patterns if item["menu"][0] == "Candlestick"}
     charts = {item["function"].split(":")[1] for item in patterns if item["menu"][0] == "Chart pattern"}
-    # phase 0: 106 candlesticks and 193 chart patterns have functions in ta_patterns 1.2.1;
-    # the four flag and pennant detectors are left out for looking ahead (docs/UPSTREAM.md P1).
+    # 106 candlesticks and 194 chart patterns have functions in ta_patterns 1.2.2 (1.2.1 had 193;
+    # 1.2.2 added double_bottom_ugly). Any detector EXCLUDED for looking ahead is left out: none since
+    # 1.2.2 fixed the flag and pennant detectors (docs/UPSTREAM.md P1).
     left_out = {key.split(":")[2] for key in I.EXCLUDED if key.startswith("pattern:chart:")}
-    assert len(candles) == 106 and len(charts) == 193 - len(left_out) and not charts & left_out
+    assert len(candles) == 106 and len(charts) == 194 - len(left_out) and not charts & left_out
     assert not any(item["source"] in ("talib", "pandas_ta") and item["function"].upper().startswith("CDL")
                    and item["function"] != "CDL_Z" for item in catalogue().values())
 

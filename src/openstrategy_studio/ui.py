@@ -293,23 +293,38 @@ def section(title, tone, name, expanded=True, icon=None):
     return st.expander(title, expanded=expanded, key=f"os-exp-{tone}-{_css_name(name)}", icon=icon)
 
 
-def card_header(name, title, meta="", code="", off="", help=None):
+def card_header(name, title, meta="", code="", off="", help=None, fold=None):
     """A card's title row: the title in the card's tone, then details, and room for buttons.
 
     Returns the row (a horizontal container), so the caller adds its icon buttons to it,
     on the same line as the title (the owner's call: a delete is a bin on the title, not a
     button in the box). `meta` is muted text, `code` a formula in a chip, `off` an italic
     note such as "not used".
+
+    `fold=(path, default, key, what)` makes the card fold like an expander: the title itself
+    is the button, with a chevron before it (the owner's call, 20 November 2026: a small icon
+    among the buttons on the right was not found). Read whether it is open with
+    is_open(path, default) after this call.
     """
     row = st.container(horizontal=True, vertical_alignment="center", gap="small", key=f"os-head-{_css_name(name)}")
-    text = f'<span class="os-title">{html.escape(title)}</span>'
+    text = ""
+    if fold is None:
+        text = f'<span class="os-title">{html.escape(title)}</span>'
+    else:
+        path, default, key_, what = fold
+        opened = is_open(path, default)
+        # A callback, so the chevron and the body agree on the run the click starts.
+        row.button(title, key=key_, type="tertiary", icon=":material/expand_more:" if opened else
+                   ":material/chevron_right:", help=f"Fold away {what}" if opened else f"Show {what}",
+                   on_click=open_panel, args=(path, not opened))
     if meta:
         text += f'<span class="os-meta">{html.escape(meta)}</span>'
     if code:
         text += f'<span class="os-code">{html.escape(code)}</span>'
     if off:
         text += f'<span class="os-off">{html.escape(off)}</span>'
-    row.markdown(text, unsafe_allow_html=True, help=help, width="stretch")
+    # Stretched, so the buttons the caller adds sit at the right whatever the title's length.
+    row.markdown(text or "&nbsp;", unsafe_allow_html=True, help=help, width="stretch")
     return row
 
 
@@ -321,16 +336,6 @@ def is_open(path, default=False):
 def open_panel(path, opened=True):
     """Have a card open (or closed) the next time it is drawn: a new or renamed feature or condition."""
     st.session_state.setdefault("panels", {})[path] = opened
-
-
-def open_button(row, path, default, key_, what):
-    """The edit / close button on a card's title row. A callback, so the icon and the body
-    agree on the run the click starts."""
-    opened = is_open(path, default)
-    row.button("", key=key_, type="tertiary", icon=":material/expand_less:" if opened else ":material/edit:",
-               help=f"Hide {what}" if opened else f"Show and edit {what}",
-               on_click=open_panel, args=(path, not opened))
-    return opened
 
 
 def chart_theme_options():
@@ -584,8 +589,8 @@ def feature_card(name, feature, features):
     path = f"features.{name}"
     with card(f"feature-{name}", "feature"):
         row = card_header(f"feature-{name}", name, meta=item["label"] if item else str(feature.get("indicator")),
-                          code=described)
-        opened = open_button(row, path, False, key(path, ":open"), "its settings")
+                          code=described, fold=(path, False, key(path, ":open"), "its settings"))
+        opened = is_open(path, False)
         row.button("", key=key(path, ":delete"), type="tertiary", icon=":material/delete:",
                    help=f"Delete {name}. Rules and features that read it will say so until they are changed.",
                    on_click=_delete_feature, args=(features, name))
@@ -873,8 +878,9 @@ def condition_editor(path, name, node, features, timeframe, on_remove, on_rename
     """
     kind = condition_kind(node)
     with sub_card(f"condition-{path}"):
-        row = card_header(f"condition-{path}", name, code=condition_text(node))
-        opened = open_button(row, path, False, key(path, ":open"), "its settings")
+        row = card_header(f"condition-{path}", name, code=condition_text(node),
+                          fold=(path, False, key(path, ":open"), "its settings"))
+        opened = is_open(path, False)
         row.button("", key=key(path, ":remove"), type="tertiary", icon=":material/delete:", on_click=on_remove,
                    help="Delete this condition: its name leaves the logic line, and its values leave the Optimise "
                         "page.")
@@ -1071,8 +1077,9 @@ def rule_card(slot, label, features, timeframe, help_text):
                             "and join them in its logic line.")
             return ""
         title = rule_title(node)
-        row = card_header(f"rule-{slot}", label, code=title, help=help_text)
-        opened = open_button(row, path, True, key(path, ":open"), "its conditions")
+        row = card_header(f"rule-{slot}", label, code=title, help=help_text,
+                          fold=(path, True, key(path, ":open"), "its conditions"))
+        opened = is_open(path, True)
         if not is_choice(node):
             def versions():
                 set_path(current(), path, {"choose": "a", "options": {"a": copy.deepcopy(node)}})

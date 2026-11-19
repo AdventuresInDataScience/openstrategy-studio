@@ -773,8 +773,8 @@ with form:
         # at once, just above the add card, with every setting showing.
         ui.heading(f"Your features ({len(features)})" if features else "Your features", "feature",
                    help="The lines and signals the rules compare: indicators, patterns, levels and transforms, "
-                        "computed on every bar. Each output is a line a rule can use, such as bb.upperband. Press "
-                        "the pencil on a card to change its settings.")
+                        "computed on every bar. Each output is a line a rule can use, such as bb.upperband. Click "
+                        "a card's name to show or fold away its settings.")
         if not features:
             st.caption("None yet. Add one below: an indicator such as a moving average or the RSI, a candlestick "
                        "pattern, or a price level.")
@@ -829,8 +829,8 @@ with form:
                 if ui.rule_title(rules.get(slot)) != title:
                     st.rerun()
             st.caption("Every signal fills at the next bar's open. Each rule takes every kind of condition: a "
-                       "weekday or higher-timeframe condition in an exit rule is a time exit (A or Friday) or narrows "
-                       "the exit (A and the week is down). A stop, a target and the extra exits close a position "
+                       "weekday or higher-timeframe condition in an exit rule is a time exit (condition1 or Friday) or "
+                       "narrows the exit (condition1 and the week is down). A stop, a target and the extra exits close a position "
                        "whatever the exit rule says.")
     else:
         with tabs["Portfolio"]:

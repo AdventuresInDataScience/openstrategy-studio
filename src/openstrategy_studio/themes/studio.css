@@ -248,8 +248,29 @@
 
 /* A card's header row (ui.card_header): the title in the tone, its details muted beside it,
    and its buttons at the right. */
+/* The details beside a title sit on the title's centre line. Streamlit gives a markdown block a
+   negative bottom margin (to cancel a paragraph's spacing), which pushed the details about 10px
+   below a folding title's label once centred beside the tooltip (measured in Edge, 1.67). */
+[class*="st-key-os-head-"] [data-testid="stMarkdownContainer"] {
+  display: flex;
+  align-items: center;
+  margin-bottom: 0;
+}
+
 [class*="st-key-os-head-"] [data-testid="stMarkdownContainer"] p {
   margin: 0;
+  line-height: 1.5;
+}
+
+[class*="st-key-os-head-"] .os-meta,
+[class*="st-key-os-head-"] .os-code,
+[class*="st-key-os-head-"] .os-off {
+  vertical-align: middle;
+}
+
+/* Beside a folding title (a button, not a span) the first detail needs no gap of its own. */
+[class*="st-key-os-head-"] p > span:first-child:not(.os-title) {
+  margin-left: 0;
 }
 
 .os-title {
@@ -297,6 +318,31 @@
 
 [class*="st-key-os-head-"] [class*="-delete"] [data-testid="stBaseButton-tertiary"]:hover {
   color: var(--os-negative);
+}
+
+/* A card that folds (ui.card_header's fold=): its title is the first thing on the row and is
+   itself the button, a chevron before it, so it reads and works like an expander's title.
+   Matched by position, not by key, so a feature named "open..." is never styled as a title. */
+[class*="st-key-os-head-"] > :first-child [data-testid="stBaseButton-tertiary"],
+[class*="st-key-os-head-"] > :first-child [data-testid="stBaseButton-tertiary"]:hover {
+  color: var(--os-tone, var(--os-text));
+  padding-left: 0;
+}
+
+[class*="st-key-os-head-"] > :first-child [data-testid="stBaseButton-tertiary"] p {
+  font-family: var(--os-heading-font);
+  font-weight: 650;
+  font-size: 1.05rem;
+  color: var(--os-tone, var(--os-text));
+}
+
+[class*="st-key-os-sub-"] [class*="st-key-os-head-"] > :first-child [data-testid="stBaseButton-tertiary"] p {
+  font-size: 0.95rem;
+}
+
+[class*="st-key-os-head-"] > :first-child [data-testid="stBaseButton-tertiary"]:hover p {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
 }
 
 /* A heading inside a tab (ui.heading): a word in the section's tone with a rule under it. */

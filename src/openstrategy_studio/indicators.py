@@ -155,12 +155,9 @@ EXCLUDED = {
     "pandas_ta:UO": "the same as TA-Lib's ULTOSC",
     "pandas_ta:PSAR": "the same as TA-Lib's SAR",
     "pandas_ta:ZLMA": "the same as TA-Lib's ZLEMA",
-    # ⚠️ ta_patterns 1.2.1: _flagpole reads c[-1], the last close, on each detector's first
-    # bar (docs/UPSTREAM.md, P1). Restore them when ta_patterns is fixed.
-    "pattern:chart:flag_bull": "⚠️ looks ahead on its first bar (ta_patterns _flagpole; docs/UPSTREAM.md P1)",
-    "pattern:chart:flag_bear": "⚠️ looks ahead on its first bar (ta_patterns _flagpole; docs/UPSTREAM.md P1)",
-    "pattern:chart:pennant_bull": "⚠️ looks ahead on its first bar (ta_patterns _flagpole; docs/UPSTREAM.md P1)",
-    "pattern:chart:pennant_bear": "⚠️ looks ahead on its first bar (ta_patterns _flagpole; docs/UPSTREAM.md P1)",
+    # The flag and pennant detectors were left out while ta_patterns 1.2.1's _flagpole read c[-1],
+    # the last close, on each detector's first bar (docs/UPSTREAM.md, P1). Fixed in 1.2.2, which
+    # uv.lock pins, so they are back; test_no_entry_looks_ahead checks them with the rest.
 }
 
 # Parameters never shown, so never set. ⚠️ pandas-ta's `offset` shifts the output by
