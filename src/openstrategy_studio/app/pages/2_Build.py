@@ -13,10 +13,10 @@ import streamlit as st
 
 from openstrategy_studio import analysis, engine, indicators, store, style, ui
 from openstrategy_studio.compile import compile_features, compile_signals, compile_weights, export_script
-from openstrategy_studio.spec import (CALENDAR_FREQS, FREQ, SELECTION_MODES, SIZING_KEYS, TIMEFRAMES, TRADING,
-                                      WEIGHT_SCHEMES, apply_params, is_choice, is_intraday, list_templates,
-                                      load_template, spec_hash, strategy_kind, trading_mode, tunable_inputs,
-                                      validate_spec, when_cash_short)
+from openstrategy_studio.spec import (CALENDAR_FREQS, DISTANCE_DEFAULTS, FREQ, SELECTION_MODES, SIZING_KEYS, STOP_UNITS,
+                                      TIMEFRAMES, TRADING, WEIGHT_SCHEMES, apply_params, blank_spec, is_choice,
+                                      is_intraday, list_templates, load_template, spec_hash, strategy_kind,
+                                      trading_mode, validate_spec, when_cash_short)
 
 settings, data_dir = ui.boot("Build")
 ui.page_help("build")
@@ -205,7 +205,42 @@ def points_in_price(points):
     sizes = ui.run_guarded("Reading the point sizes", lambda: engine.point_sizes(spec, symbols, data_dir)) or []
     parts = [f"on {symbol}, {points:g} points is a price move of {points * size:.6g}: a point is "
              f"{meaning.get(symbol, size)}" for symbol, size in zip(symbols, sizes)]
-    return "; ".join(parts) + "."
+    return "; ".join(parts) + "." if parts else "Pick a symbol on the Setup tab to see it in price."
+
+
+def distance_inputs(part, help_points, help_pct, trailing=False):
+    """On the Risk tab: how the stop or the target (`part`) is measured, and its distance.
+
+    In points, or as a fraction of the price. Both distances stay in the spec whichever is in
+    use, so the optimiser can switch the unit (risk.<part>.unit); only the one in use is shown.
+    """
+    node = spec["risk"][part]
+    unit = node.get("unit", "points")
+    units = list(STOP_UNITS)
+    chosen = st.radio("Measured", units, index=units.index(unit) if unit in units else 0,
+                      format_func={"points": "In points", "pct": "In % of the price"}.get, horizontal=True,
+                      key=ui.key(f"risk.{part}", ":unit"),
+                      help="In points (a fixed price distance: cents on a share, pips on FX), or in % of the price "
+                           "the trade fills at. How it is measured can be searched on the Optimise page too.")
+    if chosen != unit:
+        def switch_unit():
+            node["unit"] = chosen
+            node.setdefault(chosen, DISTANCE_DEFAULTS[part][chosen])
+            ui.prune_variables()
+        ui.rerun_after(switch_unit)
+    if chosen == "points":
+        value = ui.param_input(f"risk.{part}.points", {"type": "float", "default": DISTANCE_DEFAULTS[part]["points"]},
+                               label="Distance (points)", help=help_points)
+        if isinstance(value, (int, float)):
+            st.caption(points_in_price(value))
+    else:
+        value = ui.param_input(f"risk.{part}.pct", {"type": "float", "default": DISTANCE_DEFAULTS[part]["pct"]},
+                               label="Distance (a fraction of the price: 0.02 = 2%)", help=help_pct)
+        if isinstance(value, (int, float)):
+            # 0.02 is 2%, not 0.02%: the same reading as the risk box above.
+            st.caption(f"{value:g} is {value:.2%} of " + ("the best price since the entry (at first, the fill "
+                                                          "price): the stop trails that far behind it."
+                                                          if trailing else "the price the trade fills at."))
 
 
 def leverage_summary():
@@ -222,6 +257,9 @@ def leverage_summary():
         return
     st.caption("Set for each instrument in the leverage column of the instrument grid (Setup tab), since one book "
                "can mix limits. Picking how you trade or an asset class fills in the usual one.")
+    if not symbols:
+        st.caption("Pick a symbol on the Setup tab to see its leverage.")
+        return
     used = ui.run_guarded("Reading the leverage", lambda: engine.default_leverage(spec)) or {}
     cash = float((spec.get("account") or {}).get("init_cash") or 0.0)
     rows = []
@@ -300,24 +338,18 @@ def trade_size_check():
                        "size: widen the stop, or check the instrument's point_size (Setup tab).")
 
 
-def prune_variables():
-    """Drop optimise variables whose value the strategy no longer has (after a switch that removes it)."""
-    known = {row["path"] for row in tunable_inputs(spec)}
-    found = (spec.get("optimise") or {}).get("variables") or {}
-    for path in [path for path in found if path not in known]:
-        del found[path]
-
-
-# --- start from a template -----------------------------------------------------------
+# --- start blank or from a template ------------------------------------------------
 templates = list_templates()
+starts = {"blank": "A blank strategy", **templates}
 left, right = st.columns([4, 1])
-chosen = left.selectbox("Start from", [None] + list(templates),
-                        format_func=lambda name: "Keep the current strategy" if name is None else templates[name],
-                        help="A ready-made strategy to edit. Starting from one replaces the whole strategy, so "
-                             "save the current one first (Home page) if you want to keep it.")
+chosen = left.selectbox("Start from", [None] + list(starts),
+                        format_func=lambda name: "Keep the current strategy" if name is None else starts[name],
+                        help="A blank strategy (no symbols, features or rules), or a ready-made one to edit. Either "
+                             "replaces the whole strategy, so save the current one first (Home page) if you want to "
+                             "keep it.")
 right.write("")
 if right.button("Start from this", disabled=chosen is None):
-    ui.replace_spec(load_template(chosen))
+    ui.replace_spec(blank_spec() if chosen == "blank" else load_template(chosen))
     st.rerun()
 
 form, side = st.columns([5, 2], gap="large")
@@ -419,7 +451,9 @@ with form:
                 if picked_kind == "signals":
                     spec["rules"] = {"long_entry": ui.new_rule(features), "long_exit": None, "short_entry": None,
                                      "short_exit": None}
-                    spec["risk"] = {"sizing": {"stake": 1.0}, "stop": {"kind": "none"}, "target": None}
+                    # A blank strategy's: a stake of 1, the stop and target off but with the distances
+                    # the Risk tab would start from, so the optimiser can switch either on.
+                    spec["risk"] = blank_spec()["risk"]
                 else:
                     spec["weighting"] = {"scheme": "equal", "vol_window": 20}
                     spec["schedule"] = {"rebalance": "never", "calendar": None, "threshold": None, "combine": "and",
@@ -430,7 +464,7 @@ with form:
                 for fields in (spec.get("instruments") or {}).values():
                     if isinstance(fields, dict):
                         follow_usual(fields, usual_terms(fields, trading, kind), usual_terms(fields, trading, picked_kind))
-                prune_variables()
+                ui.prune_variables()
             ui.rerun_after(switch_kind)
         if picked_trading != trading:
             def switch_trading():
@@ -461,6 +495,10 @@ with form:
                              disabled=not universes and "from_file" not in instruments,
                              help="Store universe files on the Data page. A file names each row's own mode.",
                              key=ui.key("instruments.use_file"))
+        if not use_file and "from_file" in instruments:
+            # Back from a universe file to the grid: each symbol starts from the usual terms.
+            spec["instruments"] = {symbol: usual_terms({}) for symbol in symbols}
+            instruments = spec["instruments"]
         if use_file:
             current_file = instruments.get("from_file")
             file = st.selectbox("Universe file", universes,
@@ -470,10 +508,10 @@ with form:
                                      "It replaces the grid.")
             if instruments != {"from_file": file}:
                 ui.set_value("instruments", {"from_file": file})
+        elif not symbols:
+            st.caption("Pick the symbols to trade above: each gets a row here, filled in with the usual leverage "
+                       "and point size for how you trade it.")
         else:
-            if "from_file" in instruments:
-                spec["instruments"] = {symbol: usual_terms({}) for symbol in symbols}
-                instruments = spec["instruments"]
             rules = ui.run_guarded("Reading instrument modes", lambda: engine.mode_rules(trading)) or \
                 {"required": set(), "rejected": {}}
             shown = {field: kind_name for field, kind_name in INSTRUMENT_FIELDS.items()
@@ -621,21 +659,27 @@ with form:
                 node = rules.get(slot)
                 title = slot_title(label, node)
                 # Keyed by slot, not by revision: the panel stays open or closed while its title changes.
+                # A rule is added and deleted with a button each (the owner's call, 19 November 2026:
+                # a "use this rule" switch did not read as a way to delete one).
                 with st.expander(title, expanded=True, key=f"rule-panel:{slot}"):
-                    enabled = st.toggle(f"Use a {label.lower()} rule", value=node is not None,
-                                        key=ui.key(f"rules.{slot}", ":on"), help=slot_help[slot])
-                    if enabled and node is None:
-                        def start(slot=slot):
-                            rules[slot] = ui.new_rule(features)
-                            ui.open_panel(f"rules.{slot}.conditions.A")
-                        ui.rerun_after(start)
-                    if not enabled and node is not None:
-                        def clear(slot=slot):
-                            rules[slot] = None
-                            prune_variables()
-                        ui.rerun_after(clear)
-                    if enabled:
+                    if node is None:
+                        st.caption(slot_help[slot])
+                        if st.button(f"Add a {label.lower()} rule", key=ui.key(f"rules.{slot}", ":add_rule"),
+                                     help="Starts the rule with one condition, A, comparing two lines. Add more "
+                                          "conditions and join them in its logic line."):
+                            def start(slot=slot):
+                                rules[slot] = ui.new_rule(features)
+                                ui.open_panel(f"rules.{slot}.conditions.A")
+                            ui.rerun_after(start)
+                    else:
                         ui.rule_editor(f"rules.{slot}", features, timeframe)
+                        if st.button(f"Delete the {label.lower()} rule", key=ui.key(f"rules.{slot}", ":delete_rule"),
+                                     help="Removes the whole rule: its conditions, its logic line and any versions "
+                                          "of it, and takes their values off the Optimise page."):
+                            def clear(slot=slot):
+                                rules[slot] = None
+                                ui.prune_variables()
+                            ui.rerun_after(clear)
                 # The title is drawn before the logic line inside writes back: draw again once if it changed.
                 if slot_title(label, rules.get(slot)) != title:
                     st.rerun()
@@ -656,7 +700,7 @@ with form:
             if not use_selection and spec.get("selection") is not None:
                 def drop_selection():
                     spec.pop("selection")
-                    prune_variables()
+                    ui.prune_variables()
                 ui.rerun_after(drop_selection)
             if use_selection:
                 ui.ref_input("selection.score", features, "Rank assets by",
@@ -714,7 +758,7 @@ with form:
                     schedule["calendar"] = {"freq": "M", "on": "first"} if rebalance == "calendar" else None
                     if rebalance != "calendar":
                         schedule["threshold"] = None
-                    prune_variables()
+                    ui.prune_variables()
                 ui.rerun_after(switch_rebalance)
             if rebalance == "never":
                 st.caption("The weights are bought on the first bar that has them, then left to drift: buy and hold.")
@@ -769,12 +813,16 @@ with form:
                 labels[used] = "Units (raw size)"
             chosen_sizing = st.radio("Position size", list(labels), index=list(labels).index(used),
                                      format_func=labels.get, key=ui.key("risk.sizing", ":kind"),
+                                     # ⚠️ Risk sizing with no stop (from the leverage) waits on vectorbtX
+                                     # (docs/UPSTREAM.md issue 28); reword this when it is built.
                                      help="How big each new position is. The two risk choices size the trade so "
-                                          "that hitting the stop loses that much, so they need a stop.")
+                                          "that hitting the stop loses that much, so they need a fixed stop in "
+                                          "points. Sizing a risk with no stop (from the leverage: the move that "
+                                          "would take the trade's whole margin) waits on vectorbtX.")
             if chosen_sizing != used:
                 def switch_sizing():
                     risk["sizing"] = {chosen_sizing: SIZING_DEFAULTS[chosen_sizing]}
-                    prune_variables()
+                    ui.prune_variables()
                 ui.rerun_after(switch_sizing)
             amount_help = {"risk_pct": "The share of the starting cash lost if the stop is hit (0.01 = 1%): a fixed "
                                        "amount on every trade, not a share of the equity or balance at the time.",
@@ -805,38 +853,55 @@ with form:
                                  index=["none", "fixed", "trailing"].index(stop.get("kind", "none")),
                                  format_func={"none": "No stop", "fixed": "Fixed stop", "trailing": "Trailing stop"}.get,
                                  horizontal=True, key=ui.key("risk.stop", ":kind"),
-                                 help="Fixed and trailing stops cannot be combined: a trailing stop replaces the fixed one.")
+                                 help="Fixed and trailing stops cannot be combined: a trailing stop replaces the fixed "
+                                      "one. Whether there is a stop, which kind, how it is measured and its distance "
+                                      "can all be searched on the Optimise page (risk sizing and the extra exits need "
+                                      "a fixed stop in points, so with either only the distance is). A stop from a "
+                                      "feature, such as 3 x ATR or an EMA, waits on vectorbtX taking a stop per bar.")
             if stop_kind != stop.get("kind", "none"):
                 def switch_stop():
-                    risk["stop"] = {"kind": stop_kind} if stop_kind == "none" else \
-                        {"kind": stop_kind, "points": stop.get("points", 50.0)}
-                    prune_variables()
+                    # The unit and both distances stay while the stop is off, so the optimiser can switch it on.
+                    risk["stop"] = dict(stop, kind=stop_kind)
+                    risk["stop"].setdefault("points", DISTANCE_DEFAULTS["stop"]["points"])
+                    ui.prune_variables()
                 ui.rerun_after(switch_stop)
             if stop_kind != "none":
-                stop_points = ui.param_input(
-                    "risk.stop.points", {"type": "float", "default": 50.0}, label="Distance (points)",
-                    help="How far from the fill price the stop sits, in points: the price distance divided by the "
-                         "point size. On a share a point is 1 cent, so a 1.00 move is 100 points; on FX it is a pip "
-                         "(0.0001, or 0.01 on a yen pair). A trailing stop keeps this distance behind the best price "
-                         "since entry.")
-                if isinstance(stop_points, (int, float)):
-                    st.caption(points_in_price(stop_points))
-            use_target = st.checkbox("Take profit", value=bool(risk.get("target")), key=ui.key("risk.target", ":on"),
-                                     help="Close the trade once it has moved a set distance in your favour.")
-            if use_target and not risk.get("target"):
-                ui.rerun_after(lambda: risk.__setitem__("target", {"points": 100.0}))
-            if not use_target and risk.get("target"):
-                def drop_target():
-                    risk["target"] = None
-                    prune_variables()
-                ui.rerun_after(drop_target)
+                distance_inputs(
+                    "stop", trailing=stop_kind == "trailing",
+                    help_points="How far from the fill price the stop sits, in points: the price distance divided by "
+                                "the point size. On a share a point is 1 cent, so a 1.00 move is 100 points; on FX it "
+                                "is a pip (0.0001, or 0.01 on a yen pair). ⚠️ A trailing stop in points starts this "
+                                "far behind the fill, but vectorbtX turns the distance into a share of the fill price, "
+                                "so it widens as the price rises: at twice the entry price it trails twice as far. A "
+                                "trailing stop in % of the price does not drift.",
+                    help_pct="How far from the fill price the stop sits, as a fraction of that price: 0.02 puts it 2% "
+                             "below a long's fill (above a short's). A trailing stop keeps that share of the best "
+                             "price since the entry behind it. vectorbt's own stop, measured from the fill like a "
+                             "stop in points.")
+                if (risk["stop"].get("unit") == "pct" and
+                        any(key in (risk.get("sizing") or {}) for key in ("risk_pct", "risk_amount"))):
+                    st.warning("Risk sizing needs the stop in points: vectorbtX cannot size a trade from a stop in % "
+                               "of the price yet. Measure the stop in points, or size by stake or notional.")
+            target = risk.get("target") or {"kind": "none"}
+            had_target = target.get("kind") == "fixed"
+            use_target = st.checkbox("Take profit", value=had_target, key=ui.key("risk.target", ":on"),
+                                     help="Close the trade once it has moved a set distance in your favour. Whether "
+                                          "there is one, how it is measured, and its distance can be searched on the "
+                                          "Optimise page.")
+            if use_target != had_target:
+                def switch_target():
+                    # The unit and both distances stay while the target is off, so the optimiser can switch it on.
+                    risk["target"] = dict(target, kind="fixed" if use_target else "none")
+                    risk["target"].setdefault("points", DISTANCE_DEFAULTS["target"]["points"])
+                    ui.prune_variables()
+                ui.rerun_after(switch_target)
             if use_target:
-                target_points = ui.param_input(
-                    "risk.target.points", {"type": "float", "default": 100.0}, label="Distance (points)",
-                    help="How far from the fill price the target sits, in points (cents on a share, pips on FX). It "
-                         "fills like any exit, paying the spread.")
-                if isinstance(target_points, (int, float)):
-                    st.caption(points_in_price(target_points))
+                distance_inputs(
+                    "target",
+                    help_points="How far from the fill price the target sits, in points (cents on a share, pips on "
+                                "FX). It fills like any exit, paying the spread.",
+                    help_pct="How far from the fill price the target sits, as a fraction of that price: 0.04 puts it "
+                             "4% above a long's fill (below a short's). It fills like any exit, paying the spread.")
             # No leverage budget here: vectorbtX applies one to a portfolio's weights only.
             # Each instrument's own leverage (just below) caps a rule strategy's trades.
             leverage_summary()
@@ -881,12 +946,14 @@ with form:
                 if not on and exits.get(exit_key) is not None:
                     def drop_exit(exit_key=exit_key):
                         risk["exits"].pop(exit_key)
-                        prune_variables()
+                        ui.prune_variables()
                     ui.rerun_after(drop_exit)
                 if on:
                     ui.param_input(f"risk.exits.{exit_key}", declaration, label=amount, help=extra_help[exit_key][1])
-            if any(exits.get(name_) is not None for name_, *_ in extra) and stop_kind != "fixed":
-                st.warning("The extra exits adjust a stop, so they need a fixed stop.")
+            if any(exits.get(name_) is not None for name_, *_ in extra) and \
+                    (stop_kind != "fixed" or (risk.get("stop") or {}).get("unit") == "pct"):
+                st.warning("The extra exits adjust a stop from its distance in points, so they need a fixed stop "
+                           "measured in points.")
 
             st.markdown("**Order timing**")
             orders = risk.get("orders") or {}
@@ -938,7 +1005,8 @@ with form:
                            label="Bar frequency",
                            help="How long one bar is, so annualised figures (Sharpe, yearly return) scale "
                                 "correctly. It follows the timeframe; change it only for unusual data.")
-        extra = spec.setdefault("engine_extra", {})
+        # Read, not created: rendering must not change the spec. set_value makes it on the first write.
+        extra = spec.get("engine_extra") or {}
 
         # --- cash across symbols: one account per symbol, or one shared account ---
         random_priority = False

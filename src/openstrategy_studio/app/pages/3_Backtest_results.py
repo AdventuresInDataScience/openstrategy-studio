@@ -1,19 +1,25 @@
-"""Backtest: run the current strategy, read the tear sheet, save the run, reopen past runs."""
+"""Backtest results: run the current strategy, read the tear sheet, save the run, reopen and compare past runs.
+
+The chart comes first and every metric under it (the owner's call, 19 November 2026): the
+equity curve is the first sign of whether the rest is worth reading.
+"""
 
 import uuid
 
+import pandas as pd
 import streamlit as st
 
 from openstrategy_studio import analysis, data as data_module, engine, store, ui
 from openstrategy_studio.analysis import FIGURES
 from openstrategy_studio.spec import validate_spec
 
-settings, data_dir = ui.boot("Backtest")
+settings, data_dir = ui.boot("Backtest results")
 ui.page_help("backtest")
 ui.font_css()
 spec = ui.current()
-st.title("Backtest")
-st.write(f"**{spec['name']}** on {', '.join(spec['data']['symbols'])}, {spec['data']['timeframe']} bars, "
+st.title("Backtest results")
+symbols_text = ", ".join(spec["data"]["symbols"]) or "no symbols yet"
+st.write(f"**{spec['name']}** on {symbols_text}, {spec['data']['timeframe']} bars, "
          f"{spec['data']['start']} to {spec['data']['end']}.")
 
 problems = validate_spec(spec)
@@ -55,12 +61,12 @@ if row[0].button("Run backtest", type="primary", disabled=bool(problems) or not 
         st.session_state["last_run"] = outcome
         st.session_state["figures"] = {}
 
+runs = store.list_runs(data_dir)
+labels = {row.run_id: f"{row.name} ({row.created_at})" for row in runs.itertuples()} if not runs.empty else {}
 with st.expander("Open a saved run"):
-    runs = store.list_runs(data_dir)
     if runs.empty:
         st.write("No saved runs yet.")
     else:
-        labels = {row.run_id: f"{row.name} ({row.created_at})" for row in runs.itertuples()}
         run_id = st.selectbox("Run", list(labels), format_func=labels.get,
                               help="A saved run, newest first. Opening it shows its results as they were saved, "
                                    "without running again.")
@@ -76,6 +82,27 @@ with st.expander("Open a saved run"):
             store.delete_run(data_dir, run_id)
             st.rerun()
 
+# Saved backtests side by side (on the old Results page until 19 November 2026, which now holds
+# the optimiser's results only).
+with st.expander("Compare saved runs"):
+    if runs.empty:
+        st.write("No saved runs yet. Save a run below to compare it with others.")
+    else:
+        # None picked at first: a collapsed expander still runs, and two saved runs would be read
+        # from disk on every click on this page.
+        chosen = st.multiselect("Runs", list(labels), format_func=labels.get, placeholder="Pick two or more runs",
+                                help="Saved runs to draw on one chart and list side by side.")
+        if chosen:
+            compare_theme, compare_glow = ui.theme_picker(settings, "compare")
+            curves = []
+            table = {}
+            for run_id in chosen:
+                saved = analysis.load_results(runs.set_index("run_id").loc[run_id, "path"])
+                curves.append((labels[run_id], saved["series"]["value"]))
+                table[labels[run_id]] = saved["stats"]["portfolio"]["all"]
+            ui.chart(analysis.fig_compare(curves, compare_theme, compare_glow))
+            ui.table(pd.DataFrame(table).astype(str), hide_index=False)
+
 last = st.session_state.get("last_run")
 if last is None:
     st.stop()
@@ -88,7 +115,7 @@ if last["saved"]:
     save.caption("Saved")
 elif save.button("Save run"):
     last["saved"] = analysis.save_run(data_dir, results, last["spec"], settings, last["fingerprint"])
-    st.success("Saved. It is listed on Home and can be reopened here.")
+    st.success("Saved. It is listed on Home and can be reopened or compared here.")
 
 # How the run was funded. Runs saved before the meta recorded it say nothing.
 accounts = results["meta"].get("accounts") or {}
@@ -111,30 +138,11 @@ if notes:
     st.warning("vectorbtX flagged this run. The run finished, but its numbers may leave something out:\n\n"
                + "\n".join(lines))
 
-# --- stats ----------------------------------------------------------------------------
-tags = {"all": "All metrics", "mt5": "MT5 report", "vectorbtx": "vectorbtX extras"}
-tag = st.radio("Metrics", list(tags), format_func=tags.get, horizontal=True,
-               help="Which statistics the three tables show: all of them, the ones MetaTrader 5's strategy report "
-                    "uses, or the ones vectorbtX adds to vectorbt's own.")
-columns = st.columns(3)
-for column, (table_name, label) in zip(columns, (("portfolio", "Portfolio"), ("trades", "Trades"), ("returns", "Returns"))):
-    with column:
-        st.markdown(f"**{label}**")
-        ui.table(analysis.stats_frame(results, table_name, tag), height=420)
-st.caption("Z-score reads the other way round from most metrics: a negative value means wins and losses cluster "
-           "in streaks. It is a dependency test, not a quality score.")
-if "per_symbol" in results:
-    st.markdown("**Each symbol**")
-    ui.table(results["per_symbol"], hide_index=False)
-    if accounts.get("model") != "separate":
-        st.caption("A symbol in a shared account has no equity of its own, so only what it traded is shown.")
-
-# --- figures --------------------------------------------------------------------------
-st.divider()
+# --- the chart first --------------------------------------------------------------------
 names = analysis.available_figures(results)
 row = st.columns([2, 3])
 name = row[0].selectbox("View", names, format_func=lambda key: FIGURES[key]["label"],
-                        help="Which chart to draw from this run.")
+                        help="Which chart to draw from this run. It opens on the equity curve against buy and hold.")
 with row[1]:
     theme, glow = ui.theme_picker(settings, "backtest")
 options = {}
@@ -162,6 +170,21 @@ if cache_key not in cache:
 figure = cache[cache_key]
 for item in figure if isinstance(figure, tuple) else (figure,):
     ui.chart(item)
+
+# --- then every metric --------------------------------------------------------------------
+st.divider()
+columns = st.columns(3)
+for column, (table_name, label) in zip(columns, (("portfolio", "Portfolio"), ("trades", "Trades"), ("returns", "Returns"))):
+    with column:
+        st.markdown(f"**{label}**")
+        ui.table(analysis.stats_frame(results, table_name), height=420)
+st.caption("Z-score reads the other way round from most metrics: a negative value means wins and losses cluster "
+           "in streaks. It is a dependency test, not a quality score.")
+if "per_symbol" in results:
+    st.markdown("**Each symbol**")
+    ui.table(results["per_symbol"], hide_index=False)
+    if accounts.get("model") != "separate":
+        st.caption("A symbol in a shared account has no equity of its own, so only what it traded is shown.")
 
 with st.expander("Trades"):
     ui.table(results["trades"])

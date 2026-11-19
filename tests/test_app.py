@@ -4,13 +4,14 @@ Uses streamlit.testing.v1.AppTest (VERIFY the current API on the installed versi
 """
 
 import copy
+import json
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import openstrategy_studio
-from openstrategy_studio.spec import list_templates, load_template
+from openstrategy_studio.spec import blank_spec, list_templates, load_template, validate_spec
 
 APP = Path(openstrategy_studio.__file__).parent / "app"
 
@@ -34,22 +35,57 @@ def settings_without_a_tooltip(app):
 
 
 def test_every_page_loads_with_every_template(tmp_path, monkeypatch):
-    """Every page renders with every template, leaves the spec as it was, and explains every setting."""
+    """Every page renders with every template and with a blank strategy, leaves the spec as it was,
+    and explains every setting."""
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
     monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
     pages = [APP / "Home.py"] + sorted((APP / "pages").glob("*.py"))
-    for name in list_templates():
+    starts = {name: load_template(name) for name in list_templates()}
+    starts["blank"] = blank_spec()
+    for name, spec in starts.items():
         for page in pages:
             app = testing.AppTest.from_file(str(page), default_timeout=180)
-            app.session_state["spec"] = load_template(name)
+            app.session_state["spec"] = copy.deepcopy(spec)
             app.session_state["spec_rev"] = 0
             app.run()
             assert not app.exception, (name, page.name, [item.value for item in app.exception])
             # Rendering must not change the spec (CLAUDE.md): every widget is seeded from it.
-            assert app.session_state["spec"] == load_template(name), (name, page.name)
+            assert app.session_state["spec"] == spec, (name, page.name)
             # Every setting has an ⓘ tooltip (CLAUDE.md).
             assert not settings_without_a_tooltip(app), (name, page.name, settings_without_a_tooltip(app))
+
+
+def test_a_new_session_starts_blank(tmp_path, monkeypatch):
+    """No template and no draft is loaded on its own (the owner's call, 19 November 2026); Home
+    offers last time's draft, and Start blank and the Build page's Start from give a blank one again."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    spec = app.session_state["spec"]
+    assert spec == blank_spec()
+    assert spec["data"]["symbols"] == [] and spec["features"] == {} and not any(spec["rules"].values())
+    # What is still missing is the At a glance panel's to-do list, not an error.
+    assert "Pick at least one symbol." in validate_spec(spec) and "Add a long or a short entry rule." in validate_spec(spec)
+    # The Build page's Start from gives a blank strategy over a template.
+    app.session_state["spec"] = load_template("ma_cross")
+    app.run()
+    next(box for box in app.selectbox if box.label == "Start from").set_value("blank").run()
+    next(button for button in app.button if button.label == "Start from this").click().run()
+    assert app.session_state["spec"] == blank_spec()
+    # Home: last time's draft is offered, not loaded.
+    home = testing.AppTest.from_file(str(APP / "Home.py"), default_timeout=180)
+    (tmp_path / "data" / "drafts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "data" / "drafts" / "current.json").write_text(json.dumps(load_template("ma_cross")), encoding="utf-8")
+    home.run()
+    assert not home.exception, [item.value for item in home.exception]
+    assert home.session_state["spec"] == blank_spec()
+    assert any(button.label == "Restore it" for button in home.button)
+    next(button for button in home.button if button.label == "Start blank").click().run()
+    assert home.session_state["spec"] == blank_spec()
 
 
 def test_every_account_choice_renders_without_changing_the_spec(tmp_path, monkeypatch):
@@ -90,7 +126,7 @@ def test_backtest_page_says_how_the_run_was_funded(tmp_path, monkeypatch):
     separate["account"] = {"init_cash": 10000, "freq": "D"}
     for spec, expected in ((separate, "3 separate accounts"), (shared, "One account of 10,000")):
         run = engine.run_backtest(spec, data)
-        app = testing.AppTest.from_file(str(APP / "pages" / "3_Backtest.py"), default_timeout=180)
+        app = testing.AppTest.from_file(str(APP / "pages" / "3_Backtest_results.py"), default_timeout=180)
         app.session_state["spec"] = spec
         app.session_state["spec_rev"] = 0
         app.session_state["last_run"] = {"results": analysis.extract_results(run), "spec": run["spec"],
@@ -117,7 +153,7 @@ def test_the_backtest_page_shows_what_vectorbtx_flagged(tmp_path, monkeypatch):
     run = engine.run_backtest(spec, make_ohlcv(400, ("AAPL", "MSFT", "NVDA"), seed=3, base=100.0))
     results = analysis.extract_results(run)
     results["meta"]["warnings"] = ["Short positions in ['AAPL'] borrowed the securities for free."]
-    app = testing.AppTest.from_file(str(APP / "pages" / "3_Backtest.py"), default_timeout=180)
+    app = testing.AppTest.from_file(str(APP / "pages" / "3_Backtest_results.py"), default_timeout=180)
     app.session_state["spec"] = spec
     app.session_state["spec_rev"] = 0
     app.session_state["last_run"] = {"results": results, "spec": run["spec"], "fingerprint": {},
@@ -224,6 +260,43 @@ def test_optimise_variables_are_added_and_changed(tmp_path, monkeypatch):
     assert variables["risk.stop.points"] == {"start": 30.0, "stop": 120.0, "step": 9.0}
     app.radio(key=current_key(app, "opt:risk.stop.points:how")).set_value("list").run()
     assert app.session_state["spec"]["optimise"]["variables"]["risk.stop.points"]["values"][:2] == [30.0, 39.0]
+    assert not app.exception, [item.value for item in app.exception]
+
+
+def test_the_stop_and_target_switch_off_and_keep_their_distance_for_the_optimiser(tmp_path, monkeypatch):
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("rsi_reversion")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    app.radio(key=current_key(app, "risk.stop:kind")).set_value("trailing").run()
+    assert app.session_state["spec"]["risk"]["stop"] == {"kind": "trailing", "unit": "points", "points": 50, "pct": 0.02}
+    # Measured in % of the price: the box shows the fraction, and both distances stay.
+    app.radio(key=current_key(app, "risk.stop:unit")).set_value("pct").run()
+    assert app.session_state["spec"]["risk"]["stop"]["unit"] == "pct"
+    app.number_input(key=current_key(app, "risk.stop.pct")).set_value(0.03).run()
+    assert app.session_state["spec"]["risk"]["stop"] == {"kind": "trailing", "unit": "pct", "points": 50, "pct": 0.03}
+    assert any("3.00% of the best price since the entry" in item.value for item in app.caption)
+    app.radio(key=current_key(app, "risk.stop:kind")).set_value("none").run()
+    assert app.session_state["spec"]["risk"]["stop"] == {"kind": "none", "unit": "pct", "points": 50, "pct": 0.03}
+    app.checkbox(key=current_key(app, "risk.target:on")).check().run()
+    assert app.session_state["spec"]["risk"]["target"] == {"kind": "fixed", "unit": "points", "points": 100, "pct": 0.04}
+    app.checkbox(key=current_key(app, "risk.target:on")).uncheck().run()
+    assert app.session_state["spec"]["risk"]["target"]["kind"] == "none"
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app)
+    # Both are on the Optimise page's list, the stop's kind in words.
+    spec = app.session_state["spec"]
+    app = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    app.session_state["spec"] = spec
+    app.session_state["spec_rev"] = 0
+    app.run()
+    picker = app.selectbox(key=current_key(app, "optimise:add"))
+    assert any(option.startswith("Risk: Stop: none, fixed or trailing (now no stop)") for option in picker.options)
+    assert any(option.startswith("Risk: Take profit: on or off") for option in picker.options)
     assert not app.exception, [item.value for item in app.exception]
 
 
@@ -394,6 +467,107 @@ def test_conditions_take_every_kind_and_a_timing_in_any_rule(tmp_path, monkeypat
     assert "within_bars" not in app.session_state["spec"]["rules"]["long_entry"]["conditions"]["A"]
     assert not app.exception, [item.value for item in app.exception]
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_a_rule_is_added_and_deleted_with_its_variables(tmp_path, monkeypatch):
+    """Add a … rule starts one; Delete the … rule removes it and its values on the Optimise page
+    (a "use this rule" switch did not read as a way to delete one: the owner, 19 November 2026)."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.button(key=current_key(app, "rules.short_entry:add_rule")).click().run()
+    assert app.session_state["spec"]["rules"]["short_entry"]["logic"] == "A"
+    app.multiselect(key=current_key(app, "rules.short_entry.conditions.A:optimise")).select(
+        "rules.short_entry.conditions.A.op").run()
+    assert "rules.short_entry.conditions.A.op" in app.session_state["spec"]["optimise"]["variables"]
+    app.button(key=current_key(app, "rules.short_entry:delete_rule")).click().run()
+    spec = app.session_state["spec"]
+    assert spec["rules"]["short_entry"] is None
+    assert not any(path.startswith("rules.short_entry") for path in spec["optimise"]["variables"])
+    # The template's own variables stay.
+    assert "features.fast.params.timeperiod" in spec["optimise"]["variables"]
+    app.button(key=current_key(app, "rules.long_exit:delete_rule")).click().run()
+    assert app.session_state["spec"]["rules"]["long_exit"] is None
+    assert not app.exception, [item.value for item in app.exception]
+
+
+def test_a_conditions_values_are_optimised_from_its_panel(tmp_path, monkeypatch):
+    """Each condition's Optimise list adds its values to the Optimise page with a starting range,
+    bars ago at 0 included; taking one out, or deleting the condition, removes it."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("rsi_reversion")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    base = "rules.long_entry.conditions.A"
+    picker = app.multiselect(key=current_key(app, f"{base}:optimise"))
+    # Shown in words, each with its value now (AppTest lists the shown text).
+    assert picker.options == ["the comparison (now crosses above)", "bars ago (left) (now 0)",
+                              "the number (right) (now 30.0)"], picker.options
+    # The template already searches the number (15 to 40), so the list opens with it.
+    assert picker.value == [f"{base}.right.const"]
+    picker.select(f"{base}.left.shift").run()
+    found = app.session_state["spec"]["optimise"]["variables"]
+    assert found[f"{base}.right.const"] == {"start": 15, "stop": 40}
+    assert found[f"{base}.left.shift"] == {"start": 0, "stop": 2, "step": 1}         # 0, 1 and 2 bars ago
+    assert any("Searched: the number (right): 15 to 40; bars ago (left): 0 to 2 by 1" in item.value
+               for item in app.caption), [item.value for item in app.caption]
+    app.multiselect(key=current_key(app, f"{base}:optimise")).unselect(f"{base}.right.const").run()
+    found = app.session_state["spec"]["optimise"]["variables"]
+    assert f"{base}.right.const" not in found and f"{base}.left.shift" in found
+    # A trial's bars ago of 0, written back by Apply to the strategy, is left as it is.
+    spec = app.session_state["spec"]
+    spec["rules"]["long_entry"]["conditions"]["A"]["left"]["shift"] = 0
+    before = copy.deepcopy(spec)
+    app.run()
+    assert app.session_state["spec"] == before
+    # Deleting the condition takes its variables with it.
+    app.button(key=current_key(app, "rules.long_entry.conditions.B:remove")).click().run()
+    app.button(key=current_key(app, f"{base}:remove")).click().run()
+    assert not any(path.startswith(base) for path in app.session_state["spec"]["optimise"]["variables"])
+    assert not app.exception, [item.value for item in app.exception]
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_the_backtest_results_page_shows_the_chart_before_every_metric(tmp_path, monkeypatch):
+    """No choice of metric sets: every metric, under the chart (the owner's call, 19 November 2026)."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from conftest import make_ohlcv
+    from openstrategy_studio import analysis, engine
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = load_template("ma_cross")
+    run = engine.run_backtest(spec, make_ohlcv(400, ("EURUSD=X",), seed=3, base=1.1))
+    app = testing.AppTest.from_file(str(APP / "pages" / "3_Backtest_results.py"), default_timeout=180)
+    app.session_state["spec"] = spec
+    app.session_state["spec_rev"] = 0
+    app.session_state["last_run"] = {"results": analysis.extract_results(run), "spec": run["spec"],
+                                     "fingerprint": {}, "saved": None, "id": "test"}
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert not any(radio.label == "Metrics" for radio in app.radio)
+
+    def walk(node):
+        """Every element on the page, in the order it is drawn."""
+        yield node
+        for child in (getattr(node, "children", None) or {}).values():
+            yield from walk(child)
+
+    # The View box (the chart's) is drawn before the Portfolio table's heading.
+    seen = []
+    for node in walk(app.main):
+        if getattr(node, "type", None) == "selectbox" and node.label == "View":
+            seen.append("View")
+        if getattr(node, "type", None) == "markdown" and node.value == "**Portfolio**":
+            seen.append("Portfolio")
+    assert seen == ["View", "Portfolio"], seen
 
 
 def spread_bet_on_spy(tmp_path):

@@ -1,5 +1,7 @@
 Work through the steps left to right. The **At a glance** panel on the right shows the whole strategy as it stands, and lists anything to fix before it can run.
 
+The Studio starts with a blank strategy each time. **Start from** at the top gives a blank one again, or a ready-made template to edit.
+
 **1. Setup.** Name the strategy, pick the symbols, timeframe and dates, then answer two questions:
 
 - *What are you building?* **Trade on signals** (rules decide when to buy and sell) or **hold a portfolio** (target weights, rebalanced on a schedule or never; one symbol held from the start is buy and hold).
@@ -15,18 +17,20 @@ Work through the steps left to right. The **At a glance** panel on the right sho
 - *Transform* holds the adjustments: offset a line by a percentage, a band either side of it, the distance between two lines, a line some bars ago, bars since a signal. "Crosses within 5% of the EMA" is a 5% band around the EMA, compared in a rule.
 - On an SMA, EMA or other single-type average, **Let the optimiser pick the type** swaps it for the *Moving average* entry at the same type (the same numbers), so the Optimise page can try SMA against EMA and others.
 
-**3. Rules** (signals). Each rule sits in its own panel, titled with its logic line, and is a list of named conditions and a **logic line** that combines them:
+**3. Rules** (signals). There are four: long entry, long exit, short entry, short exit. **Add a … rule** starts one and **Delete the … rule** removes it with everything in it. Each rule sits in its own panel, titled with its logic line, and is a list of named conditions and a **logic line** that combines them:
 
 - **Add condition**, then pick its **Kind**: compare two lines (*fast crosses above slow*), a pattern appears, the day, month or time of day, or a comparison on a higher timeframe. Every rule takes every kind, exits included: *A or Friday* is a time exit.
 - Each condition has its own panel, titled in words, so it can be closed once it is right.
 - **Must hold** says when: on this bar, on each of the last N bars (*RSI above 50 for 3 bars*), on any of the last N bars (*a cross within the last 5 bars*), or N bars ago (*a cross 1 bar ago, then a close below the EMA now*). On a higher timeframe, N counts its bars.
 - New conditions are named A, B, C ...; type a name of your own in a condition's **Name** box (letters, digits and underscores, such as `trend` or `rsi_low`) and the logic line follows.
 - The logic line uses `and`, `or`, `xor`, `nand`, `nor`, `xnor` and `not`, with brackets: `(A and (B or C)) and not D`, or `trend and not overbought`. Brackets are needed wherever two different words meet, so the line always says exactly what you mean. Names match exactly, capitals included.
+- **Optimise**, at the foot of each condition, lists the values in it the optimiser can search: the comparison, each number, each side's bars ago (0 included), the N of **Must hold**, the bars of rising and falling, a pattern's side, a higher timeframe. Pick one and it is added to the Optimise page with a starting range, which you change there. To search how many bars a condition must hold, pick *on each of* or *on any of the last N bars* first: N = 1 is the same as on this bar, so a search from 1 includes it.
+- **Delete condition** in a condition's panel removes it, from the logic line too.
 - **Make versions of this rule** keeps several versions; the optimiser can choose between them.
 
 **3. Portfolio** (portfolios). Optionally pick assets by a score, choose the weighting, and how often to go back to the target weights: never (buy and hold), every bar, or on a calendar, optionally only when the weights have drifted.
 
-**4. Risk.** How big each position is (labelled for the way you trade; a risk of 0.01 is 1% of the starting cash, the same amount on every trade, and the line under the box says what it is in money), a stop, a take profit, and then:
+**4. Risk.** How big each position is (labelled for the way you trade; a risk of 0.01 is 1% of the starting cash, the same amount on every trade, and the line under the box says what it is in money), a stop and a take profit, each in points or in % of the price (a stop from a feature, such as 3 × ATR or an EMA, waits on vectorbtX; risk sizing and the extra exits need a stop in points), and then:
 
 - **Leverage**: each symbol's leverage and what it funds. It is set in the instrument grid on the Setup tab.
 - **When a trade is bigger than the account can fund**: fill as much as it funds, or skip the trade.
@@ -37,4 +41,4 @@ Work through the steps left to right. The **At a glance** panel on the right sho
 
 **Preview** marks every signal on the chart. **Pipeline** draws the strategy. **Strategy file** shows it as JSON and as a standalone vectorbtX script.
 
-Optimisation ranges are not set here: add the values to search on the **Optimise** page.
+Optimisation ranges are not set here: add the values to search on the **Optimise** page (or, for a rule's values, in the condition's **Optimise** list), and set their ranges there.

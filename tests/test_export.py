@@ -129,3 +129,19 @@ def test_export_equivalence_timing_and_exit_conditions(ma_spec, ohlcv):
     in_app = engine.run_backtest(spec, ohlcv, params=params)
     assert in_app["compiled"]["entries"].to_numpy().any() and in_app["compiled"]["exits"].to_numpy().any()
     pd.testing.assert_series_equal(in_app["pf"].stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())
+
+
+def test_export_equivalence_stops_in_percent(ma_spec, ohlcv):
+    """A trailing stop and a take profit in % of the price (vectorbt's own sl_stop, sl_trail and tp_stop)."""
+    pytest.importorskip("vectorbtx")
+    spec = copy.deepcopy(ma_spec)
+    spec["risk"]["sizing"] = {"stake": 1.0}                 # risk sizing needs a stop in points
+    spec["risk"]["stop"].update(kind="trailing", unit="pct", pct=0.004)
+    spec["risk"]["target"].update(unit="pct", pct=0.008)
+    assert S.validate_spec(spec) == []
+    source = export_script(spec)
+    assert "sl_stop=0.004" in source and "sl_trail=True" in source and "tp_stop=0.008" in source
+    params = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}
+    in_app = engine.run_backtest(spec, ohlcv, params=params)["pf"]
+    assert int(in_app.trades.count().sum()) > 0
+    pd.testing.assert_series_equal(in_app.stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())

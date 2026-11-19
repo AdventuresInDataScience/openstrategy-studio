@@ -133,9 +133,16 @@
     },
     "stop": {
       "kind": "fixed",
-      "points": 80
+      "unit": "points",
+      "points": 80,
+      "pct": 0.02
     },
-    "target": null
+    "target": {
+      "kind": "none",
+      "unit": "points",
+      "points": 100,
+      "pct": 0.04
+    }
   },
   "account": {
     "init_cash": 10000,

@@ -313,6 +313,101 @@ def test_tunable_inputs_include_the_risk_dials(ma_spec):
         assert path in paths, path
     assert paths["risk.exits.time_bars"]["type"] == "int" and paths["risk.stop.points"]["value"] == 60
     assert S.apply_params(spec, {"risk.stop.points": 80.0})["risk"]["stop"]["points"] == 80.0
+    # Risk sizing and the extra exits need a fixed stop, so its kind is not offered; the target's is.
+    assert "risk.stop.kind" not in paths
+    assert paths["risk.target.kind"]["options"] == ["none", "fixed"]
+
+
+def test_every_value_in_a_condition_can_be_optimised(ma_spec, ohlcv):
+    """Bars ago on a line at 0 included (a trial may try 0 against 1 and 2), a pattern's side, and a
+    higher-timeframe condition's timeframe; a number has no bars ago."""
+    from openstrategy_studio import indicators
+    from openstrategy_studio.compile import compile_signals
+
+    spec = copy.deepcopy(ma_spec)
+    pattern = next(item for item in indicators.catalogue() if item.startswith("pattern:"))
+    spec["features"]["engulf"] = indicators.new_feature(pattern)
+    entry = spec["rules"]["long_entry"]
+    entry["conditions"]["B"] = {"pattern": "engulf", "side": "bullish"}
+    entry["conditions"]["C"] = {"filter": "higher_timeframe", "timeframe": "1w", "left": {"price": "close"},
+                                "op": ">", "right": {"const": 0.0}}
+    entry["logic"] = "A and B and C"
+    paths = {row["path"]: row for row in S.tunable_inputs(spec)}
+    base = "rules.long_entry.conditions"
+    assert paths[f"{base}.A.left.shift"]["value"] == 0 and paths[f"{base}.A.right.shift"]["type"] == "int"
+    assert paths[f"{base}.B.side"]["options"] == ["bullish", "bearish", "either"]
+    assert paths[f"{base}.C.timeframe"]["options"] == ["1w", "1M"]           # above the data's 1d only
+    assert f"{base}.C.left.shift" in paths and f"{base}.C.right.shift" not in paths
+    assert S.default_variable(paths[f"{base}.A.left.shift"]) == {"start": 0, "stop": 2, "step": 1}
+    # A trial's 0 is the current bar: the same signals as no shift at all.
+    tried = S.apply_params(ma_spec, {f"{base}.A.left.shift": 0})
+    assert tried["rules"]["long_entry"]["conditions"]["A"]["left"]["shift"] == 0 and not S.validate_spec(tried)
+    assert compile_signals(tried, ohlcv)["entries"].equals(compile_signals(S.apply_params(ma_spec), ohlcv)["entries"])
+
+
+def test_the_stop_and_target_can_be_switched_on_and_off_by_the_optimiser():
+    # A strategy with neither, sized without risk: both kinds are choices, and their distances stay.
+    spec = S.load_template("rsi_reversion")
+    paths = {row["path"]: row for row in S.tunable_inputs(spec)}
+    assert paths["risk.stop.kind"]["options"] == ["none", "fixed", "trailing"]
+    assert paths["risk.stop.kind"]["value"] == "none" and paths["risk.stop.points"]["value"] == 50
+    assert "not used now" in paths["risk.stop.points"]["label"]
+    trial = S.apply_params(spec, {"risk.stop.kind": "trailing", "risk.stop.points": 80.0, "risk.target.kind": "fixed"})
+    assert trial["risk"]["stop"] == {"kind": "trailing", "unit": "points", "points": 80.0, "pct": 0.02}
+    assert trial["risk"]["target"] == {"kind": "fixed", "unit": "points", "points": 100, "pct": 0.04}
+    assert S.validate_spec(trial) == []
+    # Every kind and unit a variable may pick is valid with the rest of the spec.
+    spec["optimise"] = {"variables": {"risk.stop.kind": {"values": ["none", "fixed", "trailing"]},
+                                      "risk.stop.unit": {"values": ["points", "pct"]},
+                                      "risk.target.kind": {"values": ["none", "fixed"]},
+                                      "risk.target.unit": {"values": ["points", "pct"]}}}
+    assert S.validate_spec(spec) == []
+
+
+def test_a_stop_in_percent_is_a_fraction_of_the_price_and_cannot_size_a_risk_yet(ma_spec):
+    spec = copy.deepcopy(ma_spec)
+    paths = {row["path"]: row for row in S.tunable_inputs(spec)}
+    # Risk-sized, so the stop stays fixed and in points; the target may switch either way.
+    assert "risk.stop.unit" not in paths and paths["risk.target.unit"]["options"] == ["points", "pct"]
+    assert "not used now" in paths["risk.stop.pct"]["label"]
+    spec["risk"]["stop"]["unit"] = "pct"
+    assert any("cannot size a trade from a stop in %" in problem or "cannot size from a stop in %" in problem
+               for problem in S.validate_spec(spec))
+    spec["risk"]["sizing"] = {"stake": 1.0}
+    assert S.validate_spec(spec) == []
+    spec["risk"]["stop"]["pct"] = 2                         # meant 2%, typed as 200%
+    assert any("0.02 is 2%" in problem for problem in S.validate_spec(spec))
+    spec["risk"]["stop"]["pct"] = 0.02
+    spec["risk"]["exits"] = {"time_bars": 10}
+    assert any("measure the stop in points to use them" in problem for problem in S.validate_spec(spec))
+
+
+def test_a_distance_measured_the_other_way_is_named(ma_spec):
+    spec = copy.deepcopy(ma_spec)
+    spec["optimise"] = {"variables": {"risk.target.pct": {"start": 0.01, "stop": 0.05, "step": 0.01}}}
+    assert any("the take profit is measured in points, so this distance changes nothing" in problem
+               for problem in S.validate_spec(spec))
+    spec["optimise"]["variables"]["risk.target.unit"] = {"values": ["points", "pct"]}
+    assert S.validate_spec(spec) == []
+
+
+def test_a_distance_searched_with_its_stop_off_is_named():
+    # Every trial would be the same backtest, so validate_spec says what to do instead.
+    spec = S.load_template("rsi_reversion")
+    spec["optimise"] = {"variables": {"risk.stop.points": {"start": 20.0, "stop": 80.0, "step": 20.0}}}
+    assert any("there is no stop, so its distance changes nothing" in problem for problem in S.validate_spec(spec))
+    spec["optimise"]["variables"]["risk.stop.kind"] = {"values": ["none", "fixed"]}
+    assert S.validate_spec(spec) == []
+
+
+def test_a_stop_or_target_without_its_kind_is_rejected(ma_spec):
+    # ⚠️ Read as none, it would trade unprotected (or past its target) with nothing to say so.
+    spec = copy.deepcopy(ma_spec)
+    spec["risk"]["target"] = {"points": 120}
+    assert any("take profit must say its kind" in problem for problem in S.validate_spec(spec))
+    spec = copy.deepcopy(ma_spec)
+    spec["risk"]["stop"] = {"points": 60}
+    assert any("stop must say its kind" in problem for problem in S.validate_spec(spec))
 
 
 def test_variable_values():

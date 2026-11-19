@@ -161,7 +161,12 @@ def _jsonable(value):
 
 
 def stats_tables(pf):
-    """{"portfolio", "trades", "returns"} x {"all", "mt5", "vectorbtx"} as {label: value} dicts.
+    """{"portfolio", "trades", "returns"} x {"all"} as {label: value} dicts.
+
+    Every metric, untagged: the MT5 and vectorbtX tags each picked a subset of these, and the
+    Backtest results page shows them all (the owner's call, 19 November 2026), so they are no
+    longer computed (six fewer stats calls a run). The "all" level stays: saved runs and the
+    comparison table read results["stats"][table]["all"].
 
     ⚠️ absolute_drawdown and recovery_factor need a RESOLVED init_cash: pass
     pf.get_init_cash(), not the raw argument. Benchmark-relative statistics (beta,
@@ -178,18 +183,12 @@ def stats_tables(pf):
         pf = pf.regroup(True)
     settings = {"init_cash": pf.get_init_cash()}
     out = {}
-    for tag in ("all", "mt5", "vectorbtx"):
-        keywords = {} if tag == "all" else {"tags": tag}
-        tables = {"portfolio": pf.stats(settings=settings, **keywords),
-                  "trades": pf.trades.stats(**keywords),
-                  "returns": pf.returns_stats(**keywords)}
-        for name, table in tables.items():
-            # A tag that no metric carries gives None, not an empty table: vectorbt 1.1.0's
-            # returns_stats has no MT5 metrics, so returns_stats(tags="mt5") is None.
-            values = {}
-            if table is not None:
-                values = {str(label): _jsonable(value) for label, value in table.items()}
-            out.setdefault(name, {})[tag] = values
+    tables = {"portfolio": pf.stats(settings=settings), "trades": pf.trades.stats(), "returns": pf.returns_stats()}
+    for name, table in tables.items():
+        values = {}
+        if table is not None:
+            values = {str(label): _jsonable(value) for label, value in table.items()}
+        out[name] = {"all": values}
     return out
 
 
@@ -342,7 +341,7 @@ WARNING_HINTS = {
 
 
 def warning_hints(notes):
-    """[(vectorbtX's warning, the Studio's hint or None)] for the Backtest page."""
+    """[(vectorbtX's warning, the Studio's hint or None)] for the Backtest results page."""
     out = []
     for note in notes:
         hint = next((text for phrase, text in WARNING_HINTS.items() if phrase in note), None)
@@ -386,10 +385,10 @@ def load_results(run_dir):
     return results
 
 
-def stats_frame(results, table, tag="all"):
-    """One stats table as a two-column frame of strings, ready to display."""
+def stats_frame(results, table):
+    """One stats table, every metric, as a two-column frame of strings, ready to display."""
     rows = []
-    for label, value in results["stats"][table][tag].items():
+    for label, value in results["stats"][table]["all"].items():
         if isinstance(value, float):
             text = f"{value:,.4g}" if abs(value) < 1e6 else f"{value:,.0f}"
         else:
@@ -962,9 +961,12 @@ def pipeline_dot(spec, palette=None):
         risk_lines.append(f"{key} {value}")
     stop = risk.get("stop") or {}
     if stop.get("kind") in ("fixed", "trailing"):
-        risk_lines.append(f"{stop['kind']} stop {stop['points']} pts")
-    if risk.get("target"):
-        risk_lines.append(f"target {risk['target']['points']} pts")
+        risk_lines.append(f"{stop['kind']} stop " + (f"{stop['pct']:.2%}" if stop.get("unit") == "pct"
+                                                     else f"{stop['points']} pts"))
+    target = risk.get("target") or {}
+    if target.get("kind") == "fixed":
+        risk_lines.append("target " + (f"{target['pct']:.2%}" if target.get("unit") == "pct"
+                                       else f"{target['points']} pts"))
     for key, value in (risk.get("exits") or {}).items():
         if value is not None:
             risk_lines.append(f"{key.replace('_', ' ')} {value}")

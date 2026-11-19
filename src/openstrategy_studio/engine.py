@@ -368,7 +368,10 @@ def sizing_check(spec, data, entries=None, data_dir=None):
     if strategy_kind(spec) != "signals" or not sizing:
         return []
     stop = risk.get("stop") or {}
-    stop_points = stop.get("points") if stop.get("kind") in ("fixed", "trailing") else None
+    on = stop.get("kind") in ("fixed", "trailing")
+    # A stop in points, or a fraction of the fill price (whose distance depends on the bar).
+    stop_points = stop.get("points") if on and stop.get("unit", "points") == "points" else None
+    stop_fraction = stop.get("pct") if on and stop.get("unit", "points") == "pct" else None
     init_cash = float(spec["account"]["init_cash"])
     prepared = prepare_data(spec, data, data_dir)
     fill = pd.DataFrame(prepared["open"])
@@ -408,7 +411,12 @@ def sizing_check(spec, data, entries=None, data_dir=None):
         asked = float(adapter.from_engine_units(np.asarray([wanted[column].iloc[bar]], dtype=float), instrument)[0])
         value = abs(float(traded[column].iloc[bar])) * price
         leverage = float(instrument.leverage or 1.0)
-        distance = float(stop_points) * float(instrument.point_size) if stop_points else None
+        if stop_points:
+            distance = float(stop_points) * float(instrument.point_size)
+        elif stop_fraction:
+            distance = float(stop_fraction) * price
+        else:
+            distance = None
         # How far price usually travels in one bar here: the median high-to-low range of the 20
         # bars before the fill. A stop inside it is likely hit within a bar or two of the entry.
         ranges = (pd.DataFrame(prepared["high"])[column] - pd.DataFrame(prepared["low"])[column]).iloc[max(0, bar - 20):bar]
@@ -576,14 +584,35 @@ def call_plan(spec, data_dir=None):
     for key in SIZING_KEYS:
         if key in sizing:
             args[key] = ("lit", sizing[key])
-    # Stops: fixed or trailing, never both (trail_points overwrites stop_points).
+    # Stops: fixed or trailing, never both (trail_points overwrites stop_points). A stop or target
+    # that is off, or measured the other way, keeps its other distance in the spec (the optimiser
+    # can switch it): only its kind and unit say what is sent.
+    # In points: vectorbtX's own keywords, converted to fractions of the fill price.
+    # ⚠️ trail_points is converted once, against the fill price, and vectorbt then applies that
+    # fraction to the best price, so a trail in points widens as the price rises from the entry
+    # (docs/UPSTREAM.md issue 27).
+    # In % of the price: vectorbt's own sl_stop / tp_stop (0.02 = 2%), with sl_trail for a
+    # trailing stop. The front door anchors them at the fill (stop_entry_price="price"), pays the
+    # spread on the exit and checks them on the entry bar, exactly as it does point stops.
     stop = risk.get("stop") or {}
+    stop_unit = stop.get("unit", "points")
     if stop.get("kind") == "fixed":
-        args["stop_points"] = ("lit", stop["points"])
+        if stop_unit == "pct":
+            args["sl_stop"] = ("lit", stop["pct"])
+        else:
+            args["stop_points"] = ("lit", stop["points"])
     elif stop.get("kind") == "trailing":
-        args["trail_points"] = ("lit", stop["points"])
-    if risk.get("target"):
-        args["target_points"] = ("lit", risk["target"]["points"])
+        if stop_unit == "pct":
+            args["sl_stop"] = ("lit", stop["pct"])
+            args["sl_trail"] = ("lit", True)
+        else:
+            args["trail_points"] = ("lit", stop["points"])
+    target = risk.get("target") or {}
+    if target.get("kind") == "fixed":
+        if target.get("unit", "points") == "pct":
+            args["tp_stop"] = ("lit", target["pct"])
+        else:
+            args["target_points"] = ("lit", target["points"])
     # Extra exits: fixed numba templates that adjust the stop (and, for a time
     # stop, the target) on every bar. See exit_rules.py.
     from .exit_rules import FAR_TARGET_POINTS, exit_settings
@@ -594,7 +623,7 @@ def call_plan(spec, data_dir=None):
         if extra_exits["time_bars"] == extra_exits["time_bars"]:
             args["adjust_tp_func_nb"] = ("var", "adjust_tp_func_nb")
             args["adjust_tp_args"] = ("var", "adjust_tp_args")
-            if "target_points" not in args:
+            if "target_points" not in args and "tp_stop" not in args:
                 # A far target is accepted, so adjust_tp_nb is called on every bar
                 # (verified by the phase 3 gate in tests/test_exit_rules.py).
                 args["target_points"] = ("lit", FAR_TARGET_POINTS)

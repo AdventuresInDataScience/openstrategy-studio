@@ -590,6 +590,129 @@ def check_point_size_defaults():
     return found != wanted, f"point sizes {found} (should be {wanted})"
 
 
+# ---------------------------------------------------------------------------
+# 26. Stops and targets as a vector: per symbol and per bar from the signal bar, with risk
+# sizing from them (a required feature). A stop in % of the price is vectorbt's own sl_stop,
+# which works already; what is missing is a value per column or per bar, shifted with the
+# signals, and risk sizing from any distance but a fixed one in points. The API names are the
+# ones UPSTREAM.md suggests; rename with them.
+# ---------------------------------------------------------------------------
+
+def check_stops_that_vary():
+    # Every entry is signalled at bar 1 and filled at bar 2's open, 100. Bar 3's low is 97.5 and
+    # bar 4's is 94.5, so a stop at 98 is hit on bar 3, and one at 97 or 95 on bar 4.
+    opens = [100.0] * 8
+    lows = [99.5, 99.5, 99.5, 97.5, 94.5, 99.5, 99.5, 99.5]
+    index = pd.bdate_range("2024-01-01", periods=8)
+
+    def per_bar(values):
+        return pd.DataFrame({"X": [float(value) for value in values]}, index=index)
+
+    def outcome(columns=("X",), **kwargs):
+        """{column: (bought, (exit bar, exit price))}, or the error's name."""
+        o, h, l, c = frames(opens, lows=lows, columns=columns)
+        entries = mask(c.index, columns, [(column, 1) for column in columns])
+        none = mask(c.index, columns, [])
+        try:
+            pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none,
+                                         instruments={column: EQUITY for column in columns}, init_cash=10_000,
+                                         freq="D", **kwargs)
+        except Exception as error:                                       # noqa: BLE001
+            return type(error).__name__
+        rows = pf.orders.records_readable
+        found = {}
+        for column in columns:
+            mine = rows[rows["Column"] == column]
+            buys, sells = mine[mine["Side"] == "Buy"], mine[mine["Side"] == "Sell"]
+            bought = round(float(buys["Size"].iloc[0]), 4) if len(buys) else None
+            sold = (c.index.get_loc(sells["Timestamp"].iloc[0]), round(float(sells["Price"].iloc[0]), 2)) \
+                if len(sells) else None
+            found[column] = (bought, sold)
+        return found
+
+    cases = {
+        # One distance per symbol: 2 points on X, 5 on Y.
+        "one stop per column": (dict(columns=("X", "Y"), size=1, stop_points={"X": 2, "Y": 5}),
+                                {"X": (1.0, (3, 98.0)), "Y": (1.0, (4, 95.0))}),
+        # ⚠️ Aligned with the signals and shifted with them: 2 at the signal bar is the stop, not the
+        # 5 at the fill bar. (A native per-bar sl_stop is read at the fill bar today: lookahead for
+        # a stop worked out from the signal bar's ATR.)
+        "a stop per bar, from the signal bar": (dict(size=1, stop_points=per_bar([9, 2, 5, 9, 9, 9, 9, 9])),
+                                                {"X": (1.0, (3, 98.0))}),
+        # The same for vectorbt's own fractions given per bar: 2% at the signal bar, not 5% at the fill bar.
+        "a % stop per bar, from the signal bar": (dict(size=1, sl_stop=per_bar([0.09, 0.02, 0.05, 0.09, 0.09, 0.09,
+                                                                                0.09, 0.09])),
+                                                  {"X": (1.0, (3, 98.0))}),
+        # Risk sizing from whichever distance is given: 100 at risk over 2 (2% of 100, or 2 points) is 50.
+        "risk sized from a % stop": (dict(risk_amount=100, sl_stop=0.02), {"X": (50.0, (3, 98.0))}),
+        "risk sized from a stop per bar": (dict(risk_amount=100, stop_points=per_bar([9, 2, 5, 9, 9, 9, 9, 9])),
+                                           {"X": (50.0, (3, 98.0))}),
+        "risk sized from a trailing stop": (dict(risk_amount=100, trail_points=2), {"X": (50.0, None)}),
+    }
+    wrong = {}
+    for name, (kwargs, wanted) in cases.items():
+        found = outcome(**kwargs)
+        if name == "risk sized from a trailing stop" and isinstance(found, dict):
+            found = {"X": (found["X"][0], None)}                   # the trail moves the exit; the size is the point
+        if found != wanted:
+            wrong[name] = found
+    detail = "; ".join(f"{name}: {found}" for name, found in wrong.items()) or "every case as wanted"
+    return bool(wrong), f"{len(wrong)} of {len(cases)} cases not as wanted ({detail})"
+
+
+# ---------------------------------------------------------------------------
+# 27. A trailing stop in points widens as the price rises
+# ---------------------------------------------------------------------------
+
+def check_trailing_points_stay_a_distance():
+    # Filled at 120 (bar 2's open), trail 2 points. The high reaches 200.01 on bar 6 and bar 7 dips
+    # to 190, so the stop should fill 2 points behind the peak, at 198.01. A fraction of the fill
+    # price (2 / 120) applied to the peak puts it at 196.68 instead.
+    opens = [100.0, 100.0, 120.0, 140.0, 160.0, 180.0, 200.0, 199.0, 199.0]
+    highs = [value + 0.01 for value in opens]
+    lows = [value - 0.01 for value in opens]
+    lows[7] = 190.0
+    o, h, l, c = frames(opens, highs, lows, opens)
+    entries = mask(c.index, ["X"], [("X", 1)])
+    none = mask(c.index, ["X"], [])
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none,
+                                 instruments={"X": EQUITY}, size=1, trail_points=2, init_cash=10_000, freq="D")
+    sells = pf.orders.records_readable
+    sells = sells[sells["Side"] == "Sell"]
+    price = float(sells["Price"].iloc[0]) if len(sells) else float("nan")
+    present = not abs(price - 198.01) < 1e-6
+    return present, f"the trailing stop fills at {price:.2f}, {200.01 - price:.2f} points behind the peak of 200.01 " \
+                    f"(should be 198.01, 2 points behind)"
+
+
+# ---------------------------------------------------------------------------
+# 28. Risk sizing without a stop: sized from the leverage
+# ---------------------------------------------------------------------------
+
+def check_risk_sizing_without_a_stop():
+    # Risk 1% of 10,000 (100) with no stop. The rule asked for: the stop is the move that takes
+    # the trade's whole margin, 1 / leverage of the price, so the position is worth the risk times
+    # the leverage. Bought outright at 1x that is 100 of stock (the price must fall to zero to
+    # lose it); at 5x it is 500 (a 20% fall loses the 100).
+    opens = [100.0] * 6
+    o, h, l, c = frames(opens)
+    entries = mask(c.index, ["X"], [("X", 1)])
+    none = mask(c.index, ["X"], [])
+    values = {}
+    for leverage in (1.0, 5.0):
+        terms = dict(EQUITY, allow_fractional=True, leverage=leverage)
+        try:
+            pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none, risk_pct=0.01,
+                                         init_cash=10_000, freq="D", **terms)
+        except Exception as error:                                       # noqa: BLE001
+            return True, f"risk_pct with no stop raises ({type(error).__name__}: {str(error)[:90]})"
+        buys = pf.orders.records_readable
+        buys = buys[buys["Side"] == "Buy"]
+        values[leverage] = round(float((buys["Size"] * buys["Price"]).sum()), 2)
+    present = values != {1.0: 100.0, 5.0: 500.0}
+    return present, f"position values {values} (should be 100 at 1x and 500 at 5x)"
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -616,6 +739,10 @@ CHECKS = [
     (24, "Bought outright and FX spot default to 2x leverage", check_unlevered_defaults),
     (25, "An index's point size defaults to 0.01; a share priced in pence is not recognised",
      check_point_size_defaults),
+    (26, "Stops and targets as a vector (per symbol, per bar), and risk sized from them (required feature)",
+     check_stops_that_vary),
+    (27, "A trailing stop in points widens as the price rises", check_trailing_points_stay_a_distance),
+    (28, "Risk sizing without a stop, from the leverage (required feature)", check_risk_sizing_without_a_stop),
 ]
 
 

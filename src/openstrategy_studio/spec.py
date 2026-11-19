@@ -16,7 +16,12 @@ Its shape
                  {"conditions": {"A": condition, "B": ...}, "logic": "A and (B or C)"},
                  or alternatives {"choose": label, "options": {label: rule}}.
     selection, weighting, schedule   (portfolio only)
-    risk         sizing, stop, target, extra exits, order timing (signals only)
+    risk         sizing, stop, target, extra exits, order timing (signals only).
+                 stop {"kind": "none" | "fixed" | "trailing", "unit": "points" | "pct",
+                 "points", "pct"} and target {"kind": "none" | "fixed", "unit", "points",
+                 "pct"}: a distance in points, or a fraction of the price (0.02 = 2%). Each
+                 keeps both distances while it is off or measured the other way, so the
+                 optimiser can switch it (risk.stop.kind, risk.stop.unit, ...).
     account, engine_extra
     optimise     {"variables": {dotted path: {"start", "stop", "step"} | {"values": [...]}}}
 
@@ -62,6 +67,18 @@ TRADING = ["equity", "cfd", "spreadbet", "fx_spot"]
 PRICE_FIELDS = ["open", "high", "low", "close", "volume"]
 SIZING_KEYS = ["risk_pct", "risk_amount", "stake", "notional", "size"]
 EXIT_KEYS = ["time_bars", "breakeven_points", "step_points"]     # the numba exit templates (exit_rules.py)
+# A stop's and a target's kinds and units, and how each reads on the Optimise page. A distance is
+# in points (vectorbtX's stop_points, target_points, trail_points) or a fraction of the price
+# (vectorbt's own sl_stop and tp_stop, which the front door anchors at the fill like a point
+# stop). ⚠️ Both take one number for the whole run, so a stop from a feature (3 x ATR, an EMA)
+# waits on vectorbtX taking a value per bar (docs/UPSTREAM.md issue 26).
+STOP_KINDS = {"none": "no stop", "fixed": "a fixed stop", "trailing": "a trailing stop"}
+TARGET_KINDS = {"none": "no take profit", "fixed": "a take profit"}
+STOP_UNITS = {"points": "in points", "pct": "in % of the price"}
+# The distances a stop and a take profit start from, in each unit: on the Risk tab, in a new
+# strategy, and when a strategy switches to trading on signals. Both are kept while a stop or
+# target is off, so the optimiser can switch it on.
+DISTANCE_DEFAULTS = {"stop": {"points": 50.0, "pct": 0.02}, "target": {"points": 100.0, "pct": 0.04}}
 # Order timing for intraday strategies (docs/UPSTREAM.md issue 20 explains the approximations).
 ORDER_KEYS = ["good_for_day", "flat_by_day_end"]
 COMPARISON_OPS = [">", "<", ">=", "<=", "crosses_above", "crosses_below", "between", "rising", "falling"]
@@ -81,6 +98,8 @@ CALENDAR_FILTERS = ["session", "weekday", "month"]
 # history only. On a higher-timeframe condition the bars are the higher timeframe's.
 TIMING_KEYS = ["for_bars", "within_bars", "bars_ago"]
 PATTERN_SIDES = ["bullish", "bearish", "either"]
+# The timeframes a higher-timeframe condition can read, each counted only once it is above the data's.
+HIGHER_TIMEFRAMES = ["1h", "4h", "1d", "1w", "1M"]
 RULE_SLOTS = ["long_entry", "long_exit", "short_entry", "short_exit"]
 WEIGHT_SCHEMES = ["equal", "inverse_vol", "price", "fixed"]
 SELECTION_MODES = ["top", "bottom", "threshold"]
@@ -260,9 +279,34 @@ def load_template(name):
     return json.loads(entry.read_text(encoding="utf-8"))
 
 
+def blank_spec():
+    """A new, empty strategy: no symbols, features or rules, every stop and target off.
+
+    What the Studio starts with (the owner's call, 19 November 2026: a blank page each time,
+    not a template), and what Start blank gives. Only what a widget needs to show a choice
+    is filled in: trading on signals, bought outright, daily bars, a stake of 1, a starting
+    cash. The dates span the data a user is likely to hold; a backtest uses the bars that
+    exist inside them. validate_spec lists what is still missing (a symbol, an entry rule),
+    which the Build page's At a glance panel shows as a to-do list.
+    """
+    return {
+        "version": SPEC_VERSION,
+        "name": "Untitled strategy",
+        "setup": {"kind": "signals", "trading": "equity"},
+        "data": {"symbols": [], "timeframe": "1d", "start": "2010-01-01", "end": pd.Timestamp.today().date().isoformat()},
+        "instruments": {},
+        "features": {},
+        "rules": {slot: None for slot in RULE_SLOTS},
+        "risk": {"sizing": {"stake": 1.0},
+                 "stop": {"kind": "none", "unit": "points", **DISTANCE_DEFAULTS["stop"]},
+                 "target": {"kind": "none", "unit": "points", **DISTANCE_DEFAULTS["target"]}},
+        "account": {"init_cash": 10000.0, "freq": FREQ["1d"]},
+    }
+
+
 def default_spec():
-    # The MA-cross template is the golden strategy (plan section 12, test 1).
-    return load_template("ma_cross")
+    # A blank strategy, not a template: the templates are offered on Home and the Build page.
+    return blank_spec()
 
 
 # ---------------------------------------------------------------------------
@@ -375,18 +419,34 @@ SLOT_LABELS = {"long_entry": "Long entry", "long_exit": "Long exit", "short_entr
                "short_exit": "Short exit"}
 
 
-def _rule_inputs(out, prefix, rule, where):
-    """The values inside one rule's conditions: the comparison, constants, bars, and bars ago.
+def _rule_inputs(out, prefix, rule, where, timeframe):
+    """The values inside one rule's conditions: the comparison, constants, bars, bars ago and timing,
+    a pattern's side, and a higher-timeframe condition's timeframe (any above the data's).
 
     The comparison is offered within its group of OP_GROUPS only (the same operands), so a
     trial never leaves a condition missing a side. A higher-timeframe filter's comparison
     counts too. Its row carries "labels" (the words the Build page uses) and "suggest"
     (the comparison and its mirror, the Optimise page's starting list).
+
+    A side that reads a feature or a price offers its bars ago even at 0 (written as no
+    shift), so the optimiser can try 0 against 1, 2 ...; a trial writes the number, and 0
+    reads the current bar. A number has no bars ago: shifting a constant changes nothing.
     """
     from .expressions import OP_WORDS
 
     for letter, condition in (rule.get("conditions") or {}).items():
         base = f"{prefix}.conditions.{letter}"
+        if "pattern" in condition:
+            out.append({"path": f"{base}.side", "group": "Rules", "type": "choice",
+                        "value": condition.get("side", "either"), "options": list(PATTERN_SIDES),
+                        "label": f"{where} › {letter} › the pattern's side"})
+        if condition.get("filter") == "higher_timeframe":
+            higher = [name for name in HIGHER_TIMEFRAMES
+                      if TIMEFRAME_MINUTES[name] > TIMEFRAME_MINUTES.get(timeframe, 0)]
+            if len(higher) > 1:
+                out.append({"path": f"{base}.timeframe", "group": "Rules", "type": "choice",
+                            "value": condition.get("timeframe"), "options": higher,
+                            "label": f"{where} › {letter} › the higher timeframe"})
         op = condition.get("op")
         group = None
         for candidates in OP_GROUPS:
@@ -399,12 +459,14 @@ def _rule_inputs(out, prefix, rule, where):
                         "label": f"{where} › {letter} › the comparison"})
         for side in ("left", "right", "lower", "upper"):
             ref = condition.get(side)
-            if isinstance(ref, dict) and "const" in ref:
+            if not isinstance(ref, dict):
+                continue
+            if "const" in ref:
                 out.append({"path": f"{base}.{side}.const", "group": "Rules", "type": "float", "value": ref["const"],
                             "label": f"{where} › {letter} › the number ({side})"})
-            if isinstance(ref, dict) and ref.get("shift"):
-                out.append({"path": f"{base}.{side}.shift", "group": "Rules", "type": "int", "value": ref["shift"],
-                            "label": f"{where} › {letter} › bars ago ({side})"})
+            elif "feature" in ref or "price" in ref:
+                out.append({"path": f"{base}.{side}.shift", "group": "Rules", "type": "int",
+                            "value": int(ref.get("shift") or 0), "label": f"{where} › {letter} › bars ago ({side})"})
         if "bars" in condition:
             out.append({"path": f"{base}.bars", "group": "Rules", "type": "int", "value": condition["bars"],
                         "label": f"{where} › {letter} › bars"})
@@ -444,25 +506,52 @@ def tunable_inputs(spec):
                 row["options"] = [True, False]
             out.append(row)
     rules = spec.get("rules") or {}
+    timeframe = (spec.get("data") or {}).get("timeframe")
     for slot in RULE_SLOTS:
         node = rules.get(slot)
         if is_choice(node):
             out.append({"path": f"rules.{slot}.choose", "group": "Rules", "type": "choice", "value": node["choose"],
                         "options": list(node["options"]), "label": f"{SLOT_LABELS[slot]} › which version"})
             for option, rule in node["options"].items():
-                _rule_inputs(out, f"rules.{slot}.options.{option}", rule, f"{SLOT_LABELS[slot]} ({option})")
+                _rule_inputs(out, f"rules.{slot}.options.{option}", rule, f"{SLOT_LABELS[slot]} ({option})", timeframe)
         elif node:
-            _rule_inputs(out, f"rules.{slot}", node, SLOT_LABELS[slot])
+            _rule_inputs(out, f"rules.{slot}", node, SLOT_LABELS[slot], timeframe)
     risk = spec.get("risk") or {}
-    for key, value in (risk.get("sizing") or {}).items():
+    sizing = risk.get("sizing") or {}
+    for key, value in sizing.items():
         out.append({"path": f"risk.sizing.{key}", "group": "Risk", "type": "float", "value": value,
                     "label": f"Position size ({key})"})
-    if (risk.get("stop") or {}).get("kind") in ("fixed", "trailing"):
-        out.append({"path": "risk.stop.points", "group": "Risk", "type": "float", "value": risk["stop"]["points"],
-                    "label": "Stop distance (points)"})
-    if risk.get("target"):
-        out.append({"path": "risk.target.points", "group": "Risk", "type": "float", "value": risk["target"]["points"],
-                    "label": "Take profit (points)"})
+    # The stop and the target: whether there is one (its kind), how it is measured (its unit), and
+    # its distances. Each keeps both distances while it is off or measured the other way, so a
+    # trial that switches it has one to use.
+    stop = risk.get("stop") or {}
+    exits = risk.get("exits") or {}
+    # Risk sizing reads a fixed stop's distance in points (vectorbtX's resolve_size takes
+    # stop_points only), and the extra exits adjust a fixed stop from its distance in points, so
+    # with either the stop stays fixed and in points: its kind and unit are offered only where
+    # every option is valid, and validate_spec need never reject a trial's.
+    fixed_only = any(key in sizing for key in ("risk_pct", "risk_amount")) or \
+        any(exits.get(key) is not None for key in EXIT_KEYS)
+    for part, kinds, words in (("stop", STOP_KINDS, "Stop"), ("target", TARGET_KINDS, "Take profit")):
+        node = risk.get(part) or {}
+        if "points" not in node:
+            continue
+        kind = node.get("kind", "none")
+        unit = node.get("unit", "points")
+        free = part == "target" or not fixed_only
+        if free:
+            out.append({"path": f"risk.{part}.kind", "group": "Risk", "type": "choice", "value": kind,
+                        "options": list(kinds), "labels": kinds,
+                        "label": "Stop: none, fixed or trailing" if part == "stop" else "Take profit: on or off"})
+        if free and "pct" in node:
+            out.append({"path": f"risk.{part}.unit", "group": "Risk", "type": "choice", "value": unit,
+                        "options": list(STOP_UNITS), "labels": STOP_UNITS,
+                        "label": f"{words}: in points or in % of the price"})
+        for key, measured in (("points", "points"), ("pct", "a fraction of the price: 0.02 = 2%")):
+            if key in node:
+                used = kind != "none" and unit == key
+                out.append({"path": f"risk.{part}.{key}", "group": "Risk", "type": "float", "value": node[key],
+                            "label": f"{words} distance ({measured})" + ("" if used else "; not used now")})
     labels = {"time_bars": "Time stop (bars held)", "breakeven_points": "Breakeven trigger (points)",
               "step_points": "Trailing step (points)"}
     for key in EXIT_KEYS:
@@ -494,6 +583,26 @@ def tunable_inputs(spec):
 def variables(spec):
     """The optimise variables: {dotted path: {"start", "stop", "step"} | {"values": [...]}}."""
     return dict(((spec.get("optimise") or {}).get("variables")) or {})
+
+
+def default_variable(row):
+    """A starting range for one tunable_inputs row: half to double its value, ten steps.
+
+    A choice starts from its suggestion where it has one (a comparison and its mirror),
+    else every option. A whole number at 0 (bars ago on the current bar) starts at 0 to 2.
+    Used wherever a variable is added: the Optimise page, and the Build page's condition
+    panels.
+    """
+    if row["type"] == "choice":
+        return {"values": list(row.get("suggest") or row["options"])}
+    value = row["value"] if isinstance(row["value"], (int, float)) and row["value"] else 1
+    start, stop = (value / 2, value * 2) if value > 0 else (value * 2, value / 2)
+    if row["type"] == "int":
+        start, stop = int(math.floor(start)), int(math.ceil(stop))
+        if stop <= start:
+            stop = start + 1
+        return {"start": start, "stop": stop, "step": max(1, (stop - start) // 10)}
+    return {"start": round(start, 6), "stop": round(stop, 6), "step": round((stop - start) / 10, 6)}
 
 
 def variable_values(variable, kind):
@@ -747,11 +856,14 @@ def _check_risk(problems, spec, kind):
     used = [key for key in SIZING_KEYS if key in sizing]
     stop = risk.get("stop") or {"kind": "none"}
     stop_kind = stop.get("kind", "none")
+    # None (or no target at all) is no take profit; a target written out names its kind.
+    target = risk.get("target") or {"kind": "none"}
+    target_kind = target.get("kind", "none")
     exits = risk.get("exits") or {}
     used_exits = [key for key in EXIT_KEYS if exits.get(key) is not None]
     orders = risk.get("orders") or {}
     if kind == "portfolio":
-        if used or stop_kind != "none" or risk.get("target") or used_exits or any(orders.values()):
+        if used or stop_kind != "none" or target_kind != "none" or used_exits or any(orders.values()):
             problems.append("A portfolio is sized by its weights; remove the sizing, stops, target and order settings.")
         return
     if risk.get("leverage_budget"):
@@ -766,18 +878,46 @@ def _check_risk(problems, spec, kind):
     extra = sorted(set(sizing) - set(SIZING_KEYS))
     if extra:
         problems.append(f"Unknown sizing setting: {', '.join(extra)}.")
-    if stop_kind not in ("none", "fixed", "trailing"):
+    # ⚠️ A stop or target written without its kind would be read as none: the trade would run
+    # unprotected, or keep running past its target, with nothing to say so.
+    if "kind" not in stop:
+        problems.append("The stop must say its kind: none, fixed or trailing.")
+    elif stop_kind not in STOP_KINDS:
         problems.append("The stop must be none, fixed or trailing.")
+    if risk.get("target") and "kind" not in target:
+        problems.append("The take profit must say its kind: none or fixed.")
+    elif target_kind not in TARGET_KINDS:
+        problems.append("The take profit must be none or fixed.")
+    # A distance in points, or a fraction of the price. No unit is points, as it was before there was a choice.
+    stop_unit = stop.get("unit", "points")
+    target_unit = target.get("unit", "points")
+    for words, unit in (("stop", stop_unit), ("take profit", target_unit)):
+        if unit not in STOP_UNITS:
+            problems.append(f"The {words} is measured in points or in % of the price (unit points or pct).")
     if stop_kind in ("fixed", "trailing"):
-        _check_number(problems, "Stop distance (points)", stop.get("points"), minimum=0, allow_zero=False)
+        if stop_unit == "pct":
+            # ⚠️ A fraction, like vectorbt's own sl_stop: 0.02 is 2%, and 2 would be 200%.
+            _check_number(problems, "Stop distance (a fraction of the price)", stop.get("pct"), minimum=0,
+                          allow_zero=False)
+            if isinstance(stop.get("pct"), (int, float)) and stop["pct"] >= 1:
+                problems.append("A stop in % of the price is a fraction (0.02 is 2%); give a number below 1.")
+        else:
+            _check_number(problems, "Stop distance (points)", stop.get("points"), minimum=0, allow_zero=False)
         if "trailing_points" in stop:
             # ⚠️ trail_points overwrites stop_points in vectorbtX: they cannot combine.
             problems.append("A fixed stop and a trailing stop cannot be used together; pick one.")
     if used and used[0] in ("risk_pct", "risk_amount") and stop_kind != "fixed":
         problems.append(f"{used[0]} sizes from the stop distance, so it needs a fixed stop.")
-    target = risk.get("target")
-    if target:
-        _check_number(problems, "Take profit (points)", target.get("points"), minimum=0, allow_zero=False)
+    elif used and used[0] in ("risk_pct", "risk_amount") and stop_unit == "pct":
+        # vectorbtX's risk sizers read stop_points only (docs/UPSTREAM.md issue 26).
+        problems.append(f"{used[0]} sizes from the stop distance in points: vectorbtX cannot size from a stop in % "
+                        "of the price yet. Measure the stop in points, or size by stake or notional.")
+    if target_kind == "fixed":
+        if target_unit == "pct":
+            _check_number(problems, "Take profit (a fraction of the price)", target.get("pct"), minimum=0,
+                          allow_zero=False)
+        else:
+            _check_number(problems, "Take profit (points)", target.get("points"), minimum=0, allow_zero=False)
     unknown = sorted(set(exits) - set(EXIT_KEYS))
     if unknown:
         problems.append(f"Unknown extra exit: {', '.join(unknown)}.")
@@ -789,6 +929,10 @@ def _check_risk(problems, spec, kind):
     if used_exits and stop_kind != "fixed":
         # The templates adjust an existing stop: vectorbt only calls them while a stop is active.
         problems.append("The extra exits (time stop, breakeven, step trailing) adjust a stop, so they need a fixed stop.")
+    elif used_exits and stop_unit == "pct":
+        # The templates start from the stop's distance in points (exit_rules.runtime_values).
+        problems.append("The extra exits (time stop, breakeven, step trailing) start from the stop's distance in "
+                        "points; measure the stop in points to use them.")
     unknown = sorted(set(orders) - set(ORDER_KEYS))
     if unknown:
         problems.append(f"Unknown order setting: {', '.join(unknown)}.")
@@ -954,6 +1098,33 @@ def _check_variables(problems, spec):
         if variable.get("step") is not None:
             _check_number(problems, f"{where} step", variable["step"], minimum=0, allow_zero=False,
                           integer=row["type"] == "int")
+    # ⚠️ A distance no trial uses changes nothing: every trial would be the same backtest, scored
+    # as if the distance had been tried. That is a distance searched while its stop or target is
+    # off, or measured the other way, unless the kind or the unit is searched too.
+    found = variables(spec)
+    risk = spec.get("risk") or {}
+    for part, words in (("stop", "stop"), ("target", "take profit")):
+        node = risk.get(part) or {}
+        reachable = {}
+        for key, now in (("kind", node.get("kind") or "none"), ("unit", node.get("unit") or "points")):
+            # The values a trial may give it: the searched list, else what the spec holds now. (A
+            # malformed variable is named above; it is read as not searched here.)
+            variable = found.get(f"risk.{part}.{key}")
+            reachable[key] = set(variable["values"]) if isinstance(variable, dict) and variable.get("values") \
+                else {now}
+        kinds, units = reachable["kind"], reachable["unit"]
+        for unit in STOP_UNITS:
+            if f"risk.{part}.{unit}" not in found:
+                continue
+            if kinds <= {"none"}:
+                problems.append(f"Optimise variable risk.{part}.{unit}: there is no {words}, so its distance changes "
+                                f"nothing. Turn the {words} on (Build page, Risk tab), or add the {words}'s kind to "
+                                f"the variables as well.")
+            elif unit not in units:
+                other = STOP_UNITS[next(iter(units))] if len(units) == 1 else "another way"
+                problems.append(f"Optimise variable risk.{part}.{unit}: the {words} is measured {other}, so this "
+                                f"distance changes nothing. Measure it {STOP_UNITS[unit]} (Build page, Risk tab), or "
+                                f"add how the {words} is measured to the variables as well.")
 
 
 def validate_spec(spec):

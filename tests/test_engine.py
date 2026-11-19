@@ -92,6 +92,17 @@ def test_trailing_stop_replaces_fixed(ma_spec):
     assert args["trail_points"] == ("lit", 40) and "stop_points" not in args
 
 
+def test_a_stop_or_target_that_is_off_keeps_its_distance_but_is_not_sent(ma_spec):
+    # The distance stays in the spec so the optimiser can switch it on; only the kind says there is one.
+    spec = apply_params(ma_spec, {"risk.target.kind": "none"})
+    spec["risk"]["sizing"] = {"stake": 1.0}
+    spec["risk"]["stop"]["kind"] = "none"
+    args = engine.call_plan(spec)["args"]
+    assert not {"stop_points", "trail_points", "target_points"} & set(args)
+    args = engine.call_plan(apply_params(ma_spec))["args"]
+    assert args["stop_points"] == ("lit", 60) and args["target_points"] == ("lit", 120)
+
+
 def test_portfolio_plan(momentum_spec):
     plan = engine.call_plan(apply_params(momentum_spec))
     args = plan["args"]
@@ -498,7 +509,7 @@ def test_same_bar_stop_and_target():
     # Entry at 100; stop at 98 and target at 102; bar 3's range (97..103) holds both.
     data = bars(opens=[100, 100, 100, 100, 100, 100], highs=[100.5, 100.5, 100.5, 103, 100.5, 100.5],
                 lows=[99.5, 99.5, 99.5, 97, 99.5, 99.5], closes=[100, 100, 100, 100, 100, 100])
-    risk = {"sizing": {"size": 1}, "stop": {"kind": "fixed", "points": 2}, "target": {"points": 2}}
+    risk = {"sizing": {"size": 1}, "stop": {"kind": "fixed", "points": 2}, "target": {"kind": "fixed", "points": 2}}
     run = engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", 5, risk=risk), data)
     when, price = exit_of(run["pf"])
     assert when == data["close"].index[3]
@@ -542,6 +553,44 @@ def test_spread_is_paid_on_every_fill():
     run = engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", 5, risk=risk, spread_points=1.0), gapped)
     _, price = exit_of(run["pf"])
     assert price == pytest.approx(95.0 * (1 - 0.5 / 95.0)), "a gapped stop fills at the open, less half the spread"
+
+
+def test_stops_and_targets_in_percent_are_vectorbts_own_measured_from_the_fill(ma_spec):
+    pytest.importorskip("vectorbtx")
+    # The plan: vectorbt's own fractions, never beside the point keywords for the same leg.
+    spec = apply_params(ma_spec, {"risk.target.unit": "pct"})
+    spec["risk"]["sizing"] = {"stake": 1.0}
+    spec["risk"]["stop"].update(kind="trailing", unit="pct")
+    args = engine.call_plan(spec)["args"]
+    assert args["sl_stop"] == ("lit", 0.02) and args["sl_trail"] == ("lit", True) and args["tp_stop"] == ("lit", 0.04)
+    assert not {"stop_points", "trail_points", "target_points"} & set(args)
+    # A time stop with a target in % needs no far-away point target.
+    spec["risk"]["stop"]["kind"] = "fixed"
+    spec["risk"]["stop"]["unit"] = "points"
+    spec["risk"]["exits"] = {"time_bars": 5}
+    assert "target_points" not in engine.call_plan(spec)["args"]
+    # A run. Entry at bar 1's open (100); a 2% stop sits at 98, and is checked on the entry bar.
+    data = bars(opens=[100] * 6, highs=[100.5] * 6, lows=[99.5, 97.5, 99.5, 99.5, 99.5, 99.5], closes=[100] * 6)
+    risk = {"sizing": {"size": 1}, "stop": {"kind": "fixed", "unit": "pct", "pct": 0.02}}
+    when, price = exit_of(engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", 5, risk=risk), data)["pf"])
+    assert when == data["close"].index[1] and price == pytest.approx(98.0)
+    # A 4% target sits at 104.
+    data = bars(opens=[100] * 6, highs=[100.5, 100.5, 104.5, 100.5, 100.5, 100.5], lows=[99.5] * 6, closes=[100] * 6)
+    risk = {"sizing": {"size": 1}, "stop": {"kind": "none"}, "target": {"kind": "fixed", "unit": "pct", "pct": 0.04}}
+    when, price = exit_of(engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", 5, risk=risk), data)["pf"])
+    assert when == data["close"].index[2] and price == pytest.approx(104.0)
+
+
+def test_a_trailing_stop_in_percent_keeps_its_share_of_the_peak():
+    pytest.importorskip("vectorbtx")
+    # Entry at 120; the high reaches 200.01, then a bar dips to 190. 2% of the peak trails 196.01.
+    opens = [100, 120, 140, 160, 180, 200, 199, 199]
+    lows = [price - 0.01 for price in opens]
+    lows[6] = 190.0
+    data = bars(opens=opens, highs=[price + 0.01 for price in opens], lows=lows, closes=opens)
+    risk = {"sizing": {"size": 1}, "stop": {"kind": "trailing", "unit": "pct", "pct": 0.02}}
+    when, price = exit_of(engine.run_backtest(pulse_spec("long_entry", 0, "long_exit", 7, risk=risk), data)["pf"])
+    assert when == data["close"].index[6] and price == pytest.approx(200.01 * 0.98)
 
 
 def test_trailing_stop_follows_the_peak():

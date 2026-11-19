@@ -29,8 +29,9 @@ import streamlit as st
 from . import config, data as data_module, indicators, style
 from .expressions import (LOGIC_WORDS, append_letter, condition_name_problem, condition_text, next_letter, parse_logic,
                           remove_letter, summary)
-from .spec import (COMPARISON_OPS, PATTERN_SIDES, PRICE_FIELDS, TIMEFRAME_MINUTES, TIMING_KEYS, default_spec,
-                   feature_name_problem, get_path, is_choice, rename_condition, rename_feature, set_path)
+from .spec import (COMPARISON_OPS, HIGHER_TIMEFRAMES, PATTERN_SIDES, PRICE_FIELDS, TIMEFRAME_MINUTES, TIMING_KEYS,
+                   default_spec, default_variable, feature_name_problem, get_path, is_choice, rename_condition,
+                   rename_feature, set_path, tunable_inputs)
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
@@ -186,6 +187,20 @@ def rerun_after(change):
     save_draft()
     renew_widgets()
     st.rerun()
+
+
+def prune_variables():
+    """Drop optimise variables whose value the strategy no longer has.
+
+    Called by any change that removes a value: a rule or condition deleted, a condition's
+    kind or comparison switched, a side switched from a number to a feature, a stop turned
+    into another kind. Without it the variable would stay behind, and validate_spec would
+    say so until it was removed by hand.
+    """
+    known = {row["path"] for row in tunable_inputs(current())}
+    found = (current().get("optimise") or {}).get("variables") or {}
+    for path in [path for path in found if path not in known]:
+        del found[path]
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +391,9 @@ def ref_input(path, features, label, allow_const=True, help=None):
         first = _output_options(features)[:1]
         set_value(path, dict(zip(("feature", "output"), first[0].split(".", 1))) if chosen == "feature" and first
                   else {"price": "close"} if chosen == "price" else {"const": 0.0})
+        # A number's variable goes when the side reads a line instead, and bars ago's the other way.
+        prune_variables()
+        save_draft()
         renew_widgets()
         st.rerun()
     if chosen == "feature":
@@ -399,8 +417,10 @@ def ref_input(path, features, label, allow_const=True, help=None):
         return
     shift = st.number_input("Bars ago", min_value=0, step=1, value=int(ref.get("shift", 0) or 0),
                             key=key(path, ":shift"), help="0 is the current bar. History only: it never moves a "
-                                                          "signal forward.")
-    if shift:
+                                                          "signal forward. It can be optimised, from 0 up, with the "
+                                                          "condition's Optimise list.")
+    # A shift of 0 that a trial wrote (Apply to the strategy) stays: rendering must not change the spec.
+    if shift or "shift" in ref:
         new["shift"] = int(shift)
     if new != ref:
         set_value(path, new)
@@ -531,7 +551,6 @@ def feature_editor(name, feature, features):
 # Calendar and higher-timeframe conditions are both {"filter": ...} in the spec.
 CONDITION_KINDS = {"comparison": "Compare two lines", "pattern": "A pattern appears",
                    "calendar": "Day, month or time of day", "higher": "On a higher timeframe"}
-HIGHER_TIMEFRAMES = ["1h", "4h", "1d", "1w", "1M"]
 TIMING_LABELS = {"now": "On this bar", "for_bars": "On each of the last N bars", "within_bars": "On any of the last N bars",
                  "bars_ago": "N bars ago"}
 
@@ -621,6 +640,8 @@ def _comparison_condition(path, node, features):
             else:
                 changed["right"] = node.get("right", {"const": 0.0})
             set_value(path, changed)
+            prune_variables()
+            save_draft()
             renew_widgets()
             st.rerun()
     with columns[2]:
@@ -704,17 +725,21 @@ def _timing_input(path, node, higher=False):
         help=f"On this bar: as it is now. On each of the last N {unit}: true on this bar and the N - 1 before it, "
              f"such as RSI above 50 for 3 bars in a row. On any of the last N {unit}: true at least once in that "
              f"window, this bar included, such as a cross within the last 5 bars. N {unit} ago: the whole condition "
-             "as it was then, such as a cross 1 bar ago. Each reads past bars only.")
+             "as it was then, such as a cross 1 bar ago. Each reads past bars only. To let the optimiser search N, "
+             "pick one of the last three and add N in the Optimise list below: on each of, or any of, the last 1 "
+             "bar is the same as on this bar, so a search from 1 includes it.")
     if chosen != current:
         changed = {name: value for name, value in node.items() if name not in TIMING_KEYS}
         if chosen != "now":
             changed[chosen] = int(node.get(current) or (1 if chosen == "bars_ago" else 3))
         set_value(path, changed)
+        prune_variables()
+        save_draft()
         renew_widgets()
         st.rerun()
     if chosen != "now":
         bars = columns[1].number_input("N", min_value=1, step=1, value=int(node[chosen]), key=key(f"{path}.{chosen}"),
-                                       help="How many bars. It can be optimised on the Optimise page.")
+                                       help="How many bars. It can be optimised: add it in the Optimise list below.")
         if int(bars) != node[chosen]:
             set_value(f"{path}.{chosen}", int(bars))
 
@@ -741,12 +766,16 @@ def condition_editor(path, name, node, features, timeframe, on_remove, on_rename
                                    help="Compare two lines (fast crosses above slow), a pattern appearing, the day, "
                                         "month or time of day, or a comparison on a higher timeframe (the weekly "
                                         "close above its open). Every rule takes every kind.")
-        head[2].button("Remove", key=key(path, ":remove"), on_click=on_remove)
+        head[2].button("Delete condition", key=key(path, ":remove"), on_click=on_remove,
+                       help="Removes this condition, takes its name out of the logic line, and takes its values "
+                            "off the Optimise page.")
         if typed.strip() != name:
             # A refused name stays in the box with the reason under it, as a broken logic line does.
             st.error(on_rename(typed.strip()))
         if chosen != kind:
             set_value(path, new_condition(chosen, features, timeframe))
+            prune_variables()
+            save_draft()
             renew_widgets()
             st.rerun()
         if kind == "pattern":
@@ -759,6 +788,61 @@ def condition_editor(path, name, node, features, timeframe, on_remove, on_rename
             _comparison_condition(path, node, features)
         if kind != "calendar":
             _timing_input(path, _get(path, node), higher=kind == "higher")
+        _optimise_picker(path)
+
+
+def _optimise_picker(path):
+    """Which of one condition's values the optimiser searches, picked where the condition is built.
+
+    The list is the condition's rows of tunable_inputs, so it offers exactly what the Optimise
+    page does: the comparison, each number, each side's bars ago (0 included), the timing's N,
+    the bars of rising and falling, a pattern's side, a higher timeframe. Picking one adds it
+    to optimise.variables with a starting range (spec.default_variable), as the Optimise
+    page's Add does; the range is changed there. Taking it out of the list removes it.
+    """
+    spec = current()
+    rows = {row["path"]: row for row in tunable_inputs(spec) if row["path"].startswith(path + ".")}
+    if not rows:
+        return
+    found = (spec.get("optimise") or {}).get("variables") or {}
+
+    def shown(row, value):
+        return (row.get("labels") or {}).get(value, value)
+
+    def label(item):
+        row = rows[item]
+        return f"{row['label'].rsplit(' › ', 1)[-1]} (now {shown(row, row['value'])})"
+
+    searched = [item for item in rows if item in found]
+    chosen = st.multiselect("Optimise", list(rows), default=searched, format_func=label, key=key(path, ":optimise"),
+                            placeholder="Nothing in this condition is searched",
+                            help="Let the optimiser search these values of the condition. Each is added to the "
+                                 "Optimise page with a starting range (half to double its value; a comparison "
+                                 "and its mirror; every side of a pattern), where its range or list is set. "
+                                 "Taking one out of this list stops the search on it.")
+    if set(chosen) != set(searched):
+        variables = spec.setdefault("optimise", {}).setdefault("variables", {})
+        for item, row in rows.items():
+            if item in chosen and item not in variables:
+                variables[item] = default_variable(row)
+            elif item not in chosen and item in variables:
+                del variables[item]
+        save_draft()
+        found = variables
+    # What each searched value will try, so the range is in sight without leaving the page.
+    parts = []
+    for item in chosen:
+        variable, row = found.get(item) or {}, rows[item]
+        if "values" in variable:
+            tries = ", ".join(str(shown(row, value)) for value in variable["values"])
+        elif "start" in variable:
+            tries = f"{variable['start']:g} to {variable['stop']:g}" + (f" by {variable['step']:g}"
+                                                                         if variable.get("step") else "")
+        else:
+            continue
+        parts.append(f"{row['label'].rsplit(' › ', 1)[-1]}: {tries}")
+    if parts:
+        st.caption("Searched: " + "; ".join(parts) + ". Change the ranges on the Optimise page.")
 
 
 def _rule_body(path, rule, features, timeframe):
@@ -768,6 +852,7 @@ def _rule_body(path, rule, features, timeframe):
         def remove(letter=letter):
             conditions.pop(letter, None)
             rule["logic"] = remove_letter(rule.get("logic", ""), letter)
+            prune_variables()
             save_draft()
             renew_widgets()
 
@@ -841,9 +926,13 @@ def rule_editor(path, features, timeframe):
             def drop_version():
                 del node["options"][chosen]
                 node["choose"] = next(iter(node["options"]))
+                prune_variables()
             rerun_after(drop_version)
         if len(labels) == 1 and top[2].button("Back to a single rule", key=key(path, ":single")):
-            rerun_after(lambda: set_path(current(), path, node["options"][chosen]))
+            def single():
+                set_path(current(), path, node["options"][chosen])
+                prune_variables()
+            rerun_after(single)
         _rule_body(f"{path}.options.{chosen}", node["options"][chosen], features, timeframe)
         return
     _rule_body(path, node, features, timeframe)

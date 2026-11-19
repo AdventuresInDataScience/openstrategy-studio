@@ -87,9 +87,17 @@
       "notional": 9000
     },
     "stop": {
-      "kind": "none"
+      "kind": "none",
+      "unit": "points",
+      "points": 50,
+      "pct": 0.02
     },
-    "target": null
+    "target": {
+      "kind": "none",
+      "unit": "points",
+      "points": 100,
+      "pct": 0.04
+    }
   },
   "account": {
     "init_cash": 10000,

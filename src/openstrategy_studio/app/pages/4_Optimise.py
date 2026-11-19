@@ -12,7 +12,8 @@ import pandas as pd
 import streamlit as st
 
 from openstrategy_studio import data as data_module, engine, jobs, optimise, ui
-from openstrategy_studio.spec import collect_choices, tunable_inputs, validate_spec, variable_values, variables
+from openstrategy_studio.spec import (collect_choices, default_variable, tunable_inputs, validate_spec, variable_values,
+                                      variables)
 
 settings, data_dir = ui.boot("Optimise")
 ui.page_help("optimise")
@@ -35,24 +36,6 @@ rows = tunable_inputs(spec)
 by_path = {row["path"]: row for row in rows}
 # Read, not created: rendering a page must not change the spec (the section appears on the first Add).
 found = (spec.get("optimise") or {}).get("variables") or {}
-
-
-def default_variable(row):
-    """A starting range around the current value: half to double it, ten steps.
-
-    A choice starts from its suggestion where it has one (a comparison and its mirror),
-    else every option.
-    """
-    if row["type"] == "choice":
-        return {"values": list(row.get("suggest") or row["options"])}
-    value = row["value"] if isinstance(row["value"], (int, float)) and row["value"] else 1
-    start, stop = (value / 2, value * 2) if value > 0 else (value * 2, value / 2)
-    if row["type"] == "int":
-        start, stop = int(math.floor(start)), int(math.ceil(stop))
-        if stop <= start:
-            stop = start + 1
-        return {"start": start, "stop": stop, "step": max(1, (stop - start) // 10)}
-    return {"start": round(start, 6), "stop": round(stop, 6), "step": round((stop - start) / 10, 6)}
 
 
 def write_variables():
@@ -307,7 +290,7 @@ stability = st.checkbox("Check parameter stability (re-run ±10% around the best
 
 row = st.columns([2, 1])
 name = row[0].text_input("Job name", value=f"{spec['name']}: {backend}",
-                         help="How the job is listed here and on the Results page.")
+                         help="How the job is listed here and on the Optimiser results page.")
 workers = row[1].number_input("Worker processes", min_value=1, value=int(settings.get("workers", 1)), step=1,
                               help="Processes running trials side by side. Up to your CPU's core count is faster; "
                                    "each one uses its own memory.")
@@ -332,7 +315,7 @@ if st.button("Start optimisation", type="primary", disabled=blocked):
 
     started = ui.run_guarded("Starting the job", start)
     if started is not None:
-        st.success("Started. Progress is shown below; results are on the Results page.")
+        st.success("Started. Progress is shown below; results are on the Optimiser results page.")
 
 with st.expander("Check the job runner"):
     st.write("Runs a quick job on a synthetic objective (no backtest) to confirm that background jobs work on this machine.")

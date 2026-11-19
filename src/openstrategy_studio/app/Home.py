@@ -6,7 +6,7 @@ import re
 import streamlit as st
 
 from openstrategy_studio import jobs, store, ui
-from openstrategy_studio.spec import (list_templates, load_spec, load_template, strategy_kind,
+from openstrategy_studio.spec import (blank_spec, list_templates, load_spec, load_template, strategy_kind,
                                       validate_spec)
 
 settings, data_dir = ui.boot("Home")
@@ -35,6 +35,11 @@ if draft_path.exists() and not st.session_state.get("draft_offered"):
 left, right = st.columns(2)
 with left:
     st.subheader("Start a strategy")
+    # Each visit starts blank (ui.boot); this starts blank again mid-visit.
+    if st.button("Start blank", help="A new, empty strategy: no symbols, features or rules. It replaces the current "
+                                     "strategy, so save that first if you want to keep it."):
+        ui.replace_spec(blank_spec())
+        st.success("Started a blank strategy. Build it on the Build page.")
     templates = list_templates()
     chosen = st.selectbox("From a template", list(templates), format_func=templates.get,
                           help="A ready-made strategy to start from. Using one replaces the current strategy.")
@@ -63,7 +68,7 @@ with left:
             # Imported specs with Python code warn before running.
             st.session_state["untrusted_python"] = True
             st.warning("This file contains Python code, which runs on your machine. Read it on the "
-                       "Build page before running; the Backtest page will ask you to confirm.")
+                       "Build page before running; the Backtest results page will ask you to confirm.")
         ui.show_problems(problems, "This file has problems")
         if not problems:
             st.success(f"Opened {spec['name']}.")
@@ -76,7 +81,7 @@ with right:
     kinds = {"signals": "Trading on signals", "portfolio": "A portfolio"}
     st.write(f"**{spec.get('name', 'Untitled')}**")
     st.write(f"{kinds.get(strategy_kind(spec), strategy_kind(spec))} ({TRADING_WORDS.get(trading_mode(spec))}), "
-             f"{', '.join(spec['data']['symbols'])} on "
+             f"{', '.join(spec['data']['symbols']) or 'no symbols yet'} on "
              f"{spec['data']['timeframe']} bars, {spec['data']['start']} to {spec['data']['end']}.")
     problems = validate_spec(spec)
     if problems:

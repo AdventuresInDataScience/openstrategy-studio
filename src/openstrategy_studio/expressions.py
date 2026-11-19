@@ -322,9 +322,12 @@ def summary(spec):
                           "notional": f"positions of {_number(value)}", "size": f"size {_number(value)}"}[key])
         stop = risk.get("stop") or {}
         if stop.get("kind") in ("fixed", "trailing"):
-            parts.append(f"{stop['kind']} stop {_number(stop['points'])} pts")
-        if risk.get("target"):
-            parts.append(f"target {_number(risk['target']['points'])} pts")
+            parts.append(f"{stop['kind']} stop " + (f"{stop['pct']:.2%} of the price" if stop.get("unit") == "pct"
+                                                    else f"{_number(stop['points'])} pts"))
+        target = risk.get("target") or {}
+        if target.get("kind") == "fixed":
+            parts.append("target " + (f"{target['pct']:.2%} of the price" if target.get("unit") == "pct"
+                                      else f"{_number(target['points'])} pts"))
         exits = risk.get("exits") or {}
         if exits.get("time_bars") is not None:
             parts.append(f"out after {exits['time_bars']} bars")

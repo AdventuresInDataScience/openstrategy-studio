@@ -1,4 +1,4 @@
-**1. Choose the variables.** Add each value you want searched: a feature's setting (the EMA's period, or a moving average's type), a number in a rule (RSI below 30), a rule's comparison (crosses above or crosses below), a risk dial (the stop distance, the take profit, the bars a trade is held, the size), a portfolio setting, or which version of a rule to use.
+**1. Choose the variables.** Add each value you want searched: a feature's setting (the EMA's period, or a moving average's type), a number in a rule (RSI below 30), a rule's comparison (crosses above or crosses below), a risk dial (the stop distance, the take profit, the bars a trade is held, the size; whether there is a stop and which kind, whether there is a take profit, and whether each is in points or in % of the price), a portfolio setting, or which version of a rule to use.
 
 A comparison swaps only with those that read the same sides: above, below, at or above, at or below and the two crosses with each other, and rising with falling (between swaps with nothing). Letting the optimiser pick the direction is choosing the idea after seeing the data, so judge it on held-back history or walk-forward.
 
@@ -10,4 +10,4 @@ For each, give **a range** (start, step, stop) or **a list of values**. The grid
 
 **4. Hold some history back.** The optimiser never sees the held-back part; the best result is then run on it once. Walk-forward does this repeatedly.
 
-Jobs run in the background and keep going if you close the page. Results are on the **Results** page, where **Apply to the strategy** writes the best values back.
+Jobs run in the background and keep going if you close the page. Results are on the **Optimiser results** page, where **Apply to the strategy** writes the best values back.

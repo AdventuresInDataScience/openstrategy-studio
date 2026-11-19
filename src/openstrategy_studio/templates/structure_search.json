@@ -142,10 +142,15 @@
     },
     "stop": {
       "kind": "fixed",
-      "points": 60
+      "unit": "points",
+      "points": 60,
+      "pct": 0.02
     },
     "target": {
-      "points": 120
+      "kind": "fixed",
+      "unit": "points",
+      "points": 120,
+      "pct": 0.04
     }
   },
   "account": {
