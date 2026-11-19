@@ -903,3 +903,153 @@ def test_every_card_folds_by_its_title(tmp_path, monkeypatch):
     assert app.number_input(key=current_key(app, "features.fast.params.timeperiod")).value == 50
     assert app.session_state["spec"] == spec                            # folding changes nothing in the strategy
     assert not app.exception, [item.value for item in app.exception]
+
+
+def finished_job(tmp_path, held_back=0.3, constraints=None):
+    """A small real optimisation (the MA cross on synthetic prices, six random trials, 30% held back), run in
+    this process: the worker's own main, on a job folder written as jobs.start_job writes one."""
+    import pickle
+    from openstrategy_studio import config, jobs, optimise, store, worker
+    from conftest import make_ohlcv
+
+    data_dir = config.data_dir(config.load_settings())
+    spec = load_template("ma_cross")
+    spec["account"].pop("rates")
+    spec["features"]["fast"]["params"]["timeperiod"] = 5
+    spec["features"]["slow"]["params"]["timeperiod"] = 20
+    spec["optimise"]["variables"] = {"features.fast.params.timeperiod": {"start": 3, "stop": 8, "step": 1},
+                                     "features.slow.params.timeperiod": {"start": 15, "stop": 30, "step": 5}}
+    job = {"name": "MA cross: random", "kind": "optimise", "spec": spec, "space": optimise.build_space(spec),
+           "compare": None, "backend": "random", "backend_options": {"batch": 1}, "budget": 6, "metric": "sharpe",
+           "direction": "maximize", "seed": 0, "workers": 1, "settings": config.load_settings(),
+           "constraints": constraints or {}, "split": {"train_fraction": 1 - held_back} if held_back else None,
+           "walk_forward": None, "stability": False, "job_id": "test-job", "created_at": jobs.now(),
+           "data_dir": str(data_dir)}
+    job_dir = data_dir / "jobs" / "test-job"
+    job_dir.mkdir(parents=True)
+    jobs.write_json(job_dir / "job.json", job)
+    with open(job_dir / "frames.pkl", "wb") as handle:
+        pickle.dump(make_ohlcv(500, ("EURUSD=X",)), handle)
+    jobs.write_json(job_dir / "progress.json", {"status": "starting", "done": 0, "budget": 6, "updated_at": jobs.now()})
+    store.add_job(data_dir, "test-job", job["name"], "optimise", "random", job["created_at"], job_dir)
+    assert worker.main(job_dir) == "done", jobs.read_progress(job_dir).get("error")
+    return job_dir
+
+
+def test_the_optimiser_results_lead_with_the_best_settings_in_and_out_of_sample(tmp_path, monkeypatch):
+    """The answer first (the owner's call, 20 November 2026): the best settings named as the strategy names
+    them, the objective in sample and out of sample, and the best trial's backtest with its numbers in each
+    part; the trials table names the settings the same way."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import jobs
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    job_dir = finished_job(tmp_path)
+    summary = jobs.read_summary(job_dir)
+    app = testing.AppTest.from_file(str(APP / "pages" / "5_Optimiser_results.py"), default_timeout=180)
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    metrics = {item.label: item.value for item in app.metric}
+    assert metrics["Sharpe ratio, out of sample"] == f"{summary['held_out']['metric']:.4g}"
+    assert "Sharpe ratio, in sample" in metrics
+    settings_table = app.dataframe[0].value
+    assert list(settings_table.columns) == ["Setting", "Best", "When the job ran", "Searched"]
+    assert set(settings_table["Setting"]) == {"fast › timeperiod", "slow › timeperiod"}
+    assert set(settings_table["Searched"]) == {"3 to 8 by 1", "15 to 30 by 5"}
+    best = summary["best_params"]
+    assert settings_table.set_index("Setting").loc["fast › timeperiod", "Best"] == str(best["features.fast.params.timeperiod"])
+    # The trials table names the settings too, never as param: paths.
+    trials_table = app.dataframe[-1].value
+    assert "fast › timeperiod" in trials_table.columns and not any(str(c).startswith("param:") for c in trials_table.columns)
+    # The best trial's backtest: its out-of-sample objective is the job's held-back number.
+    next(button for button in app.button if button.label == "Show its backtest").click().run()
+    assert not app.exception, [item.value for item in app.exception]
+    shown = app.session_state["best_backtest"]
+    assert shown["split"] is not None
+    table = shown["table"]
+    assert list(table.columns) == ["In sample (searched)", "Out of sample (held back)", "Whole period"]
+    assert table.loc["Sharpe ratio (the objective)", "Out of sample (held back)"] == f"{summary['held_out']['metric']:.4g}"
+    assert "Sharpe ratio" not in table.index          # the objective is not listed twice
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
+def test_the_best_trials_chart_marks_where_the_held_back_part_starts():
+    """A dashed line at the first held-back bar, that part shaded, both sides labelled, on every view."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import analysis, engine
+    from conftest import make_ohlcv
+
+    spec = load_template("ma_cross")
+    spec["account"].pop("rates")
+    frames = make_ohlcv(300, ("EURUSD=X",))
+    results = analysis.extract_results(engine.run_backtest(spec, frames), benchmark=True)
+    split = frames["close"].index[200]
+    for view in analysis.SPLIT_VIEWS:
+        fig = analysis.fig_split(results, split, "page", view=view, symbol="EURUSD=X")
+        kinds = sorted(shape.type for shape in fig.layout.shapes)
+        assert kinds == ["line", "rect"], (view, kinds)
+        assert [shape.line.dash for shape in fig.layout.shapes if shape.type == "line"] == ["dash"]
+        assert any("Out of sample" in note.text for note in fig.layout.annotations), view
+    # With nothing held back, nothing is marked.
+    assert not analysis.fig_split(results, None, "page").layout.shapes
+
+
+def test_the_optimise_page_has_no_job_runner_check(tmp_path, monkeypatch):
+    """The self-test job was for checking an install, not for a user (the owner's call, 20 November 2026)."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert not [panel for panel in app.expander if "job runner" in panel.label]
+    assert not [button for button in app.button if "self-test" in button.label.lower()]
+
+
+def test_a_running_job_shows_its_stage_progress_and_time_left(tmp_path, monkeypatch):
+    """A running job is a card: what it is doing in words, a bar of trials done, the best so far, how long it
+    has run and how long is left at the pace so far (the owner's call, 20 November 2026)."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    import os
+    from openstrategy_studio import config, jobs, store
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    data_dir = config.data_dir(config.load_settings())
+    job_dir = data_dir / "jobs" / "running-job"
+    job_dir.mkdir(parents=True)
+    minute_ago = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(seconds=60)).isoformat()
+    jobs.write_json(job_dir / "progress.json", {
+        "status": "running", "done": 10, "budget": 40, "best_value": 0.71, "pid": os.getpid(),
+        "started_at": (pd.Timestamp.now(tz="UTC") - pd.Timedelta(seconds=150)).isoformat(),
+        "searching_since": minute_ago, "updated_at": jobs.now(), "stage": "Searching"})
+    (job_dir / "heartbeat").touch()
+    store.add_job(data_dir, "running-job", "MA cross: optuna", "optimise", "optuna", jobs.now(), job_dir)
+    app = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    (bar,) = app.get("progress")
+    text = bar.proto.text
+    # 30 trials left at 10 a minute: about 3 minutes.
+    assert "10 of 40 trials" in text and "best so far 0.71" in text and "about 3 min left" in text, text
+    assert any("Searching" in item.value for item in app.markdown if "os-meta" in item.value)
+    assert [button for button in app.button if button.key == "cancel:running-job"]
+
+
+def test_a_job_with_no_valid_trial_says_why(tmp_path, monkeypatch):
+    """Every trial under the minimum trades: the page says so, with the commonest reason, not an empty page."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    finished_job(tmp_path, constraints={"min_trades": 100000})
+    app = testing.AppTest.from_file(str(APP / "pages" / "5_Optimiser_results.py"), default_timeout=180)
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    (warning,) = [item.value for item in app.warning if "No trial was valid" in item.value]
+    assert "Most often: only N trades (6 of 6 trials)" in warning and "The most trades any trial made was" in warning
+    assert not [item for item in app.metric if "in sample" in item.label]

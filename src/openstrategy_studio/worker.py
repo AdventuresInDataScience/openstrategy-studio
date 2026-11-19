@@ -1,9 +1,12 @@
 """Entry point of a background job: python -m openstrategy_studio.worker <job_dir>.
 
 The worker creates its own process pool (each process loads the job's data
-once in its initialiser), runs the backend, and after every batch appends to
-trials.parquet and rewrites progress.json. Cancel creates a `cancel` file that
-is checked before every batch.
+once in its initialiser), runs the backend, rewrites progress.json as each trial
+finishes (with a stage in words, for the Optimise page's progress bar) and
+appends to trials.parquet after every batch. A thread touches `heartbeat` every
+few seconds, so a page can tell a worker that died (its window closed, the
+machine out of memory) from a slow one (jobs.read_progress). Cancel creates a
+`cancel` file that is checked before every batch.
 
 Job kinds:
     optimise       one search, then the held-back test and the stability check
@@ -16,8 +19,9 @@ import json
 import os
 import pickle
 import sys
+import threading
 import traceback
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -31,10 +35,23 @@ def main(job_dir):
     job = jobs.read_job(job_dir)
     direction = job["direction"]
     rows = []
+    # `done` counts search trials only, so it is measured against the budget (the held-back test
+    # and the stability re-runs are extra). `stage` says in words what is happening now.
     progress = {"status": "running", "done": 0, "budget": job["budget"], "best_value": None,
-                "best_params": None, "pid": os.getpid(), "started_at": jobs.now()}
+                "best_params": None, "pid": os.getpid(), "started_at": jobs.now(),
+                "stage": "Loading the data and the backtest engine", "searching_since": None}
     summary = {}
     pool = None
+    # The heartbeat: touched every few seconds from a thread of its own, whatever the search is
+    # doing, so a stale one means the process has gone (jobs.read_progress checks).
+    beating = threading.Event()
+
+    def heartbeat():
+        while not beating.wait(jobs.HEARTBEAT_SECONDS):
+            (job_dir / "heartbeat").touch()
+
+    (job_dir / "heartbeat").touch()
+    threading.Thread(target=heartbeat, name="openstrategy-heartbeat", daemon=True).start()
     # Which backend run the next trials belong to (the comparison harness runs several).
     current = {"backend": job["backend"], "seed": job["seed"], "run_trial": 0, "fold": None}
 
@@ -43,8 +60,27 @@ def main(job_dir):
         # Atomically, because the Results page may be reading it at that moment.
         if rows:
             jobs.write_parquet(job_dir / "trials.parquet", pd.DataFrame(rows))
+        write_progress()
+
+    def write_progress():
         progress["updated_at"] = jobs.now()
         jobs.write_json(job_dir / "progress.json", progress)
+
+    def finished(result, phase):
+        """One trial back: count it (search trials only), keep the best so far, and say so at once."""
+        if phase != "search":
+            return
+        progress["done"] += 1
+        if progress["searching_since"] is None:
+            progress["searching_since"] = jobs.now()
+        progress["stage"] = "Searching"
+        value = result["objective"]
+        if np.isfinite(value):
+            best = progress["best_value"]
+            if best is None or (value > best if direction == "maximize" else value < best):
+                progress["best_value"] = float(value)
+                progress["best_params"] = result["params"]
+        write_progress()
 
     def evaluate(params_list, window=None, phase="search", want_returns=False):
         """Run a batch through the pool, record every trial, return the full results."""
@@ -59,10 +95,21 @@ def main(job_dir):
                 results = [result for chunk in pool.map(optimise.evaluate_chunk, chunks) for result in chunk]
             else:
                 results = [result for chunk in chunks for result in optimise.evaluate_chunk(chunk)]
+            for result in results:
+                finished(result, phase)
         elif pool is not None and len(tasks) > 1:
-            results = list(pool.map(optimise.evaluate_trial, tasks))
+            # Each trial is counted as it comes back, not when the whole batch has, so the page's
+            # progress bar moves steadily; the results keep the batch's order.
+            results = [None] * len(tasks)
+            futures = {pool.submit(optimise.evaluate_trial, task): number for number, task in enumerate(tasks)}
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+                finished(results[futures[future]], phase)
         else:
-            results = [optimise.evaluate_trial(task) for task in tasks]
+            results = []
+            for task in tasks:
+                results.append(optimise.evaluate_trial(task))
+                finished(results[-1], phase)
         for result in results:
             row = {key: value for key, value in result.items() if key not in ("params", "returns")}
             row.update(trial=len(rows), phase=phase, fold=current["fold"], params_json=json.dumps(result["params"]),
@@ -72,13 +119,6 @@ def main(job_dir):
             for name, value in result["params"].items():
                 row[f"param:{name}"] = value
             rows.append(row)
-            progress["done"] += 1
-            value = result["objective"]
-            if phase == "search" and np.isfinite(value):
-                best = progress["best_value"]
-                if best is None or (value > best if direction == "maximize" else value < best):
-                    progress["best_value"] = float(value)
-                    progress["best_params"] = result["params"]
         flush()
         return results
 
@@ -103,10 +143,17 @@ def main(job_dir):
         return pick(found, key=lambda row: row["objective"])
 
     try:
+        write_progress()
         optimise.init_worker(job_dir)           # this process evaluates too
         if int(job.get("workers", 1)) > 1:
             pool = ProcessPoolExecutor(max_workers=int(job["workers"]), initializer=optimise.init_worker,
                                        initargs=(str(job_dir),))
+            # The pool's processes start with the first batch, and each loads the data and the
+            # backtest engine before its first trial: the slow part of a job's start.
+            progress["stage"] = (f"Starting {int(job['workers'])} worker processes: each loads the backtest "
+                                 "engine before its first trial")
+        else:
+            progress["stage"] = "Searching"
         flush()
         space = job["space"]
         index = optimise.CONTEXT["data"]["close"].index
@@ -119,11 +166,12 @@ def main(job_dir):
             folds = optimise.walk_forward_folds(index, int(settings["window"]), int(settings["step"]),
                                                 settings.get("mode", "rolling"))
             per_fold = max(1, job["budget"] // max(1, len(folds)))
-            progress["budget"] = per_fold * len(folds) + len(folds)
+            progress["budget"] = per_fold * len(folds)          # search trials; each fold's test is extra
             fold_rows = []
             stitched = []
             for number, fold in enumerate(folds):
                 current["fold"] = number
+                progress["fold"] = f"fold {number + 1} of {len(folds)}"
                 best = search(space, per_fold, fold["in_sample"], job["seed"] + number, label=f"fold-{number}")
                 if best is None:
                     fold_rows.append({"fold": number, "in_sample": [str(t) for t in fold["in_sample"]],
@@ -167,11 +215,15 @@ def main(job_dir):
                 summary["best_params"] = params
                 summary["best_value"] = float(best["objective"])
                 if test is not None:
+                    progress["stage"] = "Testing the best settings on the held-back history"
+                    write_progress()
                     outcome = evaluate([params], test, "held_out")[0]
                     summary["held_out"] = {key: outcome.get(key) for key in
                                            ("metric", "sharpe", "total_return", "max_drawdown", "n_trades")}
                     summary["held_out"]["window"] = [str(test[0]), str(test[1])]
                 if job.get("stability"):
+                    progress["stage"] = "Re-running settings near the best (the stability check)"
+                    write_progress()
                     # Re-evaluate a ±10% neighbourhood of the best point.
                     points = optimise.neighbourhood(space, params, seed=job["seed"])
                     results = []
@@ -191,6 +243,7 @@ def main(job_dir):
         progress["status"] = "failed"
         progress["error"] = traceback.format_exc()
     finally:
+        beating.set()
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
         summary.setdefault("n_trials", sum(1 for row in rows if row.get("phase") == "search"))

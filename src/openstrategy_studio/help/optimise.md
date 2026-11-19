@@ -10,4 +10,4 @@ For each, give **a range** (start, step, stop) or **a list of values**. The grid
 
 **4. Hold some history back.** The optimiser never sees the held-back part; the best result is then run on it once. Walk-forward does this repeatedly.
 
-Jobs run in the background and keep going if you close the page. Results are on the **Optimiser results** page, where **Apply to the strategy** writes the best values back.
+Jobs run in the background, with no window of their own, and keep going if you close the page. Under **Jobs**, each running job shows what it is doing, a bar of trials done, the best so far, how long it has run and about how long is left. The first trials take longest, while each worker process loads the backtest engine; more worker processes run more trials at once but each needs its own memory. A job whose process ended from outside (the computer restarted, or ran out of memory) is marked **stopped**, with what it had done. Results are on the **Optimiser results** page, where **Apply to the strategy** writes the best values back.

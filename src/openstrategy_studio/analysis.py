@@ -801,6 +801,84 @@ def fig_walk_forward(returns, theme, glow=False):
     return finish(fig, theme, glow)
 
 
+def split_backtest(job, frames, params, settings):
+    """An optimisation's best trial as a backtest: the whole history, and its numbers in sample,
+    out of sample and over the whole period.
+
+    In sample and out of sample are runs of their own on each window, each starting from the
+    starting cash, exactly as the optimiser scored the search and the held-back check (window=
+    slices the run after compiling on the full history, so indicators are warm and nothing looks
+    ahead): their numbers match the job's. The whole period is one account from the first bar to
+    the last, for the chart. A job with nothing held back has the whole period only.
+
+    Returns {"results": extract_results of the whole run (with buy and hold), "split": the first
+    held-back bar or None, "table": the numbers by window, formatted for the page}.
+    """
+    from .optimise import METRICS, split_window, trial_extras
+
+    keywords = {"data_dir": job.get("data_dir"), "offline": bool(settings.get("offline")),
+                "static_rate": (settings.get("vectorbtx") or {}).get("static_rate")}
+    whole = engine.run_backtest(job["spec"], frames, params=params, **keywords)
+    windows = {"Whole period": None}
+    split = None
+    if job.get("split"):
+        train, test = split_window(frames["close"].index, float(job["split"]["train_fraction"]))
+        windows = {"In sample (searched)": train, "Out of sample (held back)": test, "Whole period": None}
+        split = test[0]
+    metric = METRICS.get(job["metric"])
+    columns = {}
+    for label, window in windows.items():
+        run = whole if window is None else engine.run_backtest(job["spec"], frames, params=params, window=window,
+                                                               **keywords)
+        pf = run["pf"]
+        extras = trial_extras(pf)
+        index = pf.wrapper.index
+        numbers = {"Total return": f"{extras['total_return']:.1%}", "Max drawdown": f"{extras['max_drawdown']:.1%}",
+                   "Sharpe ratio": f"{extras['sharpe']:.4g}", "Trades": f"{extras['n_trades']:,}",
+                   "Profit factor": f"{extras['profit_factor']:.4g}"}
+        values = {"From": str(index[0])[:10], "To": str(index[-1])[:10]}
+        if metric is not None and metric["label"] in numbers:
+            # The objective is one of the usual numbers: that row, marked, rather than the number twice.
+            numbers = {(f"{name} (the objective)" if name == metric["label"] else name): value
+                       for name, value in numbers.items()}
+        elif metric is not None:
+            values[f"{metric['label']} (the objective)"] = f"{metric['fn'](pf):.4g}"
+        values.update(numbers)
+        columns[label] = values
+    return {"results": extract_results(whole, benchmark=True), "split": split, "table": pd.DataFrame(columns)}
+
+
+def mark_split(fig, split, end, theme):
+    """A dashed line where the held-back data starts, that part shaded and both sides labelled.
+
+    The colour is the chart theme's own text colour, so it reads on any theme. ⚠️ No annotation on
+    add_vline / add_vrect: plotly averages the two ends to place one, which fails on dates.
+    """
+    template = pio.templates[theme] if theme in pio.templates else None
+    colour = (template.layout.font.color if template is not None and template.layout.font.color else None) or "#888888"
+    fig.add_vrect(x0=split, x1=end, fillcolor=colour, opacity=0.06, line_width=0, layer="below")
+    fig.add_vline(x=split, line_dash="dash", line_width=1.5, line_color=colour)
+    for text, anchor in (("In sample ◂ ", "right"), (" ▸ Out of sample (held back)", "left")):
+        fig.add_annotation(x=split, y=1, yref="paper", yanchor="top", xanchor=anchor, text=text, showarrow=False,
+                           font={"color": colour, "size": 12})
+    return fig
+
+
+# The views of a best trial's backtest that run along the dates, so the held-back part can be marked.
+SPLIT_VIEWS = {"equity": "Equity vs buy and hold", "drawdown": "Underwater drawdown", "price": "Price chart with trades"}
+
+
+def fig_split(results, split, theme, glow=False, view="equity", symbol=None):
+    """One of SPLIT_VIEWS for a best trial's backtest, with the held-back part marked (mark_split)."""
+    if view == "price":
+        fig = fig_price(results, theme, symbol=symbol)
+    else:
+        fig = FIGURES[view]["fn"](results, theme, glow)
+    if split is not None:
+        mark_split(fig, split, results["series"].index[-1], theme)
+    return fig
+
+
 def fig_compare(curves, theme, glow=False):
     """Equity curves of several saved runs, each rebased to 1."""
     fig = go.Figure()

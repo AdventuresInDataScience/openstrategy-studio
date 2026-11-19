@@ -5,7 +5,8 @@ live in the session. A job is a folder, <data_dir>/jobs/<job_id>/:
 
     job.json         what to run: spec, space, backend, budget, objective, constraints, seed
     frames.pkl       the data snapshot every worker process loads once
-    progress.json    rewritten by the worker after every batch (done, budget, best so far)
+    progress.json    rewritten by the worker as each trial finishes (done, budget, best so far, stage)
+    heartbeat        touched by the worker every HEARTBEAT_SECONDS, so a dead one can be told from a slow one
     trials.parquet   one row per evaluated trial
     summary.json     best trial, held-out result, stability, walk-forward results
     cancel           created by Cancel; the worker checks it before every batch
@@ -85,9 +86,15 @@ def start_job(data_dir, job, frames):
     write_json(job_dir / "progress.json", {"status": "starting", "done": 0, "budget": job["budget"],
                                           "updated_at": now()})
     options = {"stdout": None, "stderr": subprocess.STDOUT, "cwd": str(job_dir)}
-    # Detach, so the job outlives the Streamlit session that started it.
+    # Its own process group, so the job outlives the Streamlit session that started it.
+    # ⚠️ On Windows, CREATE_NO_WINDOW, never DETACHED_PROCESS: a venv's python.exe is a launcher that
+    # starts the real interpreter as a child, and a detached launcher's child opens a console window of
+    # its own, the empty black window a job used to bring up (the owner, 20 November 2026). Closing that
+    # window killed the job with nothing recorded. CREATE_NO_WINDOW gives the worker a console with no
+    # window, which the interpreter and the job's pool processes inherit, so nothing shows; and as it is
+    # not the Streamlit console, closing that one does not stop the job.
     if os.name == "nt":
-        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     else:
         options["start_new_session"] = True
     from .cli import self_command    # `python -m ...` normally; the bundle's own executable when frozen
@@ -104,20 +111,79 @@ def read_job(job_dir):
 
 
 STARTUP_GRACE_SECONDS = 60
+# The worker touches its heartbeat file this often, from a thread of its own (worker.main), and a
+# job whose heartbeat is this much older, and whose process has gone, has stopped.
+HEARTBEAT_SECONDS = 5
+STALE_SECONDS = 30
+
+
+def process_alive(pid):
+    """Whether a process with this id is running, without touching it.
+
+    ⚠️ Never os.kill(pid, 0) on Windows: there it terminates the process. OpenProcess asks only to
+    read its exit code; a process another user owns refuses even that, and counts as alive.
+    """
+    if not pid:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))      # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return kernel32.GetLastError() == 5                     # ERROR_ACCESS_DENIED: it exists
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _seconds_since(stamp):
+    return (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds()
 
 
 def read_progress(job_dir):
-    """The worker's progress. A worker that died before it could write any shows as failed, with its log."""
+    """The worker's progress, with a worker that has died shown as such rather than running for ever.
+
+    A worker that died before it could write any shows as failed, with its log. One that dies
+    later (its window closed, the machine out of memory, a hard crash) writes nothing at all, so
+    it is judged from outside: its heartbeat has gone quiet AND its process has gone (a quiet
+    heartbeat alone may be a machine that slept). Then it is "stopped", with what is known, and
+    that is written back, so the verdict survives the process id being reused. A job from before
+    the heartbeat is judged by its process alone.
+    """
     job_dir = Path(job_dir)
     progress = read_json(job_dir / "progress.json", default={"status": "unknown", "done": 0, "budget": 0})
     if progress["status"] == "starting":
         log = job_dir / "worker.log"
-        age = datetime.now(timezone.utc) - datetime.fromisoformat(progress["updated_at"])
+        age = _seconds_since(progress["updated_at"])
         text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
-        if text.strip() and age.total_seconds() > 2 and ("Error" in text or "Traceback" in text):
+        if text.strip() and age > 2 and ("Error" in text or "Traceback" in text):
             progress.update(status="failed", error=text[-4000:])
-        elif age.total_seconds() > STARTUP_GRACE_SECONDS:
+        elif age > STARTUP_GRACE_SECONDS:
             progress.update(status="failed", error=text[-4000:] or "The worker process never started.")
+    elif progress["status"] == "running":
+        beat = job_dir / "heartbeat"
+        quiet = (datetime.now().timestamp() - beat.stat().st_mtime if beat.exists()
+                 else _seconds_since(progress.get("updated_at") or progress["started_at"]))
+        if quiet > STALE_SECONDS and not process_alive(progress.get("pid")):
+            last = datetime.fromtimestamp(beat.stat().st_mtime, timezone.utc).isoformat(timespec="seconds") \
+                if beat.exists() else progress.get("updated_at", "")
+            progress.update(status="stopped", stopped_at=last, error=(
+                f"The job stopped without finishing, after {progress.get('done', 0)} of "
+                f"{progress.get('budget', 0)} trials (last heard from at {last[:19].replace('T', ' ')} UTC). "
+                "Nothing went wrong in the search itself, or it would say so: the worker process ended from "
+                "outside, as when its window is closed, the computer runs out of memory (try fewer worker "
+                "processes) or it restarts. Start the job again."))
+            write_json(job_dir / "progress.json", progress)
     return progress
 
 
@@ -150,5 +216,9 @@ def list_jobs(data_dir):
         rows.append({"job_id": job["job_id"], "name": job["name"], "kind": job["kind"],
                      "backend": job["backend"], "created_at": job["created_at"], "status": progress["status"],
                      "done": progress.get("done", 0), "budget": progress.get("budget", 0),
-                     "best_value": progress.get("best_value"), "path": job["path"]})
+                     "best_value": progress.get("best_value"), "path": job["path"],
+                     # For the Optimise page's progress card: what it is doing, and since when.
+                     "stage": progress.get("stage"), "fold": progress.get("fold"),
+                     "started_at": progress.get("started_at"), "searching_since": progress.get("searching_since"),
+                     "error": progress.get("error")})
     return pd.DataFrame(rows)

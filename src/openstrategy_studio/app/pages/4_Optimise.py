@@ -7,7 +7,6 @@ Jobs run in a separate process, so they keep going if you close the page.
 import importlib.util
 import math
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -325,20 +324,8 @@ if st.button("Start optimisation", type="primary", disabled=blocked):
 
     started = ui.run_guarded("Starting the job", start)
     if started is not None:
-        st.success("Started. Progress is shown below; results are on the Optimiser results page.")
-
-with st.expander("Check the job runner"):
-    st.write("Runs a quick job on a synthetic objective (no backtest) to confirm that background jobs work on this machine.")
-    if st.button("Run a self-test job"):
-        index = pd.bdate_range("2020-01-01", periods=10)
-        frames = {"close": pd.DataFrame({"X": np.ones(10)}, index=index)}
-        job = {"name": "Self-test", "kind": "optimise", "spec": {}, "space": {"a": {"min": 0.0, "max": 10.0},
-               "b": {"min": 1, "max": 50, "int": True}, "c": {"values": ["x", "y", "z"]}},
-               "backend": "random", "backend_options": {"batch": 4}, "budget": 64, "metric": "selftest",
-               "direction": "maximize", "seed": 0, "workers": 1, "settings": settings, "constraints": {},
-               "split": None, "walk_forward": None, "stability": False}
-        jobs.start_job(data_dir, job, frames)
-        st.success("Self-test started. It should finish within seconds with a best value near 1.0.")
+        st.success("Started, in the background: it keeps going if you leave this page. Its progress is under Jobs "
+                   "below. The first trials take longest, while each worker process loads the backtest engine.")
 
 # --- jobs ---------------------------------------------------------------------------------
 st.subheader("Jobs")
@@ -346,24 +333,74 @@ listing = jobs.list_jobs(data_dir)
 running = not listing.empty and listing["status"].isin(["starting", "running"]).any()
 
 
+def took(seconds):
+    """A duration in words: 40 s, 3 min, 1 h 20 min."""
+    seconds = max(0, int(seconds))
+    if seconds < 90:
+        return f"{seconds} s"
+    if seconds < 3600:
+        return f"{round(seconds / 60)} min"
+    return f"{seconds // 3600} h {round(seconds % 3600 / 60)} min"
+
+
+def since(stamp):
+    """Seconds since an ISO time a job wrote (UTC), or None."""
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    return (pd.Timestamp.now(tz="UTC") - pd.Timestamp(stamp)).total_seconds()
+
+
 @st.fragment(run_every="3s" if running else None)
 def job_list():
+    """Each running job as a card: what it is doing, how far it has got, how long is left. Redrawn every
+    few seconds while one runs; the rest in a table, with the results a click away."""
     current = jobs.list_jobs(data_dir)
     if current.empty:
         st.write("No jobs yet.")
         return
     for job in current.itertuples():
-        if job.status in ("starting", "running"):
-            with st.container(border=True):
-                done, total = int(job.done or 0), max(1, int(job.budget or 1))
-                st.progress(min(1.0, done / total), text=f"{job.name}: {done} of {total} trials, best "
-                            f"{'—' if job.best_value is None or pd.isna(job.best_value) else f'{job.best_value:.4g}'}")
-                if st.button("Cancel", key=f"cancel:{job.job_id}"):
-                    jobs.cancel_job(job.path)
-                    st.toast("Cancelling after the current batch.")
+        if job.status not in ("starting", "running"):
+            continue
+        with ui.card(f"job-{job.job_id}", "setup"):
+            done, total = int(job.done or 0), max(1, int(job.budget or 1))
+            stage = "Starting the worker" if job.status == "starting" else (job.stage or "Searching")
+            if isinstance(job.fold, str) and job.fold:
+                stage += f" (walk-forward {job.fold})"
+            ui.card_header(f"job-{job.job_id}", job.name, meta=stage)
+            # How long it has run, and how long is left at the pace of the trials so far (once a few
+            # are in: the first ones also carry each process's start).
+            parts = [f"{done:,} of {total:,} trials"]
+            if job.best_value is not None and not pd.isna(job.best_value):
+                parts.append(f"best so far {job.best_value:.4g}")
+            elapsed = since(job.started_at)
+            if elapsed is not None:
+                parts.append(f"running for {took(elapsed)}")
+            searching = since(job.searching_since)
+            if searching and done >= 3 and done < total:
+                parts.append(f"about {took((total - done) * searching / done)} left")
+            elif done < total:
+                parts.append("working out how long it will take")
+            st.progress(min(1.0, done / total), text=" · ".join(parts))
+            if st.button("Cancel", key=f"cancel:{job.job_id}", icon=":material/stop_circle:",
+                         help="Stops the job after the trials already running; what it found so far is kept."):
+                jobs.cancel_job(job.path)
+                st.toast("Cancelling after the trials already running.")
     finished = current[~current["status"].isin(["starting", "running"])]
     if not finished.empty:
-        ui.table(finished[["name", "backend", "status", "done", "budget", "best_value", "created_at"]])
+        # A job that stopped from outside (its process ended) says so, with what to do.
+        for job in finished.itertuples():
+            if job.status == "stopped" and isinstance(job.error, str):
+                st.warning(f"**{job.name}**: {job.error}")
+        table = finished[["name", "backend", "status", "done", "budget", "best_value", "created_at"]].rename(columns={
+            "name": "Job", "backend": "Backend", "status": "Status", "done": "Trials", "budget": "Budget",
+            "best_value": "Best", "created_at": "Started"})
+        # No valid trial (or none yet) reads as a dash, not "None".
+        table["Best"] = table["Best"].map(lambda value: "—" if value is None or pd.isna(value) else f"{value:.4g}")
+        table["Started"] = table["Started"].astype(str).str[:16].str.replace("T", " ")
+        ui.table(table)
+        # Words, not st.page_link: a link needs the whole multipage app, which a page tested on its own lacks.
+        st.caption("Each job's best settings, in and out of sample, and its backtest are on the **Optimiser "
+                   "results** page in the menu.")
 
 
 job_list()

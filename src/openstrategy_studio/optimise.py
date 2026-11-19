@@ -577,6 +577,21 @@ BACKENDS = {
 # Robustness tools
 # ---------------------------------------------------------------------------
 
+def setting_names(spec):
+    """{param path: {"label", "labels"}}: each searched setting in words, for the results page.
+
+    The same words the Optimise page lists the variables in (tunable_inputs' label, such as
+    "jma7 › length", and its value labels, such as "crosses above"), so a result reads as the
+    strategy does, not as "param:features.jma7.params.length". The self-test job has no
+    strategy, and a path a strategy no longer holds keeps its path.
+    """
+    from .spec import tunable_inputs
+
+    if not (spec or {}).get("data"):
+        return {}
+    return {row["path"]: {"label": row["label"], "labels": row.get("labels") or {}} for row in tunable_inputs(spec)}
+
+
 def best_trial(trials, direction):
     """The best finite trial from a trials DataFrame, or None."""
     finite = trials[np.isfinite(trials["objective"].astype(float))]
