@@ -5,14 +5,15 @@ Jobs run in a separate process, so they keep going if you close the page.
 """
 
 import importlib.util
+import json
 import math
 
 import pandas as pd
 import streamlit as st
 
-from openstrategy_studio import data as data_module, engine, jobs, optimise, ui
-from openstrategy_studio.spec import (collect_choices, default_variable, tunable_inputs, validate_spec, variable_values,
-                                      variables)
+from openstrategy_studio import analysis, data as data_module, engine, jobs, optimise, ui
+from openstrategy_studio.spec import (collect_choices, default_variable, spec_hash, tunable_inputs, validate_spec,
+                                      variable_values, variables)
 
 settings, data_dir = ui.boot("Optimise")
 ui.page_help("optimise")
@@ -309,19 +310,117 @@ if backend == "grid_vectorised" and mode != "compare" and not engine.vectorisabl
     blocked = True
 if mode == "compare" and not (compare_settings or {}).get("backends"):
     blocked = True
-if st.button("Start optimisation", type="primary", disabled=blocked):
-    def start():
-        frames = ui.load_frames_for(spec, data_dir)
-        job = {"name": name, "kind": mode, "spec": spec, "space": space, "compare": compare_settings,
-               "backend": backend, "backend_options": options, "budget": int(budget), "metric": metric,
-               "direction": direction, "seed": int(seed), "workers": int(workers), "settings": settings,
-               "constraints": {"min_trades": int(min_trades) or None, "max_drawdown": max_drawdown or None,
-                               "min_profit_factor": min_profit_factor or None},
-               "split": {"train_fraction": 1 - holdout} if holdout and not walk else None,  # compare uses it too
-               "walk_forward": walk_settings, "stability": stability,
-               "fingerprint": data_module.fingerprint(data_dir, spec, frames)}
-        return jobs.start_job(data_dir, job, frames)
 
+
+def start():
+    frames = ui.load_frames_for(spec, data_dir)
+    job = {"name": name, "kind": mode, "spec": spec, "space": space, "compare": compare_settings,
+           "backend": backend, "backend_options": options, "budget": int(budget), "metric": metric,
+           "direction": direction, "seed": int(seed), "workers": int(workers), "settings": settings,
+           "constraints": {"min_trades": int(min_trades) or None, "max_drawdown": max_drawdown or None,
+                           "min_profit_factor": min_profit_factor or None},
+           "split": {"train_fraction": 1 - holdout} if holdout and not walk else None,  # compare uses it too
+           "walk_forward": walk_settings, "stability": stability,
+           "fingerprint": data_module.fingerprint(data_dir, spec, frames)}
+    return jobs.start_job(data_dir, job, frames)
+
+
+# --- the ranges' ends, checked before a job starts -------------------------------------------
+# The owner's MA job (20 November 2026) ran 5,000 trials and found none valid: a slippage of 20% a
+# fill meant every trial made 0 or 1 trades, which one backtest at the strategy's own settings would
+# have shown. So Start first runs the strategy at its own settings and each setting at the ends of
+# its range, on the history the search uses, unless that was just checked for these exact settings.
+# A setting whose ends fall short only warns (trials there are invalid, nothing worse). When the
+# strategy's own settings and every end fall short, the job is not started until "Start anyway".
+signature = json.dumps([spec_hash(spec), space, int(min_trades), holdout, walk_settings, metric], sort_keys=True,
+                       default=str)
+checked = st.session_state.get("range_check")
+if checked is not None and checked["signature"] != signature:
+    checked = None
+
+
+def check_ranges():
+    frames = ui.load_frames_for(spec, data_dir)
+    index = frames["close"].index
+    if walk:
+        folds = optimise.walk_forward_folds(index, walk_settings["window"], walk_settings["step"], walk_settings["mode"])
+        window = folds[0]["in_sample"] if folds else None
+    else:
+        window = optimise.split_window(index, 1 - holdout)[0] if holdout else None
+    rows = optimise.range_check(spec, frames, space, int(min_trades), window=window, data_dir=data_dir,
+                                offline=settings.get("offline", False),
+                                static_rate=settings["vectorbtx"].get("static_rate"), metric=metric)
+    return {"signature": signature, "rows": rows, "hopeless": bool(min_trades) and not any(r["enough"] for r in rows)}
+
+
+row = st.columns([1, 1, 2])
+start_pressed = row[0].button("Start optimisation", type="primary", disabled=blocked,
+                              help="Checks the ranges first (below) if they have not been checked for these settings, "
+                                   "then starts the job in the background.")
+check_pressed = row[1].button("Check the ranges", disabled=blocked, icon=":material/rule:",
+                              help="Runs the strategy at its own settings, then each variable at the start and at the "
+                                   "end of its range with the others at their own, on the history the search uses, "
+                                   "and says where a trial cannot reach the minimum trades. A few backtests.")
+if check_pressed or (start_pressed and checked is None):
+    checked = ui.run_guarded("Checking the ranges", check_ranges)
+    if checked is not None:
+        st.session_state["range_check"] = checked
+
+if checked is not None:
+    names = optimise.setting_names(spec)
+    shown_rows = []
+    short = []
+    for item in checked["rows"]:
+        if item["path"] is None:
+            setting, value = "Its own settings", ""
+        else:
+            named = names.get(item["path"], {})
+            setting = named.get("label", item["path"])
+            value = (named.get("labels") or {}).get(item["value"], item["value"])
+        if not item["enough"] and item["path"] is not None:
+            short.append(f"{setting} at {value} ({item['error'] or 'too few trades'})")
+        shown_rows.append({"Setting": setting, "Value": str(value), "Trades": item["trades"],
+                           "Enough": "yes" if item["enough"] else "no",
+                           "What the backtest said": item["error"] if item["trades"] is None else (item["notes"] or "")})
+    own = checked["rows"][0]
+    notes = [item["notes"] for item in checked["rows"] if item["notes"]]
+    example = notes[0].split("\n")[0] if notes else None
+    if checked["hopeless"]:
+        made = (own["error"] if own["trades"] is None
+                else f"makes {own['trades']:,} trade{'' if own['trades'] == 1 else 's'} on the history the search uses")
+        st.error(f"No trial is likely to be valid: at its own settings the strategy {made}, and no end of any range "
+                 f"reaches the minimum of {int(min_trades):,} trades either."
+                 + (f" The backtests said: \"{example}\"" if example else "")
+                 + " Check its costs and sizes on the Build page (a slippage or spread typed in the wrong unit, a "
+                   "size under the smallest size, a stop the risk cannot fund), or lower the minimum trades.",
+                 icon=":material/block:")
+        hint = analysis.warning_hints([example])[0][1] if example else None
+        if hint:
+            st.caption(hint)
+    elif not own["enough"] or short:
+        parts = []
+        if own["trades"] is None:
+            parts.append(f"At its own settings the strategy {own['error']}")
+        elif not own["enough"]:
+            parts.append(f"At its own settings the strategy makes {own['trades']:,} "
+                         f"trade{'' if own['trades'] == 1 else 's'}, under the minimum of {int(min_trades):,}.")
+        if short:
+            parts.append(f"These ends of the ranges fall short of the minimum: {'; '.join(short)}. Trials there "
+                         "count as invalid, so a narrower range spends the budget where trials can be valid.")
+        st.warning(" ".join(parts), icon=":material/warning:")
+    else:
+        st.caption(f"Checked: the strategy at its own settings and every end of every range make at least "
+                   f"{int(min_trades):,} trades on the history the search uses.")
+    with st.expander("The ranges' ends, checked", expanded=checked["hopeless"]):
+        ui.table(pd.DataFrame(shown_rows), column_config={
+            "What the backtest said": st.column_config.TextColumn(width="large")})
+
+start_now = start_pressed and checked is not None and not checked["hopeless"]
+if checked is not None and checked["hopeless"]:
+    start_now = start_now or st.button("Start anyway", icon=":material/play_arrow:", disabled=blocked,
+                                       help="Start the job although the check found no setting that reaches the "
+                                            "minimum trades: every trial is then likely to be invalid.")
+if start_now:
     started = ui.run_guarded("Starting the job", start)
     if started is not None:
         st.success("Started, in the background: it keeps going if you leave this page. Its progress is under Jobs "

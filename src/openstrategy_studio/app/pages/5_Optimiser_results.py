@@ -10,6 +10,7 @@ when the menu names said which results each page holds).
 
 import copy
 import pickle
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -95,9 +96,31 @@ if best is None and job["kind"] != "walk_forward" and not search.empty and progr
     top = f" Most often: {reasons.index[0]} ({reasons.iloc[0]} of {len(search)} trials)." if len(reasons) else ""
     most = (f" The most trades any trial made was {int(search['n_trades'].max()):,}."
             if "n_trades" in search and search["n_trades"].notna().any() else "")
+    # Why, in the backtests' own words: what vectorbtX said most often about the trials' runs
+    # (entries below the minimum size, cut to the leverage), counted once per trial whatever its
+    # numbers, with one trial's words as the example and the Studio's hint for it. Jobs from before
+    # 20 November 2026 kept no notes.
+    said, hint = "", None
+    counts, examples = {}, {}
+    for note in (search["notes"].dropna().astype(str) if "notes" in search else []):
+        seen = set()
+        for line in note.split("\n"):
+            kind = re.sub(r"[\d.,]+", "N", line)
+            if kind not in seen:
+                seen.add(kind)
+                counts[kind] = counts.get(kind, 0) + 1
+                examples.setdefault(kind, line)
+    if counts:
+        commonest = max(counts, key=counts.get)
+        said = (f" The backtests said, in {counts[commonest]:,} of {len(search):,} trials, for example: "
+                f"\"{examples[commonest]}\"")
+        hint = analysis.warning_hints([examples[commonest]])[0][1]
     st.warning(f"No trial was valid: every one broke a constraint or could not run, so there are no best settings.{top}"
-               f"{most} Loosen the constraints or widen the ranges on the Optimise page; the table at the foot of "
-               "this page gives each trial's reason.")
+               f"{most}{said} Loosen the constraints or widen the ranges on the Optimise page, or check the "
+               "strategy's costs and sizes on the Build page; the table at the foot of this page gives each trial's "
+               "reason.")
+    if hint:
+        st.caption(hint)
 if best is not None and job["metric"] != "selftest":
     params = jobs.trial_params(best)
     held = summary.get("held_out") or {}
@@ -323,14 +346,17 @@ wanted = (["trial", "objective"] + named_columns
              if column in ordered and column != job["metric"]]
           + [column for column in (("backend", "seed") if job["kind"] == "compare" else ()) if column in ordered]
           + [column for column in ("fold",) if job["kind"] == "walk_forward" and column in ordered]
-          + [column for column in ("phase", "error") if column in ordered])
+          + [column for column in ("phase", "error", "notes") if column in ordered])
 table = ordered[wanted].rename(columns={column: column.removeprefix("param:") for column in named_columns})
 table = table.rename(columns={"trial": "Trial", "objective": metric_label, "n_trades": "Trades",
                               "total_return": "Total return", "max_drawdown": "Max drawdown",
                               "sharpe": "Sharpe ratio", "profit_factor": "Profit factor", "backend": "Backend",
-                              "seed": "Seed", "fold": "Fold", "phase": "Part", "error": "Why it is not valid"})
+                              "seed": "Seed", "fold": "Fold", "phase": "Part", "error": "Why it is not valid",
+                              "notes": "What the backtest said"})
 ui.table(table, height=360, column_config={
     "Total return": st.column_config.NumberColumn(format="percent"),
-    "Max drawdown": st.column_config.NumberColumn(format="percent")})
-st.caption(f"Best first by {metric_words}. A blank score broke a constraint (the last column says which) or "
-           "could not run. Part: search trials, the held-back check, and the stability re-runs.")
+    "Max drawdown": st.column_config.NumberColumn(format="percent"),
+    "What the backtest said": st.column_config.TextColumn(width="large")})
+st.caption(f"Best first by {metric_words}. A blank score broke a constraint (Why it is not valid says which) or "
+           "could not run. What the backtest said: vectorbtX's notes on the trial's run, such as entries below the "
+           "minimum size that were not placed. Part: search trials, the held-back check, and the stability re-runs.")

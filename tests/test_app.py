@@ -302,6 +302,48 @@ def test_optimise_variables_are_added_and_changed(tmp_path, monkeypatch):
     assert not app.exception, [item.value for item in app.exception]
 
 
+def test_start_checks_the_ranges_first_and_holds_a_job_no_trial_can_pass(tmp_path, monkeypatch):
+    """The owner's MA job (20 November 2026): 5,000 trials, none valid. Start now runs the strategy at its own
+    settings and each setting at the ends of its range first; when none reaches the minimum trades the job is
+    not started, the page says why and offers Start anyway."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import config, jobs
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = spread_bet_on_spy(tmp_path)
+    spec["instruments"]["SPY"]["min_size"] = 100.0          # 500 over a 100-point stop is a stake of 5 a point
+    spec["optimise"] = {"variables": {"features.fast.params.timeperiod": {"start": 5, "stop": 15, "step": 5}}}
+    app = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    button = lambda label: next(item for item in app.button if item.label == label)
+    next(item for item in app.number_input if item.label == "Minimum trades").set_value(5)
+    button("Start optimisation").click().run()
+    assert not app.exception, [item.value for item in app.exception]
+    (error,) = [item.value for item in app.error if item.value.startswith("No trial is likely to be valid")]
+    assert "makes 0 trades" in error and "minimum tradeable size" in error, error
+    assert [item for item in app.button if item.label == "Start anyway"]
+    assert not [item for item in app.success if item.value.startswith("Started")]
+    assert jobs.list_jobs(config.data_dir(config.load_settings())).empty
+    assert app.session_state["spec"] == spec                            # the check changes nothing
+    # A strategy that trades: no hold, and Check the ranges starts nothing.
+    spec["instruments"]["SPY"]["min_size"] = 0.01
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 5
+    app.run()
+    next(item for item in app.number_input if item.label == "Minimum trades").set_value(5)
+    button("Check the ranges").click().run()
+    assert not app.exception, [item.value for item in app.exception]
+    held = [item.value for item in app.error if item.value.startswith("No trial is likely to be valid")]
+    assert not held, held
+    assert not [item for item in app.button if item.label == "Start anyway"]
+    assert jobs.list_jobs(config.data_dir(config.load_settings())).empty
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+
 def test_the_stop_and_target_switch_off_and_keep_their_distance_for_the_optimiser(tmp_path, monkeypatch):
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
@@ -667,6 +709,59 @@ def test_the_risk_tab_shows_leverage_and_checks_the_trade_size(tmp_path, monkeyp
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
 
 
+def test_a_slippage_typed_as_points_is_flagged_where_it_is_typed(tmp_path, monkeypatch):
+    """The owner's MA job (20 November 2026): slippage 0.2 beside a 1.5-point spread is 20% a fill,
+    so one trade emptied the account and every trial made 0 or 1 trades, with nothing flagged."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = spread_bet_on_spy(tmp_path)
+    spec["instruments"]["SPY"].update(spread_points=1.5, slippage=0.2)
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert app.session_state["spec"] == spec
+    warned = [item.value for item in app.warning if item.value.startswith("Slippage is in %")]
+    assert warned and "SPY's 20% a fill is about 40% of the price a round trip" in warned[0], warned
+    # A usual slippage is quiet.
+    spec["instruments"]["SPY"]["slippage"] = 0.0005
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 3
+    app.run()
+    assert not [item.value for item in app.warning if item.value.startswith("Slippage is in %")]
+    assert app.session_state["spec"] == spec
+
+
+def test_slippage_is_typed_in_percent_and_kept_as_a_fraction(tmp_path, monkeypatch):
+    """The grid shows slippage in % and writes vectorbtX's fraction back; a new symbol starts at the
+    usual value for its market, and a blank runs as that value."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import engine
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    spec = spread_bet_on_spy(tmp_path)
+    spec["instruments"]["SPY"]["slippage"] = 0.0002
+    assert engine.usual_slippage("spreadbet", "stocks") == 0.0002
+    assert engine.usual_slippage("fx_spot") == engine.usual_slippage("cfd", "fx") == 0.0001
+    # A blank is named as the usual one, so the plan (and the export) always says it.
+    blank = copy.deepcopy(spec)
+    blank["instruments"]["SPY"].pop("slippage")
+    assert engine.instrument_fields(blank)["SPY"]["slippage"] == 0.0002
+    app = testing.AppTest.from_file(str(APP / "pages" / "2_Build.py"), default_timeout=180)
+    app.session_state["spec"] = copy.deepcopy(spec)
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert app.session_state["spec"] == spec                       # nothing written back on render
+    # The Costs grid (a data editor, which AppTest reads but cannot edit) shows it in %.
+    costs = [frame for frame in app.dataframe if frame.proto.editing_mode and "slippage" in frame.value.columns]
+    assert len(costs) == 1 and costs[0].value.at["SPY", "slippage"] == "0.02", [frame.value for frame in costs]
+    assert json.loads(costs[0].proto.columns)["slippage"]["label"] == "Slippage (% a fill)"
+
+
 def test_the_data_page_names_an_import_and_warns_before_replacing_another_source(tmp_path, monkeypatch):
     testing = pytest.importorskip("streamlit.testing.v1")
     from conftest import make_ohlcv
@@ -864,7 +959,7 @@ def test_a_new_symbol_starts_with_every_value_filled_in(tmp_path, monkeypatch):
     # An FX CFD: the pair read from its ticker, a lot of 100,000, 30x, a pip, and every cost written out.
     assert fields["asset_class"] == "fx" and fields["base_currency"] == "EUR" and fields["quote_currency"] == "USD"
     assert fields["contract_size"] == 100000.0 and fields["leverage"] == 30.0 and fields["point_size"] == 0.0001
-    assert fields["commission_flat"] == 0.0 and fields["slippage"] == 0.0 and fields["rounding"] == "floor"
+    assert fields["commission_flat"] == 0.0 and fields["slippage"] == 0.0001 and fields["rounding"] == "floor"
     assert not [button for button in app.button if button.key == current_key(app, "instruments:fill")]
     # An older strategy with blanks: one press fills them, a typed spread stays.
     spec = app.session_state["spec"]
@@ -905,9 +1000,10 @@ def test_every_card_folds_by_its_title(tmp_path, monkeypatch):
     assert not app.exception, [item.value for item in app.exception]
 
 
-def finished_job(tmp_path, held_back=0.3, constraints=None):
+def finished_job(tmp_path, held_back=0.3, constraints=None, instrument=None):
     """A small real optimisation (the MA cross on synthetic prices, six random trials, 30% held back), run in
-    this process: the worker's own main, on a job folder written as jobs.start_job writes one."""
+    this process: the worker's own main, on a job folder written as jobs.start_job writes one. `instrument`:
+    fields to change on the pair."""
     import pickle
     from openstrategy_studio import config, jobs, optimise, store, worker
     from conftest import make_ohlcv
@@ -917,6 +1013,7 @@ def finished_job(tmp_path, held_back=0.3, constraints=None):
     spec["account"].pop("rates")
     spec["features"]["fast"]["params"]["timeperiod"] = 5
     spec["features"]["slow"]["params"]["timeperiod"] = 20
+    spec["instruments"]["EURUSD=X"].update(instrument or {})
     spec["optimise"]["variables"] = {"features.fast.params.timeperiod": {"start": 3, "stop": 8, "step": 1},
                                      "features.slow.params.timeperiod": {"start": 15, "stop": 30, "step": 5}}
     job = {"name": "MA cross: random", "kind": "optimise", "spec": spec, "space": optimise.build_space(spec),
@@ -1053,3 +1150,23 @@ def test_a_job_with_no_valid_trial_says_why(tmp_path, monkeypatch):
     (warning,) = [item.value for item in app.warning if "No trial was valid" in item.value]
     assert "Most often: only N trades (6 of 6 trials)" in warning and "The most trades any trial made was" in warning
     assert not [item for item in app.metric if "in sample" in item.label]
+
+
+def test_a_job_with_no_valid_trial_says_what_the_backtests_said(tmp_path, monkeypatch):
+    """The owner's MA job (20 November 2026): every trial said only "only 1 trades". Now the page names what
+    vectorbtX said most often about the trials' runs, with the Studio's hint, and each trial's notes are in
+    the table. Here every entry is under the minimum stake (risk 100 over 60 points is a stake of 1.67)."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    finished_job(tmp_path, constraints={"min_trades": 30}, instrument={"min_size": 5.0})
+    app = testing.AppTest.from_file(str(APP / "pages" / "5_Optimiser_results.py"), default_timeout=180)
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    (warning,) = [item.value for item in app.warning if "No trial was valid" in item.value]
+    assert "Most often: only N trades (6 of 6 trials)" in warning, warning
+    assert "The backtests said, in 6 of 6 trials, for example: \"EURUSD=X: " in warning, warning
+    assert "minimum tradeable size" in warning, warning
+    assert any(item.value.startswith("In the Studio: raise the risk or the amount") for item in app.caption)
+    tables = [frame.value for frame in app.dataframe if "What the backtest said" in frame.value.columns]
+    assert tables and tables[0]["What the backtest said"].str.contains("minimum tradeable size").all()

@@ -228,16 +228,17 @@ def bars(opens, spread=0.5):
 
 
 def gate_spec(exits, stop_points, side="long"):
-    # Zero spread: the gate compares the ORDER OF OPERATIONS with the reference
-    # simulator, which models no costs. Costs on stop exits are pinned separately by
-    # tests/test_engine.py::test_spread_is_paid_on_every_fill.
+    # Zero spread and zero slippage: the gate compares the ORDER OF OPERATIONS with the
+    # reference simulator, which models no costs. Costs on stop exits are pinned separately by
+    # tests/test_engine.py::test_spread_is_paid_on_every_fill. (Slippage is named because a
+    # blank one is the Studio's usual slippage, engine.usual_slippage, not none.)
     code = "out = close * 0.0\nout.iloc[0] = 1.0\nreturn out"
     rules = {"long_entry": None, "long_exit": None, "short_entry": None, "short_exit": None}
     rules[f"{side}_entry"] = one({"left": {"feature": "pulse"}, "op": ">", "right": {"const": 0.5}})
     return {"version": 2, "name": "gate", "setup": {"kind": "signals", "trading": "equity"},
             "data": {"symbols": ["X"], "timeframe": "1d", "start": "2000-01-01", "end": "2100-01-01"},
             "instruments": {"X": {"point_size": 1.0, "quote_currency": "USD", "cost_currency": "USD",
-                                  "spread_points": 0.0}},
+                                  "spread_points": 0.0, "slippage": 0.0}},
             "features": {"pulse": {"indicator": "studio:python", "inputs": {}, "params": {"code": code}}}, "rules": rules,
             "risk": {"sizing": {"size": 1}, "stop": {"kind": "fixed", "points": stop_points}, "exits": exits},
             "account": {"init_cash": 10_000, "freq": "D"}}

@@ -886,6 +886,62 @@ def check_cut_orders_on_the_increment():
     return bought != [66.0], f"bought {bought} shares (should be [66.0]: the increment is one share)"
 
 
+# ---------------------------------------------------------------------------
+# 35. The re-sizing loop re-issues the warnings of the run before the one it returns
+# ---------------------------------------------------------------------------
+
+def check_warnings_describe_the_returned_run():
+    # A spread bet with 20% slippage at 5x, each entry worth twice the balance at its signal bar,
+    # three round trips on a flat 100, a minimum stake of 10. The first run sizes every entry from
+    # the starting cash (200 a point), and each trade loses 40 x 200, so its balance at the third
+    # entry is -6,000. The returned run trades 200 and then 40 a point: its balance there is 400, so
+    # the third entry asks for 8 a point, below the minimum, and is not placed. Its warnings must
+    # say that (a size below the minimum) and must not name a buying power the returned run never
+    # had (5 x -6,000 = -30,000: it is 5 x 400 = 2,000, and 800 fits in it).
+    o, h, l, c = frames([100.0] * 30)
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "leverage": 5.0, "min_size": 10.0, "slippage": 0.2}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", 0), ("X", 10), ("X", 20)]),
+                                     exits=mask(c.index, ["X"], [("X", 5), ("X", 15), ("X", 25)]),
+                                     notional_pct=2.0, risk_of="balance", init_cash=10_000, freq="D")
+    said = [str(item.message) for item in caught]
+    balance = round(float(np.asarray(pf.value()).ravel()[20]), 2)
+    negative = [text.split("but its ")[1].split(")")[0] for text in said if "funds only -" in text]
+    below_minimum = any("minimum tradeable size" in text for text in said)
+    present = bool(negative) or not below_minimum
+    return present, (f"the returned run's balance at the third entry is {balance}; warnings name "
+                     f"{negative or 'no negative buying power'}; a size below the minimum is "
+                     f"{'said' if below_minimum else 'not said'} (should be: no negative figure, and said)")
+
+
+# ---------------------------------------------------------------------------
+# 36. The re-sizing loop gives up when many entries are cut to the cash
+# ---------------------------------------------------------------------------
+
+def check_cut_entries_settle():
+    # A 5x spread bet that wins every trade (the price rises 1% a bar), six round trips, each entry
+    # worth 4.8 times the equity at its signal bar: inside 5x, but a levered account's loan is fixed
+    # at the start (40,000), so once the equity passes about 11,400 each entry is more than cash and
+    # loan can pay for, and vectorbt cuts it to the cash. Each such entry takes two of the loop's runs
+    # (asked afresh and cut, then asked at that ceiling), and the loop allows one per entry bar plus
+    # two. It must settle: twelve orders, not RuntimeError.
+    o, h, l, c = frames([100.0 * 1.01 ** k for k in range(35)])
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "leverage": 5.0, "min_size": 1.0, "increment": 1.0}
+    try:
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", bar) for bar in range(0, 30, 5)]),
+                                     exits=mask(c.index, ["X"], [("X", bar) for bar in range(3, 30, 5)]),
+                                     notional_pct=4.8, risk_of="equity", init_cash=10_000, freq="D")
+    except RuntimeError as error:
+        return True, f"raised RuntimeError: {str(error)[:60]}... (should settle: twelve orders)"
+    orders = len(pf.orders.records)
+    return orders != 12, f"{orders} orders (should be 12: six round trips)"
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -922,6 +978,9 @@ CHECKS = [
     (32, "The leverage cap (max_size) cuts the orders that close a position", check_cap_cuts_closing_orders),
     (33, "The leverage cap is leverage x the starting cash, not the account", check_cap_from_the_account),
     (34, "An order cut down to what is funded is not rounded to the increment", check_cut_orders_on_the_increment),
+    (35, "The re-sizing loop re-issues the warnings of the run before the one it returns",
+     check_warnings_describe_the_returned_run),
+    (36, "The re-sizing loop gives up (RuntimeError) when many entries are cut to the cash", check_cut_entries_settle),
 ]
 
 

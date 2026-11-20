@@ -63,8 +63,10 @@ INSTRUMENT_HELP = {
     "commission_min": "The least commission an order pays, in the cost currency.",
     "spread_points": "The full gap between bid and ask, in points. Half is paid on each fill, so a round trip "
                      "pays the whole spread.",
-    "slippage": "Extra cost on each fill, as a fraction of price (0.0005 = 0.05%), or auto: estimated from "
-                "volatility and trade size against volume (needs volume data).",
+    "slippage": "Extra cost on each fill, in % of the price, on top of the spread: 0.02 is 0.02%, 2 cents on a "
+                "price of 100. A cost in points goes in the spread. New symbols start at the usual value for "
+                "their market: 0.01% for FX and indices, 0.02% for shares and commodities. Or auto: estimated "
+                "from volatility and trade size against volume (needs volume data).",
     "borrow_rate": "The yearly fee for borrowing what you short (0.005 = 0.5% a year), charged daily on the short's "
                    "value. Blank: unknown, so a short is charged nothing and the run says so. 0: the borrow is "
                    "free.",
@@ -86,7 +88,7 @@ INSTRUMENT_LABELS = {
     "contract_size": "Contract size", "price_field": "Price", "spread_points": "Spread (points)",
     "commission_pct": "Commission (fraction)", "commission_flat": "Commission per order",
     "commission_per_unit": "Commission per unit", "commission_min": "Minimum commission",
-    "cost_currency": "Cost currency", "slippage": "Slippage", "borrow_rate": "Borrow rate (a year)",
+    "cost_currency": "Cost currency", "slippage": "Slippage (% a fill)", "borrow_rate": "Borrow rate (a year)",
     "increment": "Size step", "min_size": "Smallest size", "allow_fractional": "Fractions allowed",
     "rounding": "Rounding",
 }
@@ -706,6 +708,13 @@ with form:
                         elif kind_name == "flag":
                             grid[field] = grid[field].map(lambda value: bool(value))
                             config[field] = st.column_config.CheckboxColumn(label, help=tip)
+                        elif field == "slippage":
+                            # ⚠️ Shown and typed in % (0.02 is 0.02%), kept in the spec as vectorbtX's
+                            # fraction (0.0002), converted both ways here and nowhere else. "auto" stays.
+                            grid[field] = grid[field].map(
+                                lambda value: "" if value is None else value if isinstance(value, str)
+                                else f"{float(value) * 100:g}")
+                            config[field] = st.column_config.TextColumn(label, help=tip)
                         else:
                             grid[field] = grid[field].map(lambda value: "" if value is None else str(value))
                             config[field] = (st.column_config.SelectboxColumn(label, options=choices[field], help=tip)
@@ -726,8 +735,9 @@ with form:
                                 updated[symbol][field] = float(after_cell)
                             elif shown[field] == "flag":
                                 updated[symbol][field] = bool(after_cell)
-                            elif field == "slippage" and after_cell != "auto":
-                                updated[symbol][field] = float(after_cell)
+                            elif field == "slippage" and str(after_cell).strip() != "auto":
+                                # Typed in %, with or without the sign: 0.02 or 0.02% is 0.0002.
+                                updated[symbol][field] = float(str(after_cell).strip().rstrip("%")) / 100
                             else:
                                 updated[symbol][field] = str(after_cell)
                 for symbol, fields in updated.items():
@@ -744,6 +754,24 @@ with form:
                                 fields[name_] = value
                 if updated != {symbol: instruments.get(symbol) or {} for symbol in symbols}:
                     ui.set_value("instruments", updated)
+                # ⚠️ Slippage is a share of the price, not points: a slippage of 0.2 (a fraction, as the
+                # spec holds it) beside a spread of 1.5 points was 20% on every fill, so a round trip
+                # lost about 40% and one trade emptied the account (the owner's MA job, 20 November 2026:
+                # every trial made 0 or 1 trades, and nothing said why). The grid now shows it in %, but
+                # a spec typed by hand or loaded from a file can still hold one. Not invalid, since a
+                # stress test may mean it, so a warning here, where it is typed, not a problem that
+                # blocks the run.
+                steep = {}
+                for symbol, fields in updated.items():
+                    value = fields.get("slippage")
+                    if isinstance(value, (int, float)) and value > 0.01:
+                        steep[symbol] = float(value)
+                if steep:
+                    st.warning("Slippage is in % of the price on every fill, not points: "
+                               + "; ".join(f"{symbol}'s {value * 100:.3g}% a fill is about {value * 200:.3g}% of the "
+                                           "price a round trip" for symbol, value in steep.items())
+                               + ". Usual values are 0.01% to 0.1%. A cost in points goes in the spread.",
+                               icon=":material/warning:")
                 blanks = [symbol for symbol, fields in updated.items()
                           if any(field not in fields for field in usual_fields(fields, symbol) if field in shown)]
                 if blanks and st.button("Fill in the blank cells", key=ui.key("instruments", ":fill"),

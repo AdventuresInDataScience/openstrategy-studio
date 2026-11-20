@@ -34,12 +34,14 @@ def test_vectorised_equals_one_by_one(ma_spec, ohlcv):
     trials = engine.run_vectorised(ma_spec, ohlcv, params_list)
     assert len(trials) == len(params_list)
     job = {"metric": "sharpe", "constraints": {}}
-    for params, pf in zip(params_list, trials):
-        alone = engine.run_backtest(ma_spec, ohlcv, params=params)["pf"]
-        together = O.score(pf, job, params)
-        single = O.score(alone, job, params)
+    for params, trial in zip(params_list, trials):
+        alone = engine.run_backtest(ma_spec, ohlcv, params=params)
+        together = O.score(trial["pf"], job, params, notes=trial["warnings"])
+        single = O.score(alone["pf"], job, params, notes=alone["warnings"])
         for key in ("objective", "total_return", "n_trades", "max_drawdown"):
             assert together[key] == pytest.approx(single[key], nan_ok=True), (params, key)
+        # vectorbtX's words about the trial, said with the symbol's name, as the run alone says them.
+        assert together["notes"] == single["notes"], params
     assert np.isfinite(O.grid_size(space))
 
 
@@ -59,9 +61,9 @@ def test_vectorised_equals_one_by_one_when_the_structure_varies(ma_spec, ohlcv):
     trials = engine.run_vectorised(spec, ohlcv, params_list)
     job = {"metric": "sharpe", "constraints": {}}
     seen = set()
-    for params, pf in zip(params_list, trials):
+    for params, trial in zip(params_list, trials):
         alone = engine.run_backtest(spec, ohlcv, params=params)["pf"]
-        together = O.score(pf, job, params)
+        together = O.score(trial["pf"], job, params)
         single = O.score(alone, job, params)
         for key in ("objective", "total_return", "n_trades", "max_drawdown"):
             assert together[key] == pytest.approx(single[key], nan_ok=True), (params, key)

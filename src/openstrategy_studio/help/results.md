@@ -10,6 +10,6 @@ One optimisation job at a time, with the answer first.
 
 **How the search went.** How many settings were tried and how many were valid, how the neighbours of the best did (the stability check), how the search converged, and how the score varies with the settings (a pair heatmap, parallel coordinates, or one setting at a time).
 
-**Every trial**, best first, with each setting named in words and the reason any trial is not valid.
+**Every trial**, best first, with each setting named in words, the reason any trial is not valid, and what the backtest said: vectorbtX's notes on the trial's run, such as entries below the smallest size that were not placed, or entries cut to what the leverage funds. When no trial is valid, the page names the note most trials had, with what to change in the Studio.
 
 Saved backtests are compared on the **Backtest results** page.

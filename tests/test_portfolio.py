@@ -93,8 +93,9 @@ def test_intrabar_drawdown_of_a_short_uses_the_high(ma_spec):
     code = "out = close * 0.0\nout.iloc[0] = 1.0\nreturn out"
     spec = {"version": 2, "name": "short", "setup": {"kind": "signals", "trading": "equity"},
             "data": {"symbols": ["X"], "timeframe": "1d", "start": "2000-01-01", "end": "2100-01-01"},
+            # No costs (a blank slippage would be the usual one, engine.usual_slippage).
             "instruments": {"X": {"point_size": 1.0, "quote_currency": "USD",
-                                  "cost_currency": "USD", "spread_points": 0.0}},
+                                  "cost_currency": "USD", "spread_points": 0.0, "slippage": 0.0}},
             "features": {"pulse": {"indicator": "studio:python", "inputs": {}, "params": {"code": code}}},
             "rules": {"long_entry": None, "long_exit": None, "short_exit": None,
                       "short_entry": one({"left": {"feature": "pulse"}, "op": ">", "right": {"const": 0.5}})},

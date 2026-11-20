@@ -19,6 +19,7 @@ findings (with what changed) are in docs/VERIFY.md. Anything still marked
 """
 
 import importlib.metadata
+import re
 import threading
 import warnings
 from pathlib import Path
@@ -205,6 +206,10 @@ def instrument_fields(spec):
         if "point_size" not in fields:
             fields["point_size"] = usual_point_size(fields["mode"], fields.get("asset_class"),
                                                     fields.get("quote_currency"))
+        # ⚠️ And slippage: vectorbtX's blank is none at all, the Studio's is usual_slippage. Named
+        # here so a blank cell and a filled-in one run the same, and the export says it.
+        if "slippage" not in fields:
+            fields["slippage"] = usual_slippage(fields["mode"], fields.get("asset_class"))
         out[symbol] = fields
     return out
 
@@ -291,6 +296,21 @@ def usual_point_size(mode, asset_class=None, quote_currency=None):
     return 0.01
 
 
+# The slippage the Studio fills in, as a FRACTION of the price on each fill (the grid shows it in
+# %), paid on top of the spread: 0.0001 is 0.01%, 1.1 pips on EURUSD at 1.10 or half a point on an
+# index at 5,000. A starting point for a liquid market filled at the next bar's open, the owner's
+# call (20 November 2026: a blank of none flattered every run, and a cell with no usual value
+# invited points), not a measurement. ⚠️ VERIFY against your own fills: a thin share, a gap or a
+# fill at FX's daily rollover can cost far more.
+USUAL_SLIPPAGE = {"fx": 0.0001, "index": 0.0001, "stocks": 0.0002, "commodities": 0.0002}
+
+
+def usual_slippage(mode, asset_class=None):
+    """The slippage the Studio fills in for a way of trading and an asset class (USUAL_SLIPPAGE)."""
+    asset_class = "fx" if mode == "fx_spot" else (asset_class or mode_defaults(mode).get("asset_class"))
+    return USUAL_SLIPPAGE.get(asset_class, USUAL_SLIPPAGE["stocks"])
+
+
 def usual_leverage(mode, asset_class=None, kind="signals"):
     """The leverage the Studio fills in for a way of trading, an asset class and a kind of strategy.
 
@@ -361,9 +381,10 @@ def usual_instrument(mode, kind="signals", ticker=None, given=None):
     it names them, else from the ticker (usual_market); the rest from the market and the mode:
     the usual leverage and point size (usual_leverage, usual_point_size), a contract of 100,000
     units (a standard lot) on FX CFDs and FX spot and 1 on other CFDs, vectorbtX's mode defaults
-    for sizes, the price field, commission and the spread, no other costs, and floor rounding.
-    Each value is what vectorbtX would use for a blank, apart from the market, which a blank
-    leaves unknown.
+    for sizes, the price field, commission and the spread, the usual slippage (usual_slippage), no
+    other costs, and floor rounding. Each value is what a blank runs as: vectorbtX's own, or, for
+    leverage, the point size and slippage, the Studio's, which instrument_fields names for a blank.
+    The market is the exception: a blank leaves it unknown.
 
     ⚠️ No borrow_rate: no rate is published, and a blank one makes the run say the short was
     borrowed for free, which is the point (CLAUDE.md, "The borrow fee follows how a thing is
@@ -386,7 +407,7 @@ def usual_instrument(mode, kind="signals", ticker=None, given=None):
            "commission_pct": defaults.get("commission_pct") or 0.0,
            "commission_flat": defaults.get("commission_flat") or 0.0,
            "commission_per_unit": 0.0, "commission_min": 0.0,
-           "spread_points": defaults.get("spread_points"), "slippage": 0.0,
+           "spread_points": defaults.get("spread_points"), "slippage": usual_slippage(mode, asset_class),
            "rounding": "floor", "leverage_type": "instrument_level",
            "price_field": defaults.get("price_field")}
     if asset_class == "fx":
@@ -968,7 +989,8 @@ def vectorisable(spec, space):
 
 
 def run_vectorised(spec, data, params_list, window=None, data_dir=None, offline=False, static_rate=None):
-    """One PortfolioBacktest call for many trials. Returns one portfolio per trial, in order.
+    """One PortfolioBacktest call for many trials. Returns [{"pf", "warnings"}], one per trial, in order:
+    each trial's portfolio and vectorbtX's warnings about it, as run_backtest gives them.
 
     PortfolioBacktest accepts cash_sharing=False and group_by=False, so each column
     is an independent account; tests/test_vectorised.py checks that every trial
@@ -1007,8 +1029,24 @@ def run_vectorised(spec, data, params_list, window=None, data_dir=None, offline=
         runtime["rates"] = build_rates(base, runtime["close"].index, offline=offline, static_rate=static_rate,
                                        data_dir=data_dir)
     kwargs = {keyword: runtime[value] if how == "var" else value for keyword, (how, value) in args.items()}
-    pf = vectorbtx().x.PortfolioBacktest(**kwargs)
-    return [pf[[column]] for column in columns]
+    # vectorbtX's warnings, collected as run_backtest collects them (see there, and RUN_LOCK).
+    with RUN_LOCK, warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", UserWarning)
+        pf = vectorbtx().x.PortfolioBacktest(**kwargs)
+    notes = []
+    for warning in caught:
+        message = str(warning.message)
+        if issubclass(warning.category, UserWarning) and message not in notes:
+            notes.append(message)
+    out = []
+    for column in columns:
+        # A warning that names this trial's column is about it, said with the symbol's name; one that
+        # names no trial is about every one. ⚠️ A warning listing several trials keeps the others'
+        # labels (trial_5) beside this one's: vectorbtX joins them into one sentence.
+        own = [note.replace(f"{column}:", f"{symbol}:") for note in notes
+               if f"{column}:" in note or not re.search(r"\btrial_\d+:", note)]
+        out.append({"pf": pf[[column]], "warnings": own})
+    return out
 
 
 def warm_up():

@@ -20,6 +20,7 @@ import itertools
 import json
 import math
 import pickle
+import re
 import time
 import types
 from pathlib import Path
@@ -290,14 +291,29 @@ def evaluate_trial(task):
                                   static_rate=job["settings"]["vectorbtx"].get("static_rate"))
     except engine.backtest_error() as error:
         return {"params": params, "objective": float("nan"), "error": str(error)}
-    return score(run["pf"], job, params, want_returns=task.get("want_returns"))
+    return score(run["pf"], job, params, want_returns=task.get("want_returns"), notes=run["warnings"])
 
 
-def score(pf, job, params, want_returns=False):
-    """The objective, the extras and the constraints for one trial's portfolio."""
+def score(pf, job, params, want_returns=False, notes=()):
+    """The objective, the extras and the constraints for one trial's portfolio.
+
+    `notes`: vectorbtX's warnings about the trial's run. The first sentence of each is kept, one
+    per line, as "notes": what happened (entries below the minimum size were not placed, entries
+    were cut to the leverage), which is the reason behind "only 4 trades" that the trade count
+    alone cannot give (the owner's MA job, 20 November 2026). Only the first sentence, because the
+    whole trials table is rewritten after every batch; the rest is vectorbtX's advice in its own
+    arguments, which the results page replaces with the Studio's (analysis.WARNING_HINTS).
+    """
     extras = trial_extras(pf)
     value = METRICS[job["metric"]]["fn"](pf)
-    result = {"params": params, "objective": value, "metric": value, **extras, "error": None}
+    said = []
+    for note in notes or ():
+        # A sentence ends at ". " before a capital: "1.0 £/point" and "2013-12-09" do not end one.
+        first = re.split(r"(?<=[.!?])\s+(?=[A-Z])", str(note).strip(), maxsplit=1)[0]
+        if first not in said:
+            said.append(first)
+    result = {"params": params, "objective": value, "metric": value, **extras, "error": None,
+              "notes": "\n".join(said) or None}
     constraints = job.get("constraints") or {}
     if constraints.get("min_trades") and extras["n_trades"] < constraints["min_trades"]:
         # Without a trade-count floor, optimisers reliably find parameters that
@@ -330,7 +346,7 @@ def evaluate_chunk(tasks):
                                        static_rate=job["settings"]["vectorbtx"].get("static_rate"))
     except engine.backtest_error():
         return [evaluate_trial(task) for task in tasks]
-    return [score(pf, job, params) for params, pf in zip(params_list, trials)]
+    return [score(trial["pf"], job, params, notes=trial["warnings"]) for params, trial in zip(params_list, trials)]
 
 
 def selftest_objective(space, params):
@@ -599,6 +615,53 @@ def best_trial(trials, direction):
         return None
     index = finite["objective"].idxmax() if direction == "maximize" else finite["objective"].idxmin()
     return finite.loc[index]
+
+
+def range_check(spec, data, space, min_trades, window=None, data_dir=None, offline=False, static_rate=None,
+                metric="sharpe"):
+    """Before a job starts: the strategy at its own settings, then each searched setting at both ends of its
+    range, on its step as the searches keep it (Optuna moves a stop of 42 by 3 from 10 to 40), or at each of a
+    list's options (at most eight, else the first and last), the others at their own; on the history the
+    search uses (`window`).
+
+    [{"path" (None: the strategy's own settings), "value", "trades", "enough" (at least `min_trades`),
+      "error", "notes" (what vectorbtX said, as a trial records it)}]. A setting whose ends fall short may still
+    have valid values between them; a strategy whose own settings and every end fall short is unlikely to have
+    any (the owner's MA job, 20 November 2026: 5,000 trials, none valid, from a slippage of 20% a fill). Only
+    the top level of a conditional space: a nested setting needs its branch chosen.
+    """
+    job = {"metric": metric, "constraints": {"min_trades": min_trades or None}}
+    points = [(None, None)]
+    for path, opt in space.items():
+        if "values" in opt:
+            values = list(opt["values"])
+            ends = values if len(values) <= 8 else [values[0], values[-1]]
+        else:
+            low, high = opt["min"], opt["max"]
+            if opt.get("step"):
+                # 1e-9: (0.2 - 0.01) / 0.01 is 18.999999999999996, which would floor a step short.
+                high = low + math.floor((high - low) / opt["step"] + 1e-9) * opt["step"]
+            ends = [int(round(low)), int(round(high))] if opt.get("int") else [float(low), round(float(high), 12)]
+        for value in ends:
+            points.append((path, value))
+    rows = []
+    for path, value in points:
+        params = {} if path is None else {path: _python(value)}
+        try:
+            run = engine.run_backtest(spec, data, params=params, window=window, data_dir=data_dir, offline=offline,
+                                      static_rate=static_rate)
+        except (engine.backtest_error(), RuntimeError) as error:
+            # ⚠️ RuntimeError too: vectorbtX's re-sizing loop gives up on a run where many entries are
+            # cut to the cash (docs/UPSTREAM.md issue 36). The check reports it at that point, since a
+            # trial there would stop the whole job, rather than abort the check or hide it.
+            rows.append({"path": path, "value": value, "trades": None, "enough": False,
+                         "error": f"could not run: {error}", "notes": None})
+            continue
+        result = score(run["pf"], job, params, notes=run["warnings"])
+        rows.append({"path": path, "value": value, "trades": result["n_trades"],
+                     "enough": not min_trades or result["n_trades"] >= min_trades, "error": None,
+                     "notes": result["notes"]})
+    return rows
 
 
 def split_window(index, train_fraction):

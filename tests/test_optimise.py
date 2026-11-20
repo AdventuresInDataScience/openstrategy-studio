@@ -87,6 +87,47 @@ def test_butchc_conditional_space():
     assert "gap" not in result["best_params"]
 
 
+def test_a_trial_keeps_what_vectorbtx_said_about_its_run(ma_spec, ohlcv):
+    """Why a trial made few trades: the first sentence of each vectorbtX warning, beside the count
+    (the owner's MA job, 20 November 2026, where every trial said only "only 1 trades")."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import engine
+
+    ma_spec["instruments"]["EURUSD=X"]["min_size"] = 5.0        # risk 100 over 60 points is a stake of 1.67
+    params = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}
+    run = engine.run_backtest(ma_spec, ohlcv, params=params)
+    job = {"metric": "sharpe", "constraints": {"min_trades": 30}}
+    result = O.score(run["pf"], job, params, notes=run["warnings"])
+    assert result["error"] == "only 0 trades"
+    lines = result["notes"].split("\n")
+    below = [line for line in lines if "minimum tradeable size" in line]
+    assert below and below[0].startswith("EURUSD=X: ") and below[0].endswith("placed on those bars."), lines
+    assert "Increase" not in result["notes"]          # vectorbtX's advice is left to the results page's hints
+    # A run vectorbtX says nothing about records no notes.
+    assert O.score(run["pf"], job, params)["notes"] is None
+
+
+def test_the_range_check_runs_each_end_and_says_where_trades_fall_short(ma_spec, ohlcv):
+    """Before a job: the strategy at its own settings, then each setting at both ends of its range, on its
+    step as the searches keep it; a risk too small for the minimum stake makes no trade, and says why."""
+    pytest.importorskip("vectorbtx")
+    ma_spec["features"]["fast"]["params"]["timeperiod"] = 5
+    ma_spec["features"]["slow"]["params"]["timeperiod"] = 20
+    slow, risk = "features.slow.params.timeperiod", "risk.sizing.risk_amount"
+    space = {slow: {"min": 10, "max": 42, "int": True, "step": 3},          # Optuna's own last value is 40
+             risk: {"min": 1.0, "max": 200.0, "step": 0.5}}
+    rows = O.range_check(ma_spec, ohlcv, space, min_trades=5)
+    assert [(row["path"], row["value"]) for row in rows] == [(None, None), (slow, 10), (slow, 40), (risk, 1.0),
+                                                            (risk, 200.0)]
+    assert rows[0]["enough"] and rows[0]["trades"] >= 5, rows[0]
+    # 1 at risk over a 60-point stop is a stake of 0.017 a point, under the smallest size of 1.
+    assert rows[3]["trades"] == 0 and not rows[3]["enough"] and "minimum tradeable size" in rows[3]["notes"]
+    assert rows[4]["enough"], rows[4]
+    # A float range on its step: (0.2 - 0.01) / 0.01 is 18.999999999999996, still 0.2.
+    rows = O.range_check(ma_spec, ohlcv, {"risk.stop.pct": {"min": 0.01, "max": 0.2, "step": 0.01}}, min_trades=0)
+    assert [row["value"] for row in rows[1:]] == [0.01, 0.2] and all(row["enough"] for row in rows)
+
+
 def test_every_metric_scores_a_real_backtest(ma_spec, ohlcv, momentum_spec, ohlcv_multi):
     """Each objective on the Optimise page returns a finite number (phase 0: three used to raise every trial)."""
     pytest.importorskip("vectorbtx")

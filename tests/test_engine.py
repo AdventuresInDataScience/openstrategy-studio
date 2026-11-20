@@ -181,7 +181,7 @@ def competing_spec(account, score=None, symbols=("AAA", "BBB", "CCC")):
     if score is not None:
         features["score"] = {"indicator": "studio:python", "inputs": {}, "params": {"code": score}}
     instrument = {"point_size": 1.0, "quote_currency": "USD", "cost_currency": "USD",
-                  "spread_points": 0.0, "leverage": 1.0}
+                  "spread_points": 0.0, "slippage": 0.0, "leverage": 1.0}
     rules = {"long_entry": one({"left": {"feature": "pulse"}, "op": "between", "lower": {"const": 0.5},
                                 "upper": {"const": 1.5}}),
              "long_exit": one({"left": {"feature": "pulse"}, "op": ">", "right": {"const": 1.5}}),
@@ -394,9 +394,10 @@ def test_golden_numbers_from_the_vectorbtx_example(ma_spec):
 def pulse_spec(slot, bar, exit_slot, exit_bar, risk=None, symbol="X", spread_points=0.0):
     """A spec whose rule fires exactly once, at `bar`, via a Python block.
 
-    The spread defaults to zero so fills are the bare open or stop price: these
-    tests are about timing. Equity mode's own default is one point, charged as
-    half a point on every fill; test_spread_is_paid_on_every_fill pins that.
+    The spread defaults to zero, and slippage is zero, so fills are the bare open or stop
+    price: these tests are about timing. Equity mode's own default is one point, charged as
+    half a point on every fill; test_spread_is_paid_on_every_fill pins that. (A blank slippage
+    is the Studio's usual one, engine.usual_slippage, so it is named.)
     """
     code = (f"out = close * 0.0\nout.iloc[{bar}] = 1.0\nout.iloc[{exit_bar}] = 2.0\nreturn out")
     rules = {"long_entry": None, "long_exit": None, "short_entry": None, "short_exit": None}
@@ -405,7 +406,7 @@ def pulse_spec(slot, bar, exit_slot, exit_bar, risk=None, symbol="X", spread_poi
     return {"version": 2, "name": "pulse", "setup": {"kind": "signals", "trading": "equity"},
             "data": {"symbols": [symbol], "timeframe": "1d", "start": "2000-01-01", "end": "2100-01-01"},
             "instruments": {symbol: {"point_size": 1.0, "quote_currency": "USD",
-                                     "cost_currency": "USD", "spread_points": spread_points}},
+                                     "cost_currency": "USD", "spread_points": spread_points, "slippage": 0.0}},
             "features": {"pulse": {"indicator": "studio:python", "inputs": {}, "params": {"code": code}}}, "rules": rules,
             "risk": risk or {"sizing": {"size": 1}, "stop": {"kind": "none"}},
             "account": {"init_cash": 10_000, "freq": "D"}}
