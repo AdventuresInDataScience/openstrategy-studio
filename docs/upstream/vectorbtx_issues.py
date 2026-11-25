@@ -1023,6 +1023,24 @@ def check_exit_commission_from_its_own_size():
     return wrong_total > 0, "; ".join(said)
 
 
+# ---------------------------------------------------------------------------
+# 39. A run that never trades has a Sharpe and a Sortino ratio of +inf
+# ---------------------------------------------------------------------------
+
+def check_flat_account_ratios():
+    # No entry, so the account never moves: its returns are all 0, and 0 / 0 has no value. vectorbt's
+    # sharpe_ratio_1d_nb and sortino_ratio_1d_nb return +inf whenever the spread is 0, whatever the mean.
+    o, h, l, c = frames([100.0 + 0.5 * k for k in range(60)])
+    none = mask(c.index, ["X"], [])
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": EQUITY}, entries=none, exits=none,
+                                 init_cash=10_000, freq="D")
+    sharpe = float(np.asarray(pf.sharpe_ratio()).ravel()[0])
+    sortino = float(np.asarray(pf.sortino_ratio()).ravel()[0])
+    trades = int(np.asarray(pf.trades.count()).ravel()[0])
+    present = np.isinf(sharpe) or np.isinf(sortino)
+    return present, f"{trades} trades; sharpe_ratio() {sharpe}, sortino_ratio() {sortino} (expected NaN for both)"
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -1065,6 +1083,7 @@ CHECKS = [
     (37, "A run with entries cut to the cash rebuilds the whole run for each cut entry, ~30 ms of Python each",
      check_cut_entries_build_the_run_once),
     (38, "A minimum commission on an exit is worked out from another order's size", check_exit_commission_from_its_own_size),
+    (39, "A run that never trades has a Sharpe and a Sortino ratio of +inf", check_flat_account_ratios),
 ]
 
 

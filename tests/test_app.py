@@ -1054,8 +1054,13 @@ def test_the_optimiser_results_lead_with_the_best_settings_in_and_out_of_sample(
     app.run()
     assert not app.exception, [item.value for item in app.exception]
     metrics = {item.label: item.value for item in app.metric}
+    assert summary["held_out"]["n_trades"] > 0
     assert metrics["Sharpe ratio, out of sample"] == f"{summary['held_out']['metric']:.4g}"
     assert "Sharpe ratio, in sample" in metrics
+    # The job's number and objective in the picker, its method and objective under it.
+    picker = next(item for item in app.selectbox if item.label == "Job")
+    assert picker.options[0].startswith("#1 MA cross: random · Sharpe ratio, maximised · "), picker.options
+    assert "Random search · Sobol sequence · Sharpe ratio, maximised" in [item.value for item in app.caption]
     settings_table = app.dataframe[0].value
     assert list(settings_table.columns) == ["Setting", "Best", "When the job ran", "Searched"]
     assert set(settings_table["Setting"]) == {"fast › timeperiod", "slow › timeperiod"}
@@ -1072,9 +1077,19 @@ def test_the_optimiser_results_lead_with_the_best_settings_in_and_out_of_sample(
     shown = app.session_state["best_backtest"]
     assert shown["split"] is not None
     table = shown["table"]
-    assert list(table.columns) == ["In sample (searched)", "Out of sample (held back)", "Whole period"]
+    assert list(table.columns) == ["In sample (searched)", "Out of sample (held back)", "Whole period",
+                                   "Held back, inside the whole run"]
     assert table.loc["Sharpe ratio (the objective)", "Out of sample (held back)"] == f"{summary['held_out']['metric']:.4g}"
     assert "Sharpe ratio" not in table.index          # the objective is not listed twice
+    # Each part's own run from the starting cash, and the whole run's held-back part from what it had grown to.
+    assert table.loc["Starting value", "Out of sample (held back)"] == "10,000"
+    assert table.loc["From", "Held back, inside the whole run"] == table.loc["From", "Out of sample (held back)"]
+    # A whole tear sheet for each part (the owner, 25 November 2026), the whole period's first.
+    assert list(shown["windows"]) == ["In sample (searched)", "Out of sample (held back)", "Whole period"]
+    assert any(item.value == "**Portfolio**" for item in app.markdown)
+    part = next(item for item in app.get("button_group") if item.label == "Tear sheet of")
+    part.set_value("Out of sample (held back)").run()
+    assert not app.exception, [item.value for item in app.exception]
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
     # A job from before the backtest was saved runs it, with the same numbers.
     (job_dir / "best_backtest.pkl").unlink()
@@ -1096,14 +1111,108 @@ def test_the_best_trials_chart_marks_where_the_held_back_part_starts():
     frames = make_ohlcv(300, ("EURUSD=X",))
     results = analysis.extract_results(engine.run_backtest(spec, frames), benchmark=True)
     split = frames["close"].index[200]
-    for view in analysis.SPLIT_VIEWS:
-        fig = analysis.fig_split(results, split, "page", view=view, symbol="EURUSD=X")
-        kinds = sorted(shape.type for shape in fig.layout.shapes)
+    for view in ("equity", "drawdown", "price", "rolling", "trades"):
+        fig = analysis.fig_split(results, split, "page", view=view)
+        kinds = sorted(shape.type for shape in fig.layout.shapes if shape.type in ("line", "rect"))
         assert kinds == ["line", "rect"], (view, kinds)
         assert [shape.line.dash for shape in fig.layout.shapes if shape.type == "line"] == ["dash"]
         assert any("Out of sample" in note.text for note in fig.layout.annotations), view
-    # With nothing held back, nothing is marked.
+    # A chart that does not run along the dates (the monthly heatmap) is not marked, and with nothing held back
+    # nothing is.
+    assert not analysis.FIGURES["monthly"].get("dates")
+    assert not [shape for shape in analysis.fig_split(results, split, "page", view="monthly").layout.shapes
+                if shape.type == "rect"]
     assert not analysis.fig_split(results, None, "page").layout.shapes
+
+
+def test_the_held_back_part_inside_the_whole_run_is_the_charts():
+    """continuing_extras: the whole run's held-back part, from what the account was worth at the split. From the
+    first bar it is the whole run; from a later one, its trades are those entered from there."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import analysis, engine, optimise
+    from conftest import make_ohlcv
+
+    spec = load_template("ma_cross")
+    spec["account"].pop("rates")
+    spec["features"]["fast"]["params"]["timeperiod"] = 5
+    spec["features"]["slow"]["params"]["timeperiod"] = 20
+    pf = engine.run_backtest(spec, make_ohlcv(500, ("EURUSD=X",)))["pf"]
+    index = pf.wrapper.index
+    whole = optimise.trial_extras(pf)
+    start = analysis.continuing_extras(pf, index[0])
+    assert start["start_value"] == 10000 and start["n_trades"] == whole["n_trades"]
+    assert start["total_return"] == pytest.approx(whole["total_return"])
+    assert start["max_drawdown"] == pytest.approx(whole["max_drawdown"])
+    later = analysis.continuing_extras(pf, index[300])
+    entered = pf.trades.records["entry_idx"]
+    assert later["n_trades"] == int((entered >= 300).sum()) and 0 < later["n_trades"] < whole["n_trades"]
+    value = analysis._total(pf.value())            # one column: an FX pair runs through PortfolioBacktest
+    assert later["start_value"] == pytest.approx(float(value.iloc[299]))
+    assert later["total_return"] == pytest.approx(float(value.iloc[-1] / value.iloc[299] - 1))
+    # A run with no trades has no Sharpe ratio to show, whatever vectorbt says (+inf, docs/UPSTREAM.md 39).
+    assert analysis.shown_number(float("inf"), "ratio") == "—"
+    assert analysis.shown_number(float("inf"), "factor") == "no losing trades"
+    assert analysis.shown_number(0.2, "pct") == "20.0%"
+
+
+def test_a_held_back_test_with_no_trades_says_why(tmp_path, monkeypatch):
+    """The owner (25 November 2026): no trade out of sample and a Sharpe ratio of inf looked like a bug. The page
+    says the test made no trades, from the starting cash, in the backtest's words with the Studio's hint, and
+    shows no score for it."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import jobs
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    job_dir = finished_job(tmp_path, constraints={"min_trades": 2})
+    summary = jobs.read_summary(job_dir)
+    assert {"notes", "error"} <= set(summary["held_out"])             # what the worker records now
+    note = ("EURUSD=X: 78 of 78 entries fall below the minimum tradeable size (1.0 £/point) and were rounded to "
+            "zero, so NO ORDER is placed on those bars.")
+    summary["held_out"].update(n_trades=0, metric=float("inf"), sharpe=float("inf"), total_return=0.0, notes=note)
+    jobs.write_json(job_dir / "summary.json", summary)
+    app = testing.AppTest.from_file(str(APP / "pages" / "5_Optimiser_results.py"), default_timeout=180)
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    metrics = {item.label: item.value for item in app.metric}
+    assert metrics["Sharpe ratio, out of sample"] == "—"
+    (warning,) = [item.value for item in app.warning if "held-back test" in item.value]
+    assert "made no trades" in warning and "starting cash (10,000)" in warning and "minimum tradeable size" in warning
+    assert any(item.value.startswith("In the Studio: raise the risk or the amount") for item in app.caption)
+
+
+def test_the_best_settings_over_random_periods(tmp_path, monkeypatch):
+    """The owner (25 November 2026): the spread of each number over periods drawn at random, each from the
+    starting cash, as a box chart; the same seed draws the same periods, and the held-back history's are in it."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import analysis, config, jobs, optimise
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    job_dir = finished_job(tmp_path)
+    job = jobs.read_job(job_dir)
+    with open(job_dir / "frames.pkl", "rb") as handle:
+        import pickle
+        frames = pickle.load(handle)
+    params = jobs.read_summary(job_dir)["best_params"]
+    seen = []
+    out = analysis.random_periods(job, frames, params, config.load_settings(), count=6, length=0.3, seed=3,
+                                  progress=lambda done, total: seen.append((done, total)))
+    periods = out["periods"]
+    assert len(periods) == 6 and seen[-1] == (6, 6) and out["bars"] == 150
+    index = frames["close"].index
+    for start, end in zip(periods["from"], periods["to"]):
+        assert index.get_loc(end) - index.get_loc(start) + 1 == 150
+    again = analysis.random_periods(job, frames, params, config.load_settings(), count=6, length=0.3, seed=3)
+    assert again["periods"]["from"].tolist() == periods["from"].tolist()
+    held = analysis.random_periods(job, frames, params, config.load_settings(), count=4, length=0.5, seed=3,
+                                   within="held_back")["periods"]
+    first_held = optimise.split_window(index, job["split"]["train_fraction"])[1][0]
+    assert (held["from"] >= first_held).all()
+    assert {"annualised_return", "max_drawdown", "sharpe", "n_trades", "metric", "notes"} <= set(periods.columns)
+    fig = analysis.fig_periods(periods, out["whole"], "page")
+    assert [title.text for title in fig.layout.annotations[:4]] == ["Annualised return", "Max drawdown",
+                                                                   "Sharpe ratio", "Trades"]
+    assert len({trace.marker.color for trace in fig.data}) == 1           # one series, one colour
 
 
 def test_the_optimise_page_has_no_job_runner_check(tmp_path, monkeypatch):
@@ -1153,8 +1262,9 @@ def test_a_running_job_shows_its_stage_progress_and_time_left(tmp_path, monkeypa
 
 
 def test_every_backend_shows_its_options_named_in_words(tmp_path, monkeypatch):
-    """Each backend's own options render, each with a tooltip, under the backend's own name (the owner, 25 November
-    2026: the list mixed capitals and package names); BUTChC's batch starts at the worker count."""
+    """Every backend is asked the same two things, a backend and one of its methods (the owner, 25 November 2026:
+    Optuna asked for a sampler, SciPy for a method, Nevergrad for an optimiser). Each method's options render,
+    each with a tooltip; the job is named by both; BUTChC's batch starts at the worker count."""
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
     from openstrategy_studio import config, optimise
@@ -1168,14 +1278,42 @@ def test_every_backend_shows_its_options_named_in_words(tmp_path, monkeypatch):
     assert picker.options == [optimise.BACKENDS[name]["label"] for name in optimise.BACKENDS]
     for name in optimise.BACKENDS:
         next(item for item in app.selectbox if item.label == "Backend").set_value(name).run()
-        assert not app.exception, (name, [item.value for item in app.exception])
-        assert not settings_without_a_tooltip(app), (name, settings_without_a_tooltip(app))
-        assert next(item for item in app.text_input if item.label == "Job name").value.endswith(
-            optimise.BACKENDS[name]["label"])
+        for method in optimise.METHODS[name]:
+            box = next(item for item in app.selectbox if item.label == "Method")
+            assert box.options == [item["label"] for item in optimise.METHODS[name].values()]
+            assert box.disabled == (len(optimise.METHODS[name]) == 1)
+            if not box.disabled:
+                box.set_value(method).run()
+            assert not app.exception, (name, method, [item.value for item in app.exception])
+            assert not settings_without_a_tooltip(app), (name, method, settings_without_a_tooltip(app))
+            assert next(item for item in app.text_input if item.label == "Job name").value.endswith(
+                optimise.search_label(name, {"method": method}))
         if name == "butchc":
             batch = next(item for item in app.slider if item.label == "Batch")
             assert batch.value == min(16, int(config.load_settings()["workers"]))
     assert not [item for item in app.warning if "optional extra" in item.value]
+    # Old labels are gone: one word, Method, for every backend.
+    assert not [item for item in app.selectbox if item.label in ("Sampler", "Optimiser")]
+    # A comparison picks searches, each a backend and a method.
+    next(item for item in app.radio if item.label == "Run").set_value("compare").run()
+    assert not app.exception, [item.value for item in app.exception]
+    searches = next(item for item in app.multiselect if item.label == "Searches to compare")
+    assert "Optuna · CMA-ES" in searches.options and "Grid search · Many trials per backtest" not in searches.options
+    assert not [item for item in app.selectbox if item.label == "Method"]
+
+
+def test_the_optimise_page_folds_by_section(tmp_path, monkeypatch):
+    """The owner (25 November 2026): with many variables the page grew too long. Each part is a section that folds."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    labels = [panel.label for panel in app.expander]
+    assert labels[:5] == ["Variables to optimise (2)", "Search", "Objective and constraints", "Robustness", "Jobs"]
 
 
 def test_the_optimise_settings_last_across_pages(tmp_path, monkeypatch):
@@ -1192,7 +1330,7 @@ def test_the_optimise_settings_last_across_pages(tmp_path, monkeypatch):
     assert not app.exception, [item.value for item in app.exception]
     widget = lambda kind, label: next(item for item in getattr(app, kind) if item.label == label)
     widget("selectbox", "Backend").set_value("nevergrad").run()
-    widget("selectbox", "Optimiser").set_value("PSO").run()
+    widget("selectbox", "Method").set_value("PSO").run()
     widget("number_input", "Budget (trials)").set_value(120).run()
     widget("number_input", "Minimum trades").set_value(7).run()
     widget("selectbox", "Metric").set_value("sortino").run()
@@ -1203,7 +1341,7 @@ def test_the_optimise_settings_last_across_pages(tmp_path, monkeypatch):
     app.switch_page("pages/4_Optimise.py").run()
     assert not app.exception, [item.value for item in app.exception]
     assert widget("selectbox", "Backend").value == "nevergrad"
-    assert widget("selectbox", "Optimiser").value == "PSO"
+    assert widget("selectbox", "Method").value == "PSO"
     assert widget("number_input", "Budget (trials)").value == 120
     assert widget("number_input", "Minimum trades").value == 7
     assert widget("selectbox", "Metric").value == "sortino"
@@ -1248,8 +1386,12 @@ def test_a_stopped_job_is_reported_until_another_is_started(tmp_path, monkeypatc
     app, said = render()
     assert not said, said
     table = app.dataframe[-1].value.set_index("Job")
-    assert table.loc["MA cross: old", "Status"] == "Stopped from outside before it finished"
-    assert table.loc["MA cross: new", "Status"] == "Done" and table.loc["MA cross: new", "Backend"] == "BUTChC"
+    # One trials cell says how a job ended (no Status or Budget column), and the search names its method too.
+    assert list(table.columns) == ["#", "Search", "Objective", "Best", "Trials", "Started"]
+    assert table.loc["MA cross: old", "Trials"] == "0 of 200, stopped from outside before it finished"
+    assert table.loc["MA cross: new", "Trials"] == "0 of 200"
+    assert table.loc["MA cross: new", "Search"] == "BUTChC · Bayesian update tree"
+    assert table["#"].tolist() == [2, 1]
 
 
 def test_a_job_with_no_valid_trial_says_why(tmp_path, monkeypatch):

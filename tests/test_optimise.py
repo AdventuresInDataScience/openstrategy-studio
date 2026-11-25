@@ -78,6 +78,12 @@ def test_scipy_direct_runs_each_point_once():
     tried = [tuple(sorted(params.items())) for params, _ in trials]
     assert len(tried) == len(set(tried))
     invalid_half("scipy", options={"method": "direct"})
+    # DIRECT ends its iteration past maxfun (13 on a budget of 12): the budget caps the backtests run.
+    for budget in (12, 13, 30):
+        seen = []
+        O.run_scipy(SPACE, lambda batch: seen.extend(batch) or [O.selftest_objective(SPACE, p) for p in batch],
+                    budget, "maximize", 0, {"method": "direct"})
+        assert len(seen) <= budget, (budget, len(seen))
 
 
 @pytest.mark.parametrize("optimizer", ["TwoPointsDE", "PSO", "CMA", "PortfolioDiscreteOnePlusOne", "OnePlusOne",
@@ -87,7 +93,7 @@ def test_nevergrad(optimizer):
     as the job runs them; and a seed repeats it."""
     pytest.importorskip("nevergrad")
     assert optimizer in O.NEVERGRAD_OPTIMISERS
-    options = {"optimizer": optimizer, "batch": 4}
+    options = {"method": optimizer, "batch": 4}
     first = check("nevergrad", tolerance=0.15, visits_trap=optimizer != "CMA", options=options, budget=300)
     invalid_half("nevergrad", options=options)
     second, _ = drive("nevergrad", budget=300, options=options)
@@ -109,6 +115,30 @@ def test_nevergrad_offers_only_what_the_page_lists():
 def test_optuna():
     pytest.importorskip("optuna")
     check("optuna", tolerance=0.05, options={"batch": 4})
+
+
+def test_every_backend_has_its_methods_under_one_name():
+    """The owner (25 November 2026): Optuna asked for a sampler, SciPy for a method, Nevergrad for an optimiser.
+    Every backend now has methods, read from backend_options["method"], and a method that is not a backend's own
+    (a comparison shares one job's options) runs its default."""
+    assert set(O.METHODS) == set(O.BACKENDS)
+    assert all(O.METHODS[backend] for backend in O.BACKENDS)
+    assert O.method_of("optuna", {"method": "cmaes"}) == "cmaes"
+    assert O.method_of("optuna", {"method": "direct"}) == "tpe"          # SciPy's, so Optuna's default
+    assert O.method_of("scipy", {}) == "differential_evolution"
+    assert set(O.METHODS["nevergrad"]) == set(O.NEVERGRAD_OPTIMISERS)
+    assert O.search_label("optuna", {"method": "tpe"}) == "Optuna · TPE"
+    assert O.search_label("scipy:direct") == "SciPy · DIRECT"           # as a comparison names its searches
+    assert O.search_label("marsopt") == "marsopt · Mixed adaptive random search"
+    # Jobs from before: the library's own words for the method, and the vectorised grid as a backend.
+    assert O.search_label("optuna", {"sampler": "nsga2"}) == "Optuna · NSGA-II"
+    assert O.search_label("nevergrad", {"optimizer": "PSO"}) == "Nevergrad · Particle swarm"
+    assert O.search_label("grid_vectorised") == "Grid search · Many trials per backtest"
+    # Optuna picks its sampler from the method.
+    seen = []
+    O.run_optuna({"a": {"min": 0.0, "max": 1.0}}, lambda batch: seen.extend(batch) or [0.0] * len(batch), 4,
+                 "maximize", 0, {"method": "random", "batch": 2})
+    assert len(seen) == 4
 
 
 def test_butchc():

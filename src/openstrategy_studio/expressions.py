@@ -298,114 +298,249 @@ def _number(value):
     return str(value)
 
 
-def _rule_rows(label, rule):
-    rows = []
-    if rule is None:
-        return rows
-    if "choose" in rule and "options" in rule:
-        rows.append((label, f"version {rule['choose']} of {', '.join(rule['options'])}"))
-        rule = rule["options"][rule["choose"]]
-    else:
-        rows.append((label, rule.get("logic") or "(no logic line)"))
-    for letter, condition in (rule.get("conditions") or {}).items():
-        rows.append((f"  {letter}", condition_text(condition)))
-    return rows
+def logic_words(tree, conditions):
+    """A rule's logic line in words, each condition by what it says: "close crosses above slow and rsi is
+    below 30". A part joined by another operator is bracketed, as the logic line itself must be."""
+    if isinstance(tree, str):
+        condition = conditions.get(tree)
+        return condition_text(condition) if condition else tree
+    if "not" in tree:
+        inner = logic_words(tree["not"], conditions)
+        return f"not {inner}" if isinstance(tree["not"], str) else f"not ({inner})"
+    parts = []
+    for arg in tree["args"]:
+        text = logic_words(arg, conditions)
+        parts.append(text if isinstance(arg, str) or "not" in arg else f"({text})")
+    if tree["op"] in ("and", "or"):
+        return f" {tree['op']} ".join(parts)
+    return f"{LOGIC_WORDS[tree['op']]} of: " + "; ".join(parts)
 
 
-def _distance_text(node):
-    """How far a stop or target sits, in words: "50 pts", "2.00% of the price", "3 x atr", "at ema"."""
+def _rule_words(rule):
+    """(text, items) for one rule: its logic in words, or the logic line and each condition as an item when a
+    sentence would be hard to read (more than two conditions, or operators mixed); "(no logic line)"."""
+    if rule.get("choose") is not None and rule.get("options"):
+        text, items = _rule_words(rule["options"][rule["choose"]])
+        return f"{text} (version {rule['choose']} of {', '.join(rule['options'])})", items
+    conditions = rule.get("conditions") or {}
+    if not (rule.get("logic") or "").strip():
+        return "(no logic line yet)", []
+    try:
+        tree = parse_logic(rule["logic"])
+    except ValueError:
+        return f"{rule.get('logic') or '(no logic line)'} (the logic line does not read)", []
+    if len(conditions) <= 2 or (isinstance(tree, dict) and "op" in tree and tree["op"] in ("and", "or")
+                                and all(isinstance(arg, str) for arg in tree["args"])):
+        if len(conditions) <= 2 or isinstance(tree, str):
+            return logic_words(tree, conditions), []
+        # Three or more joined by one operator: a list reads better than one long sentence.
+        lead = "all of these are true" if tree["op"] == "and" else "any of these is true"
+        return lead + ":", [condition_text(conditions[name]) for name in tree["args"] if name in conditions]
+    return f"{rule.get('logic')}, where:", [f"{name}: {condition_text(condition)}"
+                                           for name, condition in conditions.items()]
+
+
+def _distance_words(node, anchor):
+    """How far a stop or target sits, in words: "13.14% from the entry", "50 points from the entry",
+    "3 x atr from the entry", "at ema". `anchor` is what a distance is measured from."""
     unit = node.get("unit", "points")
     if unit == "pct":
-        return f"{node['pct']:.2%} of the price"
+        return f"{_percent(node['pct'])} {anchor}"
     if unit == "multiple":
-        return f"{_number(node['multiple'])} x {ref_text(node.get('line') or {})}"
+        return f"{_number(node['multiple'])} x {ref_text(node.get('line') or {})} {anchor}"
     if unit == "level":
         return f"at {ref_text(node.get('line') or {})}"
-    return f"{_number(node['points'])} pts"
+    return f"{_number(node['points'])} points {anchor}"
 
 
-def summary(spec):
-    """The strategy as (label, text) rows, for the Build page's At a glance panel."""
+# A timeframe as a run of bars reads ("daily bars"), by spec.TIMEFRAMES and the higher ones.
+TIMEFRAME_WORDS = {"1m": "1-minute", "5m": "5-minute", "15m": "15-minute", "30m": "30-minute", "1h": "hourly",
+                   "4h": "4-hour", "1d": "daily", "1w": "weekly", "1M": "monthly"}
+# What each rule slot does, as the start of its sentence.
+SLOT_WORDS = {"long_entry": "Buy", "long_exit": "Sell", "short_entry": "Sell short", "short_exit": "Buy back"}
+
+
+def plan(spec):
+    """The strategy on a page, as it would be told: a list of sentences, each {"tone", "lead", "text",
+    "items"} (a part's tone, the sentence's first words in bold, the rest, and a list under it), and
+    "after", a sentence after the list, on an exit that closes at a stop too.
+
+    "Spread bets on SPY, long only, on daily bars from 2010-01-01 to 2026-11-19, from 10,000. Buy when the
+    close crosses above JMA_slow. Sell when the low crosses below JMA_fast, or at the stop or the target.
+    Each trade risks 20.00% of the balance, with a stop loss 13.14% from the entry and a take profit 7.54%
+    from the entry." The Build page's At a glance panel reads it (the owner, 25 November 2026: the panel
+    listed every setting, but did not read as a strategy).
+    """
     from .indicators import describe
-    from .spec import SLOT_LABELS, strategy_kind, trading_mode, variables
+    from .spec import strategy_kind, trading_mode, tunable_inputs, variables
 
-    rows = []
+    out = []
     data = spec.get("data") or {}
-    rows.append(("Market", f"{', '.join(data.get('symbols') or [])} · {data.get('timeframe')} · "
-                           f"{data.get('start')} to {data.get('end')}"))
+    symbols = ", ".join(data.get("symbols") or []) or "no symbols yet"
     kind = strategy_kind(spec)
-    rows.append(("Trades", f"{'on signals' if kind == 'signals' else 'a portfolio'}, "
-                           f"{TRADING_WORDS.get(trading_mode(spec), trading_mode(spec))}"))
-    for name, feature in (spec.get("features") or {}).items():
-        rows.append(("Feature", f"{name} = {describe(feature)}"))
+    mode = trading_mode(spec)
+    rules = spec.get("rules") or {}
+    if not data.get("symbols"):
+        market = f"No symbols yet ({TRADING_WORDS.get(mode, mode)})"
+        if kind == "signals" and not any(rules.get(f"{side}_entry") for side in ("long", "short")):
+            market += ", no entry rule yet"
+    elif kind == "signals":
+        market = {"equity": f"{symbols}, bought outright", "cfd": f"CFDs on {symbols}",
+                  "spreadbet": f"Spread bets on {symbols}", "fx_spot": f"FX spot on {symbols}"}.get(mode, symbols)
+        sides = [side for side in ("long", "short") if rules.get(f"{side}_entry")]
+        market += {("long",): ", long only", ("short",): ", short only", ("long", "short"): ", long and short",
+                   (): ", with no entry rule yet"}[tuple(sides)]
+    else:
+        market = f"A portfolio of {symbols}" + {"equity": ", bought outright", "cfd": ", as CFDs",
+                                                "spreadbet": ", as spread bets", "fx_spot": ", as FX spot"}.get(mode, "")
+    account = spec.get("account") or {}
+    money = _number(account.get("init_cash")) + (f" {account['base_currency']}" if account.get("base_currency") else "")
+    # Leverage as the instrument grid sets it: said when every symbol names it (a blank one is the usual for the
+    # market, which the grid shows), once when they agree.
+    given = [item.get("leverage") for item in (spec.get("instruments") or {}).values() if isinstance(item, dict)]
+    levered = ""
+    if given and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in given):
+        if len(set(given)) > 1:
+            levered = ", with leverage set per symbol"
+        elif float(given[0]) > 1:
+            levered = f", at up to {_number(float(given[0]))}x leverage"
+    shared = ", one account for every symbol" if account.get("cash") == "shared" and kind == "signals" else ""
+    timeframe = TIMEFRAME_WORDS.get(data.get("timeframe"), str(data.get("timeframe")))
+    out.append({"tone": "setup", "lead": market, "items": [],
+                "text": f", on {timeframe} bars from {data.get('start')} to {data.get('end')}, starting with "
+                        f"{money}{levered}{shared}."})
+
     if kind == "signals":
-        for slot, label in SLOT_LABELS.items():
-            rows += _rule_rows(label, (spec.get("rules") or {}).get(slot))
         risk = spec.get("risk") or {}
-        parts = []
+        stop = risk.get("stop") or {}
+        target = risk.get("target") or {}
+        exits = risk.get("exits") or {}
+        # What closes a position whatever its exit rule says (validate_spec: a stop's kind says whether there
+        # is one; never the dict).
+        closes = []
+        if stop.get("kind") in ("fixed", "trailing"):
+            closes.append("the trailing stop" if stop["kind"] == "trailing" else "the stop")
+        if target.get("kind") == "fixed":
+            closes.append("the target")
+        if exits.get("time_bars") is not None:
+            closes.append(f"after {exits['time_bars']} bars")
+        for slot, verb in SLOT_WORDS.items():
+            rule = rules.get(slot)
+            side = slot.split("_")[0]
+            if slot.endswith("_exit") and not rules.get(f"{side}_entry"):
+                continue
+            tone = "entry" if slot.endswith("_entry") else "exit"
+            if rule is None and slot.endswith("_entry"):
+                continue
+            if rule is None:
+                if closes:
+                    out.append({"tone": tone, "lead": verb, "items": [],
+                                "text": f" only at {_joined(closes, 'or')}: there is no {side} exit rule."})
+                else:
+                    out.append({"tone": tone, "lead": verb, "items": [],
+                                "text": f" never: there is no {side} exit rule, stop or target, so each {side} is "
+                                        "held until an opposite entry or the end of the history."})
+                continue
+            text, items = _rule_words(rule)
+            block = {"tone": tone, "lead": verb, "text": " when " + text, "items": items}
+            if slot.endswith("_exit") and closes:
+                # After the list when there is one: "or" inside "all of these are true" would change it.
+                if items:
+                    block["after"] = f"Or at {_joined(closes, 'or')}."
+                else:
+                    block["text"] += f", or at {_joined(closes, 'or')}"
+            if not items:
+                block["text"] += "."
+            out.append(block)
+
         sizing = risk.get("sizing") or {}
-        # A share of the account says what it is a share of (risk_of), when that is not the starting cash.
-        of = {"balance": " of the balance", "equity": " of the equity"}.get(sizing.get("risk_of"), "")
+        of = {"balance": "the balance", "equity": "the equity"}.get(sizing.get("risk_of"), "the account")
+        size = "no size set"
         for key, value in sizing.items():
             if key == "risk_of":
                 continue
-            share = f"{value:.2%}" if isinstance(value, (int, float)) else str(value)
-            parts.append({"risk_pct": f"risk {share}{of} a trade", "risk_amount": f"risk {_number(value)} a trade",
-                          "stake": f"stake {_number(value)}", "notional": f"positions of {_number(value)}",
-                          "size": f"size {_number(value)}",
-                          "notional_pct": f"positions worth {share}{of}"}.get(key, f"{key} {value}"))
-        stop = risk.get("stop") or {}
-        if stop.get("kind") in ("fixed", "trailing"):
-            parts.append(f"{stop['kind']} stop " + _distance_text(stop))
-        target = risk.get("target") or {}
+            share = _percent(value) if isinstance(value, (int, float)) else str(value)
+            unit = {"equity": "share", "fx_spot": "lot", "cfd": "contract"}.get(mode, "unit")
+            unit += "" if value == 1 else "s"
+            size = {"risk_pct": f"risks {share} of {of}", "risk_amount": f"risks {_number(value)}",
+                    "stake": (f"is a stake of {_number(value)} a point" if mode == "spreadbet"
+                              else f"is {_number(value)} {unit}"),
+                    "notional": f"is worth {_number(value)}", "notional_pct": f"is worth {share} of {of}",
+                    "size": f"is {_number(value)} {unit}"}.get(key, f"{key} {value}")
+        guards = []
+        if stop.get("kind") == "fixed":
+            guards.append("a stop loss " + _distance_words(stop, "from the entry"))
+        elif stop.get("kind") == "trailing":
+            guards.append("a trailing stop " + _distance_words(stop, "behind the best price"))
         if target.get("kind") == "fixed":
-            parts.append("target " + _distance_text(target))
-        exits = risk.get("exits") or {}
-        if exits.get("time_bars") is not None:
-            parts.append(f"out after {exits['time_bars']} bars")
+            guards.append("a take profit " + _distance_words(target, "from the entry"))
         if exits.get("breakeven_points") is not None:
-            parts.append(f"breakeven at {_number(exits['breakeven_points'])} pts")
+            guards.append(f"the stop moved to the entry after {_number(exits['breakeven_points'])} points")
         if exits.get("step_points") is not None:
-            parts.append(f"step {_number(exits['step_points'])} pts")
+            guards.append(f"the stop stepped up every {_number(exits['step_points'])} points")
         orders = risk.get("orders") or {}
+        timing = []
         if orders.get("good_for_day"):
-            parts.append("entries good for the day")
+            timing.append("Entries are good for the day only.")
         if orders.get("flat_by_day_end"):
-            parts.append("flat by the day's end")
-        rows.append(("Risk", " · ".join(parts) or "no sizing set"))
+            timing.append("Every position is closed by the day's end.")
+        out.append({"tone": "risk", "lead": "Each trade", "items": [],
+                    "text": f" {size}" + (f", with {_joined(guards)}" if guards else ", with no stop or target")
+                            + "." + "".join(f" {sentence}" for sentence in timing)})
     else:
+        parts = []
         selection = spec.get("selection")
         if selection:
-            how = (f"{selection.get('mode', 'top')} {selection.get('top_n')}" if selection.get("mode", "top")
-                   in ("top", "bottom") else f"score at least {selection.get('min_score')}")
-            rows.append(("Selection", f"{how} by {ref_text(selection.get('score'))}"))
-        weighting = spec.get("weighting") or {}
-        rows.append(("Weighting", str(weighting.get("scheme"))))
+            how = (f"the {selection.get('mode', 'top')} {selection.get('top_n')}" if selection.get("mode", "top")
+                   in ("top", "bottom") else f"those scoring at least {selection.get('min_score')}")
+            parts.append(f"holds {how} by {ref_text(selection.get('score'))}")
+        scheme = (spec.get("weighting") or {}).get("scheme")
+        parts.append({"equal": "weights them equally", "inverse_vol": "weights them by the inverse of their "
+                      "volatility", "price": "weights them by price", "fixed": "holds fixed weights"}
+                     .get(scheme, f"weights them by {scheme}"))
         schedule = spec.get("schedule") or {}
         rebalance = schedule.get("rebalance")
         if rebalance == "calendar":
             calendar = schedule.get("calendar") or {}
-            text = f"every {calendar.get('freq')} ({calendar.get('on', 'first')} day)"
-            if schedule.get("threshold") is not None:
-                text += f" {schedule.get('combine', 'and')} drift over {schedule['threshold']}"
+            period = {"W": "week", "M": "month", "Q": "quarter", "Y": "year"}.get(calendar.get("freq"),
+                                                                                 str(calendar.get("freq")))
+            text = f"rebalances on the {calendar.get('on', 'first')} bar of each {period}"
+            threshold = schedule.get("threshold")
+            if threshold is not None:
+                # spec: an asset's weight drifting by more than this share of its target (0.05 = 5%).
+                drift = f"a weight has drifted more than {_percent(threshold)} from its target"
+                text += (f", when {drift}" if schedule.get("combine", "and") == "and"
+                         else f", and whenever {drift}")
         else:
-            text = {"never": "never (buy and hold)", "every_bar": "every bar"}.get(rebalance, str(rebalance))
-        rows.append(("Rebalance", text))
-    account = spec.get("account") or {}
-    text = f"{_number(account.get('init_cash'))}"
-    if account.get("base_currency"):
-        text += f" in {account['base_currency']}"
-    if account.get("rates"):
-        text += f" · rates: {account['rates'].get('source')}"
-    if account.get("cash") == "shared" and kind == "signals":
-        text += " · one shared account"
-    rows.append(("Account", text))
+            text = {"never": "never rebalances (buy and hold)", "every_bar": "rebalances every bar"}.get(
+                rebalance, f"rebalances {rebalance}")
+        parts.append(text)
+        out.append({"tone": "entry", "lead": "It", "text": " " + _joined(parts) + ".", "items": []})
+
+    features = spec.get("features") or {}
+    if features:
+        out.append({"tone": "feature", "lead": "Where", "text": "", "items": [
+            f"{name} is {describe(feature)}" for name, feature in features.items()]})
     found = variables(spec)
     if found:
-        rows.append(("Optimise", f"{len(found)} variable{'s' if len(found) != 1 else ''}"))
+        labels = {row["path"]: row["label"] for row in tunable_inputs(spec)}
+        items = []
         for path, variable in found.items():
             span = (", ".join(map(_number, variable["values"])) if "values" in variable else
                     f"{_number(variable.get('start'))} to {_number(variable.get('stop'))}"
-                    + (f" step {_number(variable['step'])}" if variable.get("step") else ""))
-            rows.append(("  ", f"{path.replace('features.', '').replace('.params', '')}: {span}"))
-    return rows
+                    + (f" by {_number(variable['step'])}" if variable.get("step") else ""))
+            items.append(f"{labels.get(path, path)}: {span}")
+        out.append({"tone": None, "lead": "Optimising", "items": items,
+                    "text": f" {len(found)} setting{'s' if len(found) != 1 else ''}, on the Optimise page:"})
+    return out
+
+
+def _joined(parts, word="and"):
+    """"a", "a and b", "a, b and c" (or "or")."""
+    parts = list(parts)
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + f" {word} " + parts[-1]
+
+
+def _percent(value):
+    """A fraction as a percentage with no trailing zeros: 0.2 is "20%", 0.13138 is "13.14%"."""
+    return f"{value * 100:.2f}".rstrip("0").rstrip(".") + "%"

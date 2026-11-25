@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from openstrategy_studio import config, jobs
+from openstrategy_studio import config, jobs, store
 
 from conftest import make_ohlcv
 
@@ -67,17 +67,49 @@ def test_job_with_a_process_pool(home):
 
 
 def test_backend_comparison_job(home):
+    """A comparison may name each search's method ("scipy:direct"), recorded as named; a plain backend runs its
+    default, whatever method the job's own options hold (Optuna's TPE means nothing to SciPy)."""
     job = selftest_job(12, batch=4)
-    job.update(kind="compare", compare={"backends": ["random", "grid", "scipy"], "seeds": [0, 1]})
+    job["backend_options"]["method"] = "tpe"
+    job.update(kind="compare", compare={"backends": ["random", "grid", "scipy", "scipy:direct"], "seeds": [0, 1]})
     job_dir = jobs.start_job(home, job, make_ohlcv(20))
     progress = wait_for(job_dir, {"done", "failed", "cancelled"})
     assert progress["status"] == "done", progress.get("error")
     trials = jobs.read_trials(job_dir)
-    assert set(trials["backend"]) == {"random", "grid", "scipy"}
+    assert set(trials["backend"]) == {"random", "grid", "scipy", "scipy:direct"}
     assert trials.groupby(["backend", "seed"]).size().max() <= 12
     summary = jobs.read_summary(job_dir)["compare"]
-    assert set(summary["backends"]) == {"random", "grid", "scipy"}
+    assert set(summary["backends"]) == {"random", "grid", "scipy", "scipy:direct"}
     assert all(item["runs"] == 2 for item in summary["backends"].values())
+    # DIRECT is deterministic and differential evolution is not: the two SciPy searches are different searches.
+    direct = trials[trials["backend"] == "scipy:direct"]
+    assert direct.groupby("seed")["params_json"].apply(tuple).nunique() == 1
+
+
+def test_jobs_are_numbered_in_the_order_they_start(home):
+    """A # to keep track of each job by (the owner, 25 November 2026), kept in the job and the index."""
+    first = jobs.start_job(home, selftest_job(4), make_ohlcv(20))
+    second = jobs.start_job(home, selftest_job(4), make_ohlcv(20))
+    for job_dir in (first, second):
+        wait_for(job_dir, {"done", "failed", "cancelled"})
+    assert jobs.read_job(first)["number"] == 1 and jobs.read_job(second)["number"] == 2
+    assert jobs.list_jobs(home)["number"].tolist() == [2, 1]            # newest first
+    assert store.next_job_number(home) == 3
+
+
+def test_jobs_from_before_numbers_are_numbered_once_by_when_they_started(tmp_path):
+    """An index made before jobs had numbers gains the column, its jobs numbered in the order they were started."""
+    import sqlite3
+
+    path = tmp_path / "catalogue.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE jobs (job_id TEXT PRIMARY KEY, name TEXT, kind TEXT, backend TEXT, created_at TEXT, "
+                     "path TEXT)")
+        conn.execute("INSERT INTO jobs VALUES ('b', 'later', 'optimise', 'optuna', '2026-11-25T10:00:00+00:00', 'x')")
+        conn.execute("INSERT INTO jobs VALUES ('a', 'earlier', 'optimise', 'optuna', '2026-11-19T10:00:00+00:00', 'y')")
+    listed = store.list_jobs(tmp_path).set_index("job_id")["number"]
+    assert listed.to_dict() == {"a": 1, "b": 2}
+    assert store.next_job_number(tmp_path) == 3
 
 
 def running_job_dir(tmp_path, pid, heartbeat_age, done=10, budget=40):

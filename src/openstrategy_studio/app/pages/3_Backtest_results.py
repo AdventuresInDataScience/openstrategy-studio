@@ -10,7 +10,6 @@ import pandas as pd
 import streamlit as st
 
 from openstrategy_studio import analysis, data as data_module, engine, store, ui
-from openstrategy_studio.analysis import FIGURES
 from openstrategy_studio.spec import validate_spec
 
 settings, data_dir = ui.boot("Backtest results")
@@ -117,76 +116,6 @@ elif save.button("Save run"):
     last["saved"] = analysis.save_run(data_dir, results, last["spec"], settings, last["fingerprint"])
     st.success("Saved. It is listed on Home and can be reopened or compared here.")
 
-# How the run was funded. Runs saved before the meta recorded it say nothing.
-accounts = results["meta"].get("accounts") or {}
-if accounts.get("model") == "separate":
-    st.info(f"{accounts['count']} separate accounts, one per symbol, each starting with {accounts['each']:,.0f} "
-            f"({accounts['count'] * accounts['each']:,.0f} in all). The tables and charts treat them as one book; "
-            "the table under them shows each account on its own."
-            + (" To trade every symbol from one account, make the account shared on the Build page's Account tab."
-               if results["meta"]["kind"] == "signals" else ""))
-elif accounts.get("model") == "shared" and results["meta"]["kind"] == "signals":
-    st.caption(f"One account of {accounts['each']:,.0f}, shared by every symbol.")
-
-# What vectorbtX could not price, or priced on an assumption. Runs saved before the meta
-# recorded these say nothing.
-notes = results["meta"].get("warnings") or []
-if notes:
-    lines = []
-    for note, hint in analysis.warning_hints(notes):
-        lines.append(f"- {note}" + (f"\n\n  **{hint}**" if hint else ""))
-    st.warning("vectorbtX flagged this run. The run finished, but its numbers may leave something out:\n\n"
-               + "\n".join(lines))
-
-# --- the chart first --------------------------------------------------------------------
-names = analysis.available_figures(results)
-row = st.columns([2, 3])
-name = row[0].selectbox("View", names, format_func=lambda key: FIGURES[key]["label"],
-                        help="Which chart to draw from this run. It opens on the equity curve against buy and hold.")
-with row[1]:
-    theme, glow = ui.theme_picker(settings, "backtest")
-options = {}
-if name == "price":
-    symbols = results["meta"]["symbols"]
-    choices = sorted(results["features"]["feature"].unique()) if "features" in results else []
-    left, right = st.columns(2)
-    options["symbol"] = left.selectbox("Symbol", symbols, help="Which symbol's prices and trades to show.")
-    options["overlays"] = tuple(right.multiselect("Overlay features (pattern hits show as diamonds)", choices,
-                                                  help="Feature lines to draw over the price."))
-elif name == "rolling":
-    options["window"] = st.slider("Window (bars)", 10, 504, 63,
-                                  help="How many bars each rolling figure is measured over (63 is about a "
-                                       "quarter of daily bars).")
-elif name == "monte_carlo":
-    options["paths"] = st.select_slider("Paths", [100, 250, 500, 1000, 2500], value=500,
-                                        help="How many times the trades are put in a random order to draw the "
-                                             "bands. More gives steadier bands and takes longer.")
-
-# Built only when selected, and cached on (run, view, theme, options).
-cache = st.session_state.setdefault("figures", {})
-cache_key = (last["id"], name, theme, glow, tuple(sorted(options.items())))
-if cache_key not in cache:
-    cache[cache_key] = FIGURES[name]["fn"](results, theme, glow and FIGURES[name]["lines"], **options)
-figure = cache[cache_key]
-for item in figure if isinstance(figure, tuple) else (figure,):
-    ui.chart(item)
-
-# --- then every metric --------------------------------------------------------------------
-st.divider()
-columns = st.columns(3)
-for column, (table_name, label) in zip(columns, (("portfolio", "Portfolio"), ("trades", "Trades"), ("returns", "Returns"))):
-    with column:
-        st.markdown(f"**{label}**")
-        ui.table(analysis.stats_frame(results, table_name), height=420)
-st.caption("Z-score reads the other way round from most metrics: a negative value means wins and losses cluster "
-           "in streaks. It is a dependency test, not a quality score.")
-if "per_symbol" in results:
-    st.markdown("**Each symbol**")
-    ui.table(results["per_symbol"], hide_index=False)
-    if accounts.get("model") != "separate":
-        st.caption("A symbol in a shared account has no equity of its own, so only what it traded is shown.")
-
-with st.expander("Trades"):
-    ui.table(results["trades"])
-with st.expander("Orders"):
-    ui.table(results["orders"])
+# The tear sheet: the chart first, then every metric (ui.tear_sheet, which the Optimiser results page
+# draws for each part of a best trial too).
+ui.tear_sheet(results, "backtest", last["id"], settings=settings)

@@ -1,4 +1,4 @@
-Work through the steps left to right. The **At a glance** panel on the right shows the whole strategy as it stands, and lists anything to fix before it can run. Each part of the strategy has its own colour: setup blue, features cyan, entry rules green, exit rules red, risk amber, the account purple.
+Work through the steps left to right. The **At a glance** panel on the right tells the whole strategy as it stands, as you would tell it: what is traded and how (*Spread bets on SPY, long only, on daily bars ...*), when it buys and sells, what each trade risks with its stop and take profit, what its features are and what is optimised. It then lists anything to fix before it can run. Each part of the strategy has its own colour: setup blue, features cyan, entry rules green, exit rules red, risk amber, the account purple.
 
 The Studio starts with a blank strategy each time. **Start from** at the top gives a blank one again, or a ready-made template to edit.
 

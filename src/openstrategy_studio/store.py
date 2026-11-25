@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY, name TEXT, spec_hash TEXT, created_at TEXT, summary TEXT, path TEXT
 );
 CREATE TABLE IF NOT EXISTS jobs (
-    job_id TEXT PRIMARY KEY, name TEXT, kind TEXT, backend TEXT, created_at TEXT, path TEXT
+    job_id TEXT PRIMARY KEY, name TEXT, kind TEXT, backend TEXT, created_at TEXT, path TEXT, number INTEGER
 );
 """
 
@@ -41,6 +41,14 @@ def _connect(data_dir):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(catalogue)")}
     if "ticker" not in columns:
         conn.execute("ALTER TABLE catalogue ADD COLUMN ticker TEXT")
+        conn.commit()
+    # Jobs listed before they had numbers (25 November 2026) are numbered once, in the order they were started,
+    # so each keeps its number when later ones are added.
+    if "number" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
+        conn.execute("ALTER TABLE jobs ADD COLUMN number INTEGER")
+        for number, (job_id,) in enumerate(conn.execute("SELECT job_id FROM jobs ORDER BY created_at, job_id")
+                                           .fetchall(), start=1):
+            conn.execute("UPDATE jobs SET number = ? WHERE job_id = ?", (number, job_id))
         conn.commit()
     return conn
 
@@ -102,13 +110,22 @@ def delete_run(data_dir, run_id):
 
 # --- jobs --------------------------------------------------------------------
 
-def add_job(data_dir, job_id, name, kind, backend, created_at, path):
-    _write(data_dir, "INSERT OR REPLACE INTO jobs VALUES (?, ?, ?, ?, ?, ?)",
-           (job_id, name, kind, backend, created_at, str(path)))
+def next_job_number(data_dir):
+    """The number the next job gets: one more than any job's so far, so a number is never used twice."""
+    with closing(_connect(data_dir)) as conn:
+        return int(conn.execute("SELECT COALESCE(MAX(number), 0) FROM jobs").fetchone()[0]) + 1
+
+
+def add_job(data_dir, job_id, name, kind, backend, created_at, path, number=None):
+    """Index a job. `number`: its #, from next_job_number; given none, the next one."""
+    number = next_job_number(data_dir) if number is None else int(number)
+    _write(data_dir, "INSERT OR REPLACE INTO jobs (job_id, name, kind, backend, created_at, path, number) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?)", (job_id, name, kind, backend, created_at, str(path), number))
 
 
 def list_jobs(data_dir):
-    return _read(data_dir, "SELECT * FROM jobs ORDER BY created_at DESC")
+    # Newest first; the number breaks a tie between jobs started in the same second.
+    return _read(data_dir, "SELECT * FROM jobs ORDER BY created_at DESC, number DESC")
 
 
 def delete_job(data_dir, job_id):

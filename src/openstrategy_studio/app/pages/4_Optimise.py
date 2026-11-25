@@ -1,7 +1,9 @@
-"""Optimise: the variables to search and their ranges, then the backend, budget, objective and
-constraints; start, watch and cancel jobs.
+"""Optimise: the variables to search and their ranges, then the backend and its method, budget, objective
+and constraints; start, watch and cancel jobs.
 
-Jobs run in a separate process, so they keep going if you close the page.
+Each part is a section that folds by its title (the owner, 25 November 2026: with many variables the page
+grew too long to find the start button). Jobs run in a separate process, so they keep going if you close
+the page.
 """
 
 import json
@@ -25,17 +27,6 @@ if missing:
     problems = problems + [f"Import {', '.join(missing)} at {spec['data']['timeframe']} (or finer) on the Data page."]
 ui.show_problems(problems)
 
-# --- variables to optimise ---------------------------------------------------------------
-# Like MT5's inputs: every value the strategy has can be added, features, rule numbers and
-# risk dials alike, each searched over a range (start, step, stop) or a list of values.
-# They are stored in the spec's optimise.variables, keyed by the value's dotted path, so
-# they are written directly here: set_value would split the path at its dots.
-st.subheader("Variables to optimise")
-rows = tunable_inputs(spec)
-by_path = {row["path"]: row for row in rows}
-# Read, not created: rendering a page must not change the spec (the section appears on the first Add).
-found = (spec.get("optimise") or {}).get("variables") or {}
-
 
 def write_variables():
     ui.save_draft()
@@ -46,317 +37,332 @@ def shown(row, value):
     return (row.get("labels") or {}).get(value, value)
 
 
-# The one place a value is added to the search or taken out of it (the owner's call, 20 November
-# 2026): the Build page only shows, under each condition, what is searched here.
-st.caption("Pick what the optimiser searches here, from any part of the strategy. The Build page shows what is "
-           "searched under each rule's conditions.")
-candidates = [row for row in rows if row["path"] not in found]
-if candidates:
-    groups = sorted({row["group"] for row in candidates}, key=["Features", "Rules", "Risk", "Portfolio"].index)
-    # Narrow a long list to one part of the strategy; nothing picked shows every part.
-    part = st.segmented_control("Show", groups, default=None, key=ui.key("optimise", ":part"),
-                                help="Show only one part of the strategy's values in the list below: its features' "
-                                     "settings, its rules' numbers and comparisons, or its risk dials. Press it "
-                                     "again to show every part.")
-    if part:
-        candidates = [row for row in candidates if row["group"] == part]
-    left, right = st.columns([5, 1], vertical_alignment="bottom")
-    picked = left.selectbox("Add a variable", candidates,
-                            format_func=lambda row: f"{row['group']}: {row['label']} (now {shown(row, row['value'])})",
-                            key=ui.key("optimise", ":add"),
-                            help=f"Every value of the strategy that can vary: {', '.join(groups).lower()}.")
-    if right.button("Add", type="primary", key=ui.key("optimise", ":add:go"), icon=":material/add:", width="stretch"):
-        spec.setdefault("optimise", {}).setdefault("variables", {})[picked["path"]] = default_variable(picked)
-        write_variables()
-        ui.renew_widgets()
-        st.rerun()
-if not found:
-    st.info("Nothing to optimise yet. Add a variable above: a feature's setting, a number in a rule, or a risk dial "
-            "such as the stop distance.")
+# --- variables to optimise ---------------------------------------------------------------
+# Like MT5's inputs: every value the strategy has can be added, features, rule numbers and
+# risk dials alike, each searched over a range (start, step, stop) or a list of values.
+# They are stored in the spec's optimise.variables, keyed by the value's dotted path, so
+# they are written directly here: set_value would split the path at its dots.
+rows = tunable_inputs(spec)
+by_path = {row["path"]: row for row in rows}
+# Read, not created: rendering a page must not change the spec (the section appears on the first Add).
+found = (spec.get("optimise") or {}).get("variables") or {}
 counts = []
-for path, variable in list(found.items()):
-    row = by_path.get(path)
-    with st.container(border=True):
-        if row is None:
-            left, right = st.columns([5, 1])
-            left.warning(f"{path} no longer exists in the strategy.")
-            if right.button("Remove", key=ui.key(f"opt:{path}", ":remove")):
+with ui.section(f"Variables to optimise ({len(found)})" if found else "Variables to optimise", "feature",
+                "opt-variables"):
+    # The one place a value is added to the search or taken out of it (the owner's call, 20 November
+    # 2026): the Build page only shows, under each condition, what is searched here.
+    st.caption("Pick what the optimiser searches here, from any part of the strategy. The Build page shows what "
+               "is searched under each rule's conditions.")
+    candidates = [row for row in rows if row["path"] not in found]
+    if candidates:
+        groups = sorted({row["group"] for row in candidates}, key=["Features", "Rules", "Risk", "Portfolio"].index)
+        # Narrow a long list to one part of the strategy; nothing picked shows every part.
+        part = st.segmented_control("Show", groups, default=None, key=ui.key("optimise", ":part"),
+                                    help="Show only one part of the strategy's values in the list below: its "
+                                         "features' settings, its rules' numbers and comparisons, or its risk dials. "
+                                         "Press it again to show every part.")
+        if part:
+            candidates = [row for row in candidates if row["group"] == part]
+        left, right = st.columns([5, 1], vertical_alignment="bottom")
+        picked = left.selectbox("Add a variable", candidates,
+                                format_func=lambda row: f"{row['group']}: {row['label']} (now {shown(row, row['value'])})",
+                                key=ui.key("optimise", ":add"),
+                                help=f"Every value of the strategy that can vary: {', '.join(groups).lower()}.")
+        if right.button("Add", type="primary", key=ui.key("optimise", ":add:go"), icon=":material/add:",
+                        width="stretch"):
+            spec.setdefault("optimise", {}).setdefault("variables", {})[picked["path"]] = default_variable(picked)
+            write_variables()
+            ui.renew_widgets()
+            st.rerun()
+    if not found:
+        st.info("Nothing to optimise yet. Add a variable above: a feature's setting, a number in a rule, or a risk "
+                "dial such as the stop distance.")
+    for path, variable in list(found.items()):
+        row = by_path.get(path)
+        with st.container(border=True):
+            if row is None:
+                left, right = st.columns([5, 1])
+                left.warning(f"{path} no longer exists in the strategy.")
+                if right.button("Remove", key=ui.key(f"opt:{path}", ":remove")):
+                    del found[path]
+                    write_variables()
+                    ui.renew_widgets()
+                    st.rerun()
+                continue
+            head = st.columns([4, 2, 1])
+            # The search radio beside it has no label of its own, so its ⓘ sits on the name.
+            head[0].markdown(f"**{row['label']}**  \n<small>{row['group']} · now {shown(row, row['value'])}</small>",
+                             unsafe_allow_html=True,
+                             help="A range: start, step and stop (the grid tries every step; other searchers any "
+                                  "value in between). These values: a list to try, and nothing else.")
+            ways = ["list"] if row["type"] == "choice" else ["range", "list"]
+            how = head[1].radio("Search", ways, index=0 if "values" not in variable or len(ways) == 1 else 1,
+                                format_func={"range": "A range", "list": "These values"}.get, horizontal=True,
+                                key=ui.key(f"opt:{path}", ":how"), label_visibility="collapsed")
+            if head[2].button("Remove", key=ui.key(f"opt:{path}", ":remove")):
                 del found[path]
                 write_variables()
                 ui.renew_widgets()
                 st.rerun()
-            continue
-        head = st.columns([4, 2, 1])
-        # The search radio beside it has no label of its own, so its ⓘ sits on the name.
-        head[0].markdown(f"**{row['label']}**  \n<small>{row['group']} · now {shown(row, row['value'])}</small>",
-                         unsafe_allow_html=True,
-                         help="A range: start, step and stop (the grid tries every step; other searchers any value "
-                              "in between). These values: a list to try, and nothing else.")
-        ways = ["list"] if row["type"] == "choice" else ["range", "list"]
-        how = head[1].radio("Search", ways, index=0 if "values" not in variable or len(ways) == 1 else 1,
-                            format_func={"range": "A range", "list": "These values"}.get, horizontal=True,
-                            key=ui.key(f"opt:{path}", ":how"), label_visibility="collapsed")
-        if head[2].button("Remove", key=ui.key(f"opt:{path}", ":remove")):
-            del found[path]
-            write_variables()
-            ui.renew_widgets()
-            st.rerun()
-        if how == "range" and "values" in variable:
-            found[path] = default_variable(row)
-            write_variables()
-            ui.renew_widgets()
-            st.rerun()
-        if how == "list" and "values" not in variable:
-            found[path] = {"values": variable_values(variable, row["type"])}
-            write_variables()
-            ui.renew_widgets()
-            st.rerun()
-        if how == "range":
-            cast = int if row["type"] == "int" else float
-            number = {"step": 1} if row["type"] == "int" else {"format": "%g"}
-            columns = st.columns(3)
-            start = columns[0].number_input("Start", value=cast(variable["start"]), key=ui.key(f"opt:{path}", ":start"),
-                                            **number, help="The smallest value to try.")
-            step = columns[1].number_input("Step", value=cast(variable.get("step") or 0), min_value=cast(0),
-                                           key=ui.key(f"opt:{path}", ":step"), **number,
-                                           help="The grid's spacing. Other searchers pick any value in the range "
-                                                "(whole numbers for a whole-number setting).")
-            stop = columns[2].number_input("Stop", value=cast(variable["stop"]), key=ui.key(f"opt:{path}", ":stop"),
-                                           **number, help="The largest value to try.")
-            new = {"start": cast(start), "stop": cast(stop)}
-            if step:
-                new["step"] = cast(step)
-        else:
-            if row["type"] == "choice":
-                chosen = st.multiselect("Values to try", row["options"], default=[value for value in variable["values"]
-                                                                                   if value in row["options"]],
-                                        key=ui.key(f"opt:{path}", ":values"),
-                                        format_func=lambda value, row=row: str(shown(row, value)),
-                                        help="The choices the optimiser may pick between.")
-                new = {"values": chosen}
+            if how == "range" and "values" in variable:
+                found[path] = default_variable(row)
+                write_variables()
+                ui.renew_widgets()
+                st.rerun()
+            if how == "list" and "values" not in variable:
+                found[path] = {"values": variable_values(variable, row["type"])}
+                write_variables()
+                ui.renew_widgets()
+                st.rerun()
+            if how == "range":
+                cast = int if row["type"] == "int" else float
+                number = {"step": 1} if row["type"] == "int" else {"format": "%g"}
+                columns = st.columns(3)
+                start = columns[0].number_input("Start", value=cast(variable["start"]),
+                                                key=ui.key(f"opt:{path}", ":start"), **number,
+                                                help="The smallest value to try.")
+                step = columns[1].number_input("Step", value=cast(variable.get("step") or 0), min_value=cast(0),
+                                               key=ui.key(f"opt:{path}", ":step"), **number,
+                                               help="The grid's spacing. Other searchers pick any value in the "
+                                                    "range (whole numbers for a whole-number setting).")
+                stop = columns[2].number_input("Stop", value=cast(variable["stop"]), key=ui.key(f"opt:{path}", ":stop"),
+                                               **number, help="The largest value to try.")
+                new = {"start": cast(start), "stop": cast(stop)}
+                if step:
+                    new["step"] = cast(step)
             else:
-                text = st.text_input("Values to try, separated by commas", key=ui.key(f"opt:{path}", ":values"),
-                                     value=", ".join(str(value) for value in variable["values"]),
-                                     help="Exactly these values and no others, such as 10, 20, 50, 100.")
-                parsed = []
-                for piece in text.split(","):
-                    piece = piece.strip()
-                    if piece:
-                        try:
-                            parsed.append(int(piece) if row["type"] == "int" else float(piece))
-                        except ValueError:
-                            st.error(f"'{piece}' is not a {'whole ' if row['type'] == 'int' else ''}number.")
-                new = {"values": parsed}
-        if new != variable:
-            found[path] = new
-            write_variables()
-        size = len(variable_values(found[path], row["type"])) if (found[path].get("values") or
-                                                                    found[path].get("stop") is not None) else 0
-        counts.append(size)
-        st.caption(f"{size} value{'s' if size != 1 else ''} on the grid.")
-if counts:
-    st.caption(f"{math.prod(counts):,} combinations in a full grid.")
+                if row["type"] == "choice":
+                    chosen = st.multiselect("Values to try", row["options"],
+                                            default=[value for value in variable["values"] if value in row["options"]],
+                                            key=ui.key(f"opt:{path}", ":values"),
+                                            format_func=lambda value, row=row: str(shown(row, value)),
+                                            help="The choices the optimiser may pick between.")
+                    new = {"values": chosen}
+                else:
+                    text = st.text_input("Values to try, separated by commas", key=ui.key(f"opt:{path}", ":values"),
+                                         value=", ".join(str(value) for value in variable["values"]),
+                                         help="Exactly these values and no others, such as 10, 20, 50, 100.")
+                    parsed = []
+                    for piece in text.split(","):
+                        piece = piece.strip()
+                        if piece:
+                            try:
+                                parsed.append(int(piece) if row["type"] == "int" else float(piece))
+                            except ValueError:
+                                st.error(f"'{piece}' is not a {'whole ' if row['type'] == 'int' else ''}number.")
+                    new = {"values": parsed}
+            if new != variable:
+                found[path] = new
+                write_variables()
+            size = len(variable_values(found[path], row["type"])) if (found[path].get("values") or
+                                                                        found[path].get("stop") is not None) else 0
+            counts.append(size)
+            st.caption(f"{size} value{'s' if size != 1 else ''} on the grid.")
+    if counts:
+        st.caption(f"{math.prod(counts):,} combinations in a full grid.")
 
-searchable = [path for path in collect_choices(spec) if f"{path}.choose" in variables(spec)]
-structure = False
-if searchable:
-    structure = st.toggle("Also search the rule versions", key=ui.kept("structure", True),
-                          help="The optimiser chooses between the versions of a rule, tuning each one's own numbers "
-                               "only when it is chosen. BUTChC and Optuna only.")
+    searchable = [path for path in collect_choices(spec) if f"{path}.choose" in variables(spec)]
+    structure = False
+    if searchable:
+        structure = st.toggle("Also search the rule versions", key=ui.kept("structure", True),
+                              help="The optimiser chooses between the versions of a rule, tuning each one's own "
+                                   "numbers only when it is chosen. BUTChC and Optuna only.")
 space = optimise.build_space(spec, conditional=structure)
 conditional = optimise.is_conditional(space)
 
-# --- backend ------------------------------------------------------------------------
+# --- the search: a backend and one of its methods ---------------------------------------
 # Every search setting below keeps its value for the session, across visits to other pages
-# (ui.kept): they are not the strategy's, so they are not in the spec.
-st.subheader("Search")
-modes = ["optimise", "walk_forward", "compare"]
-mode = st.radio("Run", modes, horizontal=True, key=ui.kept("mode", "optimise", modes),
-                format_func={"optimise": "One search", "walk_forward": "Walk-forward",
-                             "compare": "Compare backends"}.get,
-                help="Compare backends runs each chosen backend several times on the same budget, so you can see "
-                     "which one finds good settings fastest on THIS strategy.")
-backends = ["optuna", "butchc"] if conditional else list(optimise.BACKENDS)
-if conditional:
-    st.caption("Searching alternatives: only BUTChC and Optuna can do this.")
+# (ui.kept): they are not the strategy's, so they are not in the spec. Every backend is asked the
+# same two things, which backend and which of its methods (optimise.METHODS), the method kept for
+# each backend; a backend with one method shows it, fixed.
 workers_setting = max(1, int(settings.get("workers", 1)))
-row = st.columns(3)
-backend = row[0].selectbox("Backend" if mode != "compare" else "Options from",
-                           backends, format_func=lambda name: optimise.BACKENDS[name]["label"],
-                           key=ui.kept("backend", "optuna", backends),
-                           help="The search method. Optuna learns where good settings are. Grid search tries every "
-                                "combination in order. Random search spreads trials evenly (a baseline). SciPy runs "
-                                "an evolutionary, annealing or DIRECT search. BUTChC learns each setting "
-                                "separately. Nevergrad offers particle swarm, CMA-ES, differential evolution and "
-                                "others. Mixed adaptive random search (marsopt) tries settings near the best ones "
-                                "so far, nearer as the search goes on, one trial at a time. When comparing, this "
-                                "picks whose options below are used.")
-default_budget = max(10 * len(space), 50) if backend == "butchc" else 200
-budget = row[1].number_input("Budget (trials)", min_value=1, step=10, key=ui.kept(f"budget:{backend}", default_budget),
-                             help="How many backtests the search may run. More finds better settings but takes "
-                                  "longer, and makes a lucky result more likely.")
-seed = row[2].number_input("Seed", step=1, key=ui.kept("seed", 0),
-                           help="Makes the search repeat: the same seed and settings try the same trials.")
 options = {}
-if backend == "optuna":
-    samplers = ["tpe", "cmaes", "nsga2", "random", "qmc"]
-    options["sampler"] = st.selectbox("Sampler", samplers, key=ui.kept("optuna_sampler", "tpe", samplers),
-                                      format_func={"tpe": "TPE", "cmaes": "CMA-ES (numbers only)",
-                                                   "nsga2": "NSGA-II", "random": "Random", "qmc": "Quasi-random"}.get,
-                                      help="How Optuna picks the next trial. TPE (the default) learns from the "
-                                           "trials so far. CMA-ES evolves a cloud of points over number settings. "
-                                           "NSGA-II is a genetic algorithm. Random and quasi-random do not learn.")
-    if budget < 50:
+with ui.section("Search", "setup", "opt-search"):
+    modes = ["optimise", "walk_forward", "compare"]
+    mode = st.radio("Run", modes, horizontal=True, key=ui.kept("mode", "optimise", modes),
+                    format_func={"optimise": "One search", "walk_forward": "Walk-forward",
+                                 "compare": "Compare searches"}.get,
+                    help="One search finds the best settings. Walk-forward searches each in-sample window and "
+                         "tests its best settings on the next. Compare searches runs each chosen backend and method "
+                         "several times on the same budget, so you can see which one finds good settings fastest "
+                         "on THIS strategy.")
+    backends = ["optuna", "butchc"] if conditional else list(optimise.BACKENDS)
+    if conditional:
+        st.caption("Searching alternatives: only BUTChC and Optuna can do this.")
+    row = st.columns(4)
+    backend = row[0].selectbox("Backend" if mode != "compare" else "Options from",
+                               backends, format_func=lambda name: optimise.BACKENDS[name]["label"],
+                               key=ui.kept("backend", "optuna", backends),
+                               help="The search library or kind. Optuna learns where good settings are. Grid search "
+                                    "tries every combination in order. Random search spreads trials evenly (a "
+                                    "baseline). SciPy runs an evolutionary, annealing or DIRECT search. BUTChC "
+                                    "learns each setting separately. Nevergrad offers particle swarm, CMA-ES, "
+                                    "differential evolution and others. marsopt tries settings near the best ones so "
+                                    "far, one trial at a time. When comparing, this picks whose options below are "
+                                    "used (each search compared runs the method it names).")
+    methods = list(optimise.METHODS[backend])
+    if mode != "compare":
+        method = row[1].selectbox("Method", methods, key=ui.kept(f"method:{backend}", methods[0], methods),
+                                  format_func=lambda name: optimise.METHODS[backend][name]["label"],
+                                  disabled=len(methods) == 1,
+                                  help=" ".join(f"{item['label']}: {item['help']}"
+                                                for item in optimise.METHODS[backend].values()))
+        options["method"] = method
+    else:
+        method = methods[0]
+        row[1].caption("Each search compared names its own method, below.")
+    default_budget = max(10 * len(space), 50) if backend == "butchc" else 200
+    budget = row[2].number_input("Budget (trials)", min_value=1, step=10,
+                                 key=ui.kept(f"budget:{backend}", default_budget),
+                                 help="How many backtests the search may run. More finds better settings but takes "
+                                      "longer, and makes a lucky result more likely.")
+    seed = row[3].number_input("Seed", step=1, key=ui.kept("seed", 0),
+                               help="Makes the search repeat: the same seed and settings try the same trials.")
+    if mode != "compare":
+        st.caption(optimise.METHODS[backend][method]["help"])
+    # What only some backends or methods need, under the choice.
+    if backend == "optuna" and budget < 50:
         st.caption("Under about 50 trials, Optuna's TPE is usually the better choice on smooth problems.")
-elif backend in ("grid", "grid_vectorised"):
-    size = optimise.grid_size(space)
-    st.caption(f"The grid has {size:,} points" + (f"; the first {int(budget):,} will be tried." if size > budget else "."))
-    if backend == "grid_vectorised":
-        eligible, reason = engine.vectorisable(spec, space)
-        if eligible:
-            options["batch"] = st.slider("Trials per call", 8, 256, key=ui.kept("vectorised_batch", 64),
-                                         help="How many grid points one vectorbtX call runs at once, as columns "
-                                              "side by side. Larger is faster and uses more memory.")
-        else:
-            st.warning(reason)
-elif backend == "scipy":
-    methods = list(optimise.SCIPY_METHODS)
-    options["method"] = st.selectbox("Method", methods, format_func=optimise.SCIPY_METHODS.get,
-                                     key=ui.kept("scipy_method", "differential_evolution", methods),
-                                     help="Differential evolution improves a population of settings by mixing them. "
-                                          "Dual annealing wanders widely at first, then settles near the best it has "
-                                          "found (its local searches are off: they would spend the budget on steps "
-                                          "too small to change a trade). DIRECT divides the ranges into thirds, again "
-                                          "and again, where the scores are best or the untried part is largest; it "
-                                          "uses no seed.")
-    if options["method"] in ("dual_annealing", "direct"):
-        st.caption(f"{optimise.SCIPY_METHODS[options['method']]} runs one trial at a time, so it uses one worker "
+    elif backend == "grid":
+        size = optimise.grid_size(space)
+        st.caption(f"The grid has {size:,} points"
+                   + (f"; the first {int(budget):,} will be tried." if size > budget else "."))
+        if method == "vectorised" and mode != "compare":
+            eligible, reason = engine.vectorisable(spec, space)
+            if eligible:
+                options["batch"] = st.slider("Trials per call", 8, 256, key=ui.kept("vectorised_batch", 64),
+                                             help="How many grid points one vectorbtX call runs at once, as columns "
+                                                  "side by side. Larger is faster and uses more memory.")
+            else:
+                st.warning(reason)
+    elif backend == "scipy" and method in ("dual_annealing", "direct") and mode != "compare":
+        st.caption(f"{optimise.METHODS['scipy'][method]['label']} runs one trial at a time, so it uses one worker "
                    "process whatever the number set below. Differential evolution runs a whole population side by "
                    "side. A point it comes back to (a whole number rounds the same) is not run again, so it can "
                    "finish under its budget.")
-elif backend == "butchc":
-    st.caption("BUTChC learns each parameter separately: optimise a fast window and a gap rather than two coupled "
-               "windows. A rough budget is ten trials per parameter.")
-    # As many as the worker processes by default: BUTChC waits for its whole batch before it learns, so a
-    # batch of 4 on 15 workers left 11 idle (the owner's job of 25 November 2026 ran at 3.5 s a trial,
-    # against 1.4 s with a batch of 12, on the same strategy).
-    options["batch"] = st.slider("Batch", 1, 16, key=ui.kept("butchc_batch", min(16, workers_setting)),
-                                 help="How many trials BUTChC draws before it learns from them, run side by side on "
-                                      "the worker processes. Fewer than the worker processes leaves some idle. Up to "
-                                      "8 costs almost nothing in quality; past 16 it does.")
-    warm = {}
-    for _, job in jobs.list_jobs(data_dir).iterrows():
-        tree = data_dir / "jobs" / job["job_id"] / "prob_tree.pkl"
-        if job["backend"] == "butchc" and tree.exists():
-            # Only a job that searched these same settings: a tree learned over others has nothing to say here.
-            earlier = jobs.read_job(tree.parent) or {}
-            if set(earlier.get("space") or {}) == set(space):
-                warm[str(tree)] = f"{job['name']} ({str(job['created_at'])[:16].replace('T', ' ')})"
-    starts = [None] + list(warm)
-    choice = st.selectbox("Warm start from", starts, key=ui.kept("butchc_warm_start", None, starts),
-                          format_func=lambda path: "Nothing: start from scratch" if path is None else warm[path],
-                          help="Start from what an earlier BUTChC job learned about these same settings, instead of "
-                               "from scratch. Only jobs that searched the same settings are listed.")
-    if choice:
-        options["warm_start"] = choice
-        st.caption("Warm starts must come from a job with the same direction (maximise or minimise).")
-elif backend == "nevergrad":
-    offered = list(optimise.NEVERGRAD_OPTIMISERS)
-    options["optimizer"] = st.selectbox(
-        "Optimiser", offered, key=ui.kept("nevergrad_optimizer", "TwoPointsDE", offered),
-        format_func=lambda name: optimise.NEVERGRAD_OPTIMISERS[name]["label"],
-        help=" ".join(f"{item['label']}: {item['help']}" for item in optimise.NEVERGRAD_OPTIMISERS.values()))
-    st.caption(optimise.NEVERGRAD_OPTIMISERS[options["optimizer"]]["help"])
-    if options["optimizer"] == "CMA" and len(space) == 1 and "values" not in next(iter(space.values())):
+    elif backend == "butchc":
+        st.caption("BUTChC learns each parameter separately: optimise a fast window and a gap rather than two "
+                   "coupled windows. A rough budget is ten trials per parameter.")
+        # As many as the worker processes by default: BUTChC waits for its whole batch before it learns, so a
+        # batch of 4 on 15 workers left 11 idle (the owner's job of 25 November 2026 ran at 3.5 s a trial,
+        # against 1.4 s with a batch of 12, on the same strategy).
+        options["batch"] = st.slider("Batch", 1, 16, key=ui.kept("butchc_batch", min(16, workers_setting)),
+                                     help="How many trials BUTChC draws before it learns from them, run side by side "
+                                          "on the worker processes. Fewer than the worker processes leaves some "
+                                          "idle. Up to 8 costs almost nothing in quality; past 16 it does.")
+        warm = {}
+        for _, job in jobs.list_jobs(data_dir).iterrows():
+            tree = data_dir / "jobs" / job["job_id"] / "prob_tree.pkl"
+            if job["backend"] == "butchc" and tree.exists():
+                # Only a job that searched these same settings: a tree learned over others has nothing to say here.
+                earlier = jobs.read_job(tree.parent) or {}
+                if set(earlier.get("space") or {}) == set(space):
+                    number = f"#{job['number']} " if job["number"] else ""
+                    warm[str(tree)] = f"{number}{job['name']} ({str(job['created_at'])[:16].replace('T', ' ')})"
+        starts = [None] + list(warm)
+        choice = st.selectbox("Warm start from", starts, key=ui.kept("butchc_warm_start", None, starts),
+                              format_func=lambda path: "Nothing: start from scratch" if path is None else warm[path],
+                              help="Start from what an earlier BUTChC job learned about these same settings, instead "
+                                   "of from scratch. Only jobs that searched the same settings are listed.")
+        if choice:
+            options["warm_start"] = choice
+            st.caption("Warm starts must come from a job with the same direction (maximise or minimise).")
+    elif backend == "nevergrad" and method == "CMA" and len(space) == 1 and "values" not in next(iter(space.values())):
         st.caption("With one number setting to search, CMA-ES runs as (1+1): Nevergrad's CMA-ES needs at least two.")
-elif backend == "marsopt":
-    st.caption("Runs one trial at a time, so it uses one worker process whatever the number set below.")
-if backend in ("optuna", "grid", "random", "nevergrad"):
-    options["batch"] = st.slider("Trials per batch", 1, 32, key=ui.kept("batch", min(32, workers_setting)),
-                                 help="How many trials are chosen and run together, spread over the worker "
-                                      "processes. Larger keeps the workers busy; a learning search updates only "
-                                      "between batches.")
+    elif backend == "marsopt":
+        st.caption("Runs one trial at a time, so it uses one worker process whatever the number set below.")
+    if backend in ("optuna", "random", "nevergrad") or (backend == "grid" and method == "loop"):
+        options["batch"] = st.slider("Trials per batch", 1, 32, key=ui.kept("batch", min(32, workers_setting)),
+                                     help="How many trials are chosen and run together, spread over the worker "
+                                          "processes. Larger keeps the workers busy; a learning search updates only "
+                                          "between batches.")
 
-# --- objective --------------------------------------------------------------------------
-st.subheader("Objective and constraints")
-row = st.columns(4)
-metrics = list(optimise.METRICS)
-metric = row[0].selectbox("Metric", metrics, format_func=lambda m: optimise.METRICS[m]["label"],
-                          key=ui.kept("metric", "sharpe", metrics),
-                          help="The number each trial is scored by. Sharpe and Sortino weigh return against its "
-                               "swings, Calmar and the recovery factor against the worst drawdown; profit factor, "
-                               "expectancy and SQN judge the trades.")
-# Kept for each metric, so it still follows the metric: a new metric starts at its own direction.
-directions = ["maximize", "minimize"]
-direction = row[1].radio("Direction", directions,
-                         key=ui.kept(f"direction:{metric}", optimise.METRICS[metric]["direction"], directions),
-                         format_func={"maximize": "Maximise", "minimize": "Minimise"}.get,
-                         help="Whether a higher or a lower metric is better. It follows the metric.")
-min_trades = row[2].number_input("Minimum trades", min_value=0, step=5, key=ui.kept("min_trades", 30),
-                                 help="Without a floor, optimisers find settings that trade twice and win both.")
-max_drawdown = row[3].number_input("Maximum drawdown (0 = off)", min_value=0.0, max_value=1.0, step=0.05,
-                                   format="%.2f", key=ui.kept("max_drawdown", 0.0),
-                                   help="A trial whose worst fall from a peak is deeper than this (0.25 = 25%) "
-                                        "counts as invalid.")
-min_profit_factor = st.number_input("Minimum profit factor (0 = off)", min_value=0.0, step=0.1,
-                                    key=ui.kept("min_profit_factor", 0.0),
-                                    help="A trial whose gross profit divided by gross loss is below this counts as "
-                                         "invalid.")
+    compare_settings = None
+    if mode == "compare":
+        # Every method of every backend the space allows, as "backend:method" (the worker runs each with its own
+        # method); not the grid's many-trials-per-call, which not every strategy can run.
+        offered = [f"{name}:{item}" for name in backends for item in optimise.METHODS[name]
+                   if (name, item) != ("grid", "vectorised")]
+        chosen = st.multiselect("Searches to compare", offered, format_func=optimise.search_label,
+                                key=ui.kept("compare_searches", [name for name in ("optuna:tpe", "butchc:tree",
+                                                                                   "random:sobol")
+                                                                 if name in offered], offered),
+                                help="The backends and methods to race against each other on the same budget.")
+        seeds = st.slider("Runs per search (different seeds)", 1, 10, key=ui.kept("compare_runs", 3),
+                          help="Each search runs this many times with different seeds, which shows how much of its "
+                               "result is luck.")
+        compare_settings = {"backends": chosen, "seeds": list(range(int(seed), int(seed) + seeds))}
+        st.caption(f"{len(chosen) * seeds * int(budget):,} backtests in total: the budget above is per run.")
 
-compare_settings = None
-if mode == "compare":
-    st.subheader("Comparison")
-    offered = [name for name in backends if name not in ("grid_vectorised",)]
-    chosen = st.multiselect("Backends", offered, format_func=lambda name: optimise.BACKENDS[name]["label"],
-                            key=ui.kept("compare_backends", [name for name in ("optuna", "butchc", "random")
-                                                             if name in offered], offered),
-                            help="The search methods to race against each other on the same budget.")
-    seeds = st.slider("Runs per backend (different seeds)", 1, 10, key=ui.kept("compare_runs", 3),
-                      help="Each backend runs this many times with different seeds, which shows how much of its "
-                           "result is luck.")
-    compare_settings = {"backends": chosen, "seeds": list(range(int(seed), int(seed) + seeds))}
-    st.caption(f"{len(chosen) * seeds * int(budget):,} backtests in total: the budget above is per run.")
+# --- objective ---------------------------------------------------------------------------
+with ui.section("Objective and constraints", "entry", "opt-objective"):
+    row = st.columns(4)
+    metrics = list(optimise.METRICS)
+    metric = row[0].selectbox("Metric", metrics, format_func=lambda m: optimise.METRICS[m]["label"],
+                              key=ui.kept("metric", "sharpe", metrics),
+                              help="The number each trial is scored by. Sharpe and Sortino weigh return against its "
+                                   "swings, Calmar and the recovery factor against the worst drawdown; profit factor, "
+                                   "expectancy and SQN judge the trades.")
+    # Kept for each metric, so it still follows the metric: a new metric starts at its own direction.
+    directions = ["maximize", "minimize"]
+    direction = row[1].radio("Direction", directions,
+                             key=ui.kept(f"direction:{metric}", optimise.METRICS[metric]["direction"], directions),
+                             format_func={"maximize": "Maximise", "minimize": "Minimise"}.get,
+                             help="Whether a higher or a lower metric is better. It follows the metric.")
+    min_trades = row[2].number_input("Minimum trades", min_value=0, step=5, key=ui.kept("min_trades", 30),
+                                     help="Without a floor, optimisers find settings that trade twice and win both.")
+    max_drawdown = row[3].number_input("Maximum drawdown (0 = off)", min_value=0.0, max_value=1.0, step=0.05,
+                                       format="%.2f", key=ui.kept("max_drawdown", 0.0),
+                                       help="A trial whose worst fall from a peak is deeper than this (0.25 = 25%) "
+                                            "counts as invalid.")
+    min_profit_factor = st.number_input("Minimum profit factor (0 = off)", min_value=0.0, step=0.1,
+                                        key=ui.kept("min_profit_factor", 0.0),
+                                        help="A trial whose gross profit divided by gross loss is below this counts "
+                                             "as invalid.")
 
-st.subheader("Robustness")
 walk = mode == "walk_forward"
 walk_settings = None
 holdout = 0.0
-if walk:
-    row = st.columns(3)
-    windows = ["rolling", "anchored"]
-    walk_settings = {"window": int(row[0].number_input("In-sample bars", min_value=20, step=50,
-                                                       key=ui.kept("walk_window", 500),
-                                                       help="Bars each fold optimises on.")),
-                     "step": int(row[1].number_input("Out-of-sample bars", min_value=5, step=25,
-                                                     key=ui.kept("walk_step", 125),
-                                                     help="Bars each fold then tests its best settings on, unseen. "
-                                                          "The windows move forward by this much each fold.")),
-                     "mode": row[2].radio("Windows", windows, horizontal=True,
-                                          key=ui.kept("walk_mode", "rolling", windows),
-                                          help="rolling: each in-sample window keeps the same length and moves "
-                                               "forward. anchored: every one starts at the first bar and grows.")}
-    st.caption("The budget is shared between the folds. Signals are computed on the full history and only the "
-               "runs are sliced, so indicators are warmed up and nothing looks ahead.")
-else:
-    holdout = st.slider("Hold back the last part of the history for testing", 0, 50, format="%d%%",
-                        key=ui.kept("holdout", 30),
-                        help="The optimiser never sees it; the best trial is then run on it once.") / 100
-# Kept for each way of running, as it only applies to one search: off and greyed out for the others.
-stability = st.checkbox("Check parameter stability (re-run ±10% around the best)", disabled=mode != "optimise",
-                        key=ui.kept(f"stability:{mode}", mode == "optimise"),
-                        help="Re-runs settings near the best one. Good neighbours mean a broad, real edge; poor "
-                             "ones mean a lucky spike. One search only.")
+with ui.section("Robustness", "risk", "opt-robustness"):
+    if walk:
+        row = st.columns(3)
+        windows = ["rolling", "anchored"]
+        walk_settings = {"window": int(row[0].number_input("In-sample bars", min_value=20, step=50,
+                                                           key=ui.kept("walk_window", 500),
+                                                           help="Bars each fold optimises on.")),
+                         "step": int(row[1].number_input("Out-of-sample bars", min_value=5, step=25,
+                                                         key=ui.kept("walk_step", 125),
+                                                         help="Bars each fold then tests its best settings on, "
+                                                              "unseen. The windows move forward by this much each "
+                                                              "fold.")),
+                         "mode": row[2].radio("Windows", windows, horizontal=True,
+                                              key=ui.kept("walk_mode", "rolling", windows),
+                                              help="rolling: each in-sample window keeps the same length and moves "
+                                                   "forward. anchored: every one starts at the first bar and grows.")}
+        st.caption("The budget is shared between the folds. Signals are computed on the full history and only the "
+                   "runs are sliced, so indicators are warmed up and nothing looks ahead.")
+    else:
+        holdout = st.slider("Hold back the last part of the history for testing", 0, 50, format="%d%%",
+                            key=ui.kept("holdout", 30),
+                            help="The optimiser never sees it; the best trial is then run on it once, from the "
+                                 "starting cash, as each search trial is.") / 100
+    # Kept for each way of running, as it only applies to one search: off and greyed out for the others.
+    stability = st.checkbox("Check parameter stability (re-run ±10% around the best)", disabled=mode != "optimise",
+                            key=ui.kept(f"stability:{mode}", mode == "optimise"),
+                            help="Re-runs settings near the best one. Good neighbours mean a broad, real edge; poor "
+                                 "ones mean a lucky spike. One search only.")
 
+# --- start ---------------------------------------------------------------------------------
 row = st.columns([2, 1])
-# Not kept: it follows the strategy and the backend.
-name = row[0].text_input("Job name", value=f"{spec['name']}: {optimise.BACKENDS[backend]['label']}",
-                         help="How the job is listed here and on the Optimiser results page.")
+# Not kept: it follows the strategy, the backend and its method.
+name = row[0].text_input("Job name", value=f"{spec['name']}: {optimise.search_label(backend, options)}",
+                         help="How the job is listed here and on the Optimiser results page, beside its number.")
 workers = row[1].number_input("Worker processes", min_value=1, step=1, key=ui.kept("workers", workers_setting),
                               help="Processes running trials side by side. Up to your CPU's core count is faster; "
                                    "each one uses its own memory.")
 
 blocked = bool(problems) or not space
-if backend == "grid_vectorised" and mode != "compare" and not engine.vectorisable(spec, space)[0]:
+if backend == "grid" and method == "vectorised" and mode != "compare" and not engine.vectorisable(spec, space)[0]:
     blocked = True
 if mode == "compare" and not (compare_settings or {}).get("backends"):
     blocked = True
@@ -486,7 +492,6 @@ if start_now:
                    "below. The first trials take longest, while each worker process loads the backtest engine.")
 
 # --- jobs ---------------------------------------------------------------------------------
-st.subheader("Jobs")
 listing = jobs.list_jobs(data_dir)
 running = not listing.empty and listing["status"].isin(["starting", "running"]).any()
 
@@ -508,6 +513,17 @@ def since(stamp):
     return (pd.Timestamp.now(tz="UTC") - pd.Timestamp(stamp)).total_seconds()
 
 
+def trials_done(job):
+    """A finished job's trials in one cell, with how it ended when that was not done: the jobs table's status and
+    budget columns were one too many (the owner, 25 November 2026). A done job that ran under its budget (SciPy
+    does not repeat a point) says of how many."""
+    done, budget = int(job.done or 0), int(job.budget or 0)
+    count = f"{done:,}" if job.status == "done" and done >= budget else f"{done:,} of {budget:,}"
+    ended = {"done": "", "cancelled": ", cancelled", "failed": ", failed: see the Optimiser results page",
+             "stopped": ", stopped from outside before it finished"}.get(job.status, f", {job.status}")
+    return count + ended
+
+
 @st.fragment(run_every="3s" if running else None)
 def job_list():
     """Each running job as a card: what it is doing, how far it has got, how long is left. Redrawn every
@@ -524,7 +540,8 @@ def job_list():
             stage = "Starting the worker" if job.status == "starting" else (job.stage or "Searching")
             if isinstance(job.fold, str) and job.fold:
                 stage += f" (walk-forward {job.fold})"
-            ui.card_header(f"job-{job.job_id}", job.name, meta=stage)
+            title = f"#{job.number} {job.name}" if job.number else job.name
+            ui.card_header(f"job-{job.job_id}", title, meta=stage)
             # How long it has run, and how long is left at the pace of the trials so far (once a few
             # are in: the first ones also carry each process's start).
             parts = [f"{done:,} of {total:,} trials"]
@@ -554,20 +571,24 @@ def job_list():
                 break
             if isinstance(job.error, str):
                 st.warning(f"**{job.name}**: {job.error}")
-        table = finished[["name", "backend", "status", "done", "budget", "best_value", "created_at"]].rename(columns={
-            "name": "Job", "backend": "Backend", "status": "Status", "done": "Trials", "budget": "Budget",
-            "best_value": "Best", "created_at": "Started"})
-        table["Backend"] = table["Backend"].map(lambda name: optimise.BACKENDS.get(name, {}).get("label", name))
-        table["Status"] = table["Status"].map(lambda status: {
-            "done": "Done", "cancelled": "Cancelled", "failed": "Failed: see the Optimiser results page",
-            "stopped": "Stopped from outside before it finished"}.get(status, str(status).capitalize()))
-        # No valid trial (or none yet) reads as a dash, not "None".
-        table["Best"] = table["Best"].map(lambda value: "—" if value is None or pd.isna(value) else f"{value:.4g}")
-        table["Started"] = table["Started"].astype(str).str[:16].str.replace("T", " ")
-        ui.table(table)
+        # Its number to keep track of it, what it searched with (the backend AND its method) and for (the
+        # objective, without which "Best" means nothing), and one trials cell (the owner, 25 November 2026).
+        rows = []
+        for job in finished.itertuples():
+            compared = job.searches if job.kind == "compare" and isinstance(job.searches, list) else None
+            rows.append({"#": job.number, "Job": job.name,
+                         "Search": ("Compared: " + ", ".join(optimise.search_label(item) for item in compared)
+                                    if compared else optimise.search_label(job.backend, job.backend_options)),
+                         "Objective": optimise.objective_label(job.metric, job.direction) if job.metric else "",
+                         # No valid trial (or none yet) reads as a dash, not "None".
+                         "Best": "—" if job.best_value is None or pd.isna(job.best_value) else f"{job.best_value:.4g}",
+                         "Trials": trials_done(job),
+                         "Started": str(job.created_at)[:16].replace("T", " ")})
+        ui.table(pd.DataFrame(rows), column_config={"#": st.column_config.NumberColumn(width="small", format="%d")})
         # Words, not st.page_link: a link needs the whole multipage app, which a page tested on its own lacks.
         st.caption("Each job's best settings, in and out of sample, and its backtest are on the **Optimiser "
-                   "results** page in the menu.")
+                   "results** page in the menu, under its number.")
 
 
-job_list()
+with ui.section("Jobs", "account", "opt-jobs"):
+    job_list()

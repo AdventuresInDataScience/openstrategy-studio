@@ -548,6 +548,16 @@ Found on `5cbe635` (25 November 2026), testing 37: a levered share account (5x, 
 * **Fix, a suggestion.** Work the size-dependent fee out from the order's own size: inside the loop, from the previous run's orders (an exit's fee from the position it closes), which `_settle` already iterates to a fixed point; or charge the difference after the run, as holding costs are, from the realised orders. The first keeps the simulation's cash right for the next order.
 * **Studio side.** No workaround. The Studio's instrument grid offers a minimum commission and a commission per unit; with risk sizing or a share of the account their exits are costed wrongly until this is fixed.
 
+### 39. A run that never trades has a Sharpe and a Sortino ratio of +inf (open)
+
+Found on `5cbe635` (25 November 2026), from the owner's JMA jobs: every held-back test reported a Sharpe ratio of `Infinity` with a drawdown of 0, which read as a calculation error. Each made no trade: from the starting cash of 10,000, every entry after 2021 was below the minimum stake of 1 £/point on SPY (vectorbtX's warning said so, but the job did not keep it).
+
+* **Where.** Native vectorbt 1.1.0, `returns/nb.py`: `sharpe_ratio_1d_nb` returns `np.inf` whenever the returns' standard deviation is 0 (line 346), and `sortino_ratio_1d_nb` whenever the downside risk is 0 (line 419), whatever the mean. vectorbtX's `returns_stats`, `sharpe_ratio()` and `stats()` pass it through.
+* **What happens** (check 39). A `PortfolioBacktest` with no entry: its returns are all 0, so the mean and the spread are both 0, and `sharpe_ratio()` and `sortino_ratio()` are `+inf`. 0 / 0 has no value; the infinite answer is only the limit of a positive mean over a vanishing spread. A run with one winning trade and no other move gets +inf the same way.
+* **Why it matters.** A metric reads a run with no trades as infinitely good. An optimiser does not pick it (the Studio drops a non-finite objective), but any table or summary that shows the number misleads; a median over neighbours (the Studio's stability check) can come out +inf.
+* **Fix, a suggestion.** In vectorbtX's returns accessor (or a numba override of the two kernels): NaN when the mean is 0 as well as the spread (a flat account), +inf only when the mean is positive. The same for any ratio of return to risk built on them (the Calmar ratio already gives NaN with no drawdown).
+* **Studio side.** The Studio shows "—" for a non-finite ratio wherever it formats one (`analysis.shown_number`: the best trial's card, the best trial's table, the random periods), and blanks the Sharpe ratio of a run with no trades in the trials table; the stats tables already show a non-finite value as blank (`analysis._jsonable`). Those are display only: the trials keep vectorbt's number. When fixed, nothing to remove.
+
 # ta_patterns issues found by OpenStrategy Studio
 
 Found by the lookahead audit in `tests/test_indicators.py::test_no_entry_looks_ahead`, which computes every catalogue entry on full data and on truncated copies and requires the shared bars to agree. ta_patterns 1.2.1; the local checkout (`../ta_patterns`, `ce791c6`) is identical.

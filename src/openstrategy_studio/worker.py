@@ -55,8 +55,11 @@ def main(job_dir):
 
     (job_dir / "heartbeat").touch()
     threading.Thread(target=heartbeat, name="openstrategy-heartbeat", daemon=True).start()
-    # Which backend run the next trials belong to (the comparison harness runs several).
-    current = {"backend": job["backend"], "seed": job["seed"], "run_trial": 0, "fold": None}
+    # Which backend run the next trials belong to (the comparison harness runs several). "options" are the
+    # backend's own (its method among them); "name" is what the trials table records it as: the backend, or
+    # "backend:method" when a comparison picked the method (optimise.search_label reads both).
+    current = {"backend": job["backend"], "options": dict(job.get("backend_options") or {}), "name": job["backend"],
+               "seed": job["seed"], "run_trial": 0, "fold": None}
 
     def flush():
         # The whole table is rewritten each batch: simple, and fast at these sizes.
@@ -90,7 +93,7 @@ def main(job_dir):
         if (job_dir / "cancel").exists():
             raise RuntimeError("cancelled")
         tasks = [{"params": params, "window": window, "want_returns": want_returns} for params in params_list]
-        if current["backend"] == "grid_vectorised":
+        if current["backend"] == "grid" and optimise.method_of("grid", current["options"]) == "vectorised":
             # Many trials per backtest call: one contiguous chunk per worker process.
             size = max(1, -(-len(tasks) // max(1, int(job.get("workers", 1)))))
             chunks = [tasks[start:start + size] for start in range(0, len(tasks), size)]
@@ -116,7 +119,7 @@ def main(job_dir):
         for result in results:
             row = {key: value for key, value in result.items() if key not in ("params", "returns")}
             row.update(trial=len(rows), phase=phase, fold=current["fold"], params_json=json.dumps(result["params"]),
-                       backend=current["backend"], seed=current["seed"], run_trial=current["run_trial"])
+                       backend=current["name"], seed=current["seed"], run_trial=current["run_trial"])
             if phase == "search":
                 current["run_trial"] += 1
             for name, value in result["params"].items():
@@ -125,10 +128,21 @@ def main(job_dir):
         flush()
         return results
 
-    def search(space, budget, window, seed, backend=None, label=None):
-        """Run one backend once; returns the best search trial of this run."""
-        current.update(backend=backend or job["backend"], seed=seed, run_trial=0)
+    def search(space, budget, window, seed, choice=None, label=None):
+        """Run one backend once; returns the best search trial of this run.
+
+        `choice`: a comparison's "backend" or "backend:method"; None for the job's own. A comparison's
+        backend runs the method it names, else its own default (optimise.method_of): the job's method is
+        another backend's. The grid's many-trials-per-call method is the job's own only, as a comparison
+        cannot know every strategy can run it (engine.vectorisable).
+        """
+        backend, _, method = (choice or job["backend"]).partition(":")
         options = dict(job.get("backend_options") or {})
+        if choice is not None:
+            options.pop("method", None)
+            if method and method != "vectorised":
+                options["method"] = method
+        current.update(backend=backend, options=options, name=choice or job["backend"], seed=seed, run_trial=0)
         if current["backend"] == "optuna":
             options["storage"] = f"sqlite:///{(job_dir / 'optuna.db').resolve().as_posix()}"
             options["study_name"] = label or "job"
@@ -206,9 +220,11 @@ def main(job_dir):
             # The same space and budget for every backend and seed, so the curves compare.
             settings = job["compare"]
             progress["budget"] = int(job["budget"]) * len(settings["backends"]) * len(settings["seeds"])
-            for backend in settings["backends"]:
+            for choice in settings["backends"]:
                 for seed in settings["seeds"]:
-                    search(space, int(job["budget"]), train, int(seed), backend=backend, label=f"{backend}-{seed}")
+                    # A file-safe label (Optuna's study, BUTChC's tree): "optuna:tpe" has a colon.
+                    search(space, int(job["budget"]), train, int(seed), choice=choice,
+                           label=f"{choice.replace(':', '-')}-{seed}")
             summary["compare"] = optimise.compare_summary(pd.DataFrame(rows), direction)
 
         else:
@@ -221,8 +237,12 @@ def main(job_dir):
                     progress["stage"] = "Testing the best settings on the held-back history"
                     write_progress()
                     outcome = evaluate([params], test, "held_out")[0]
+                    # With what vectorbtX said about the run ("notes") and the constraint it broke ("error"):
+                    # a held-back test with no trades is otherwise a Sharpe ratio of inf with no reason
+                    # given (the owner's JMA jobs, 25 November 2026: every entry below the minimum stake).
                     summary["held_out"] = {key: outcome.get(key) for key in
-                                           ("metric", "sharpe", "total_return", "max_drawdown", "n_trades")}
+                                           ("metric", "sharpe", "total_return", "max_drawdown", "n_trades", "notes",
+                                            "error")}
                     summary["held_out"]["window"] = [str(test[0]), str(test[1])]
                 if job.get("stability"):
                     progress["stage"] = "Re-running settings near the best (the stability check)"

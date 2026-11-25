@@ -28,7 +28,7 @@ import streamlit as st
 
 from . import config, data as data_module, indicators, style
 from .expressions import (LOGIC_WORDS, append_letter, condition_name_problem, condition_text, next_condition_name,
-                          next_letter, parse_logic, remove_letter, summary)
+                          next_letter, parse_logic, plan, remove_letter)
 from .spec import (COMPARISON_OPS, HIGHER_TIMEFRAMES, PATTERN_SIDES, PRICE_FIELDS, TIMEFRAME_MINUTES, TIMING_KEYS,
                    default_spec, feature_name_problem, get_path, is_choice, rename_condition,
                    rename_feature, set_path, tunable_inputs)
@@ -244,13 +244,110 @@ def run_guarded(label, fn):
             return None
 
 
+def tear_sheet(results, prefix, run_id, settings=None, theme=None, glow=False, split=None):
+    """A backtest's tear sheet: how it was funded, what vectorbtX flagged, a chart picked from the figures,
+    then every metric, each symbol, the trades and the orders.
+
+    The Backtest results page draws one for its run, and the Optimiser results page one for each part of a
+    best trial (in sample, out of sample, the whole period: the owner, 25 November 2026). `prefix` keeps
+    each one's widgets apart, `run_id` keys the figure cache. Pass `settings` to draw a chart theme picker
+    beside the view, or `theme` and `glow` when the page has one already. `split`: the first held-back bar,
+    marked on the charts that run along the dates (analysis.fig_split).
+    """
+    from . import analysis
+
+    # How the run was funded. Runs saved before the meta recorded it say nothing.
+    accounts = results["meta"].get("accounts") or {}
+    if accounts.get("model") == "separate":
+        st.info(f"{accounts['count']} separate accounts, one per symbol, each starting with {accounts['each']:,.0f} "
+                f"({accounts['count'] * accounts['each']:,.0f} in all). The tables and charts treat them as one book; "
+                "the table under them shows each account on its own."
+                + (" To trade every symbol from one account, make the account shared on the Build page's Account tab."
+                   if results["meta"]["kind"] == "signals" else ""))
+    elif accounts.get("model") == "shared" and results["meta"]["kind"] == "signals":
+        st.caption(f"One account of {accounts['each']:,.0f}, shared by every symbol.")
+
+    # What vectorbtX could not price, or priced on an assumption, with what to change in the Studio.
+    # Runs saved before the meta recorded these say nothing.
+    notes = results["meta"].get("warnings") or []
+    if notes:
+        lines = []
+        for note, hint in analysis.warning_hints(notes):
+            lines.append(f"- {note}" + (f"\n\n  **{hint}**" if hint else ""))
+        st.warning("vectorbtX flagged this run. The run finished, but its numbers may leave something out:\n\n"
+                   + "\n".join(lines))
+
+    # --- the chart first ---
+    names = analysis.available_figures(results)
+    row = st.columns([2, 3])
+    name = row[0].selectbox("View", names, format_func=lambda key_: analysis.FIGURES[key_]["label"],
+                            key=f"{prefix}:view",
+                            help="Which chart to draw from this run. It opens on the equity curve against buy and "
+                                 "hold.")
+    if theme is None:
+        with row[1]:
+            theme, glow = theme_picker(settings, prefix)
+    options = {}
+    if name == "price":
+        symbols = results["meta"]["symbols"]
+        choices = sorted(results["features"]["feature"].unique()) if "features" in results else []
+        left, right = st.columns(2)
+        options["symbol"] = left.selectbox("Symbol", symbols, key=f"{prefix}:symbol",
+                                           help="Which symbol's prices and trades to show.")
+        options["overlays"] = tuple(right.multiselect("Overlay features (pattern hits show as diamonds)", choices,
+                                                      key=f"{prefix}:overlays",
+                                                      help="Feature lines to draw over the price."))
+    elif name == "rolling":
+        options["window"] = st.slider("Window (bars)", 10, 504, 63, key=f"{prefix}:window",
+                                      help="How many bars each rolling figure is measured over (63 is about a "
+                                           "quarter of daily bars).")
+    elif name == "monte_carlo":
+        options["paths"] = st.select_slider("Paths", [100, 250, 500, 1000, 2500], value=500, key=f"{prefix}:paths",
+                                            help="How many times the trades are put in a random order to draw the "
+                                                 "bands. More gives steadier bands and takes longer.")
+    # Built only when selected, and cached on (run, view, theme, split, options).
+    cache = st.session_state.setdefault("figures", {})
+    cache_key = (run_id, name, theme, glow, str(split), tuple(sorted(options.items())))
+    if cache_key not in cache:
+        cache[cache_key] = analysis.fig_split(results, split, theme, glow, name, **options)
+    figure = cache[cache_key]
+    for item in figure if isinstance(figure, tuple) else (figure,):
+        chart(item)
+
+    # --- then every metric ---
+    st.divider()
+    columns = st.columns(3)
+    for column, (table_name, label) in zip(columns, (("portfolio", "Portfolio"), ("trades", "Trades"),
+                                                     ("returns", "Returns"))):
+        with column:
+            st.markdown(f"**{label}**")
+            table(analysis.stats_frame(results, table_name), height=420)
+    st.caption("Z-score reads the other way round from most metrics: a negative value means wins and losses cluster "
+               "in streaks. It is a dependency test, not a quality score. A blank is a number the run does not have, "
+               "such as a Sharpe ratio with no trades.")
+    if "per_symbol" in results:
+        st.markdown("**Each symbol**")
+        table(results["per_symbol"], hide_index=False)
+        if accounts.get("model") != "separate":
+            st.caption("A symbol in a shared account has no equity of its own, so only what it traded is shown.")
+    with st.expander("Trades"):
+        table(results["trades"])
+    with st.expander("Orders"):
+        table(results["orders"])
+
+
 def glance(spec, problems):
-    """The strategy at a glance: one compact, always-visible summary of every step, then the problems."""
+    """The strategy at a glance, as it would be told (expressions.plan): its name, then a sentence for each
+    part in the part's tone (the market, each rule, each trade's size and stops, the features, what is
+    optimised), always in view beside the form; then the problems, or that it is ready."""
     rows = []
-    for label, text in summary(spec):
-        indent = " os-glance-sub" if label.startswith(" ") else ""
-        rows.append(f'<div class="os-glance-row{indent}"><span class="os-glance-label">{html.escape(label.strip())}'
-                    f'</span><span class="os-glance-text">{html.escape(text)}</span></div>')
+    for sentence in plan(spec):
+        tone = f" os-tone-{sentence['tone']}" if sentence["tone"] else " os-glance-quiet"
+        items = "".join(f"<li>{html.escape(item)}</li>" for item in sentence["items"])
+        after = f'<div class="os-glance-after">{html.escape(sentence["after"])}</div>' if sentence.get("after") else ""
+        rows.append(f'<div class="os-glance-line{tone}"><b>{html.escape(sentence["lead"])}</b>'
+                    f'{html.escape(sentence["text"])}{f"<ul>{items}</ul>" if items else ""}{after}</div>')
+    rows.insert(0, f'<div class="os-glance-name">{html.escape(str(spec.get("name") or "Untitled strategy"))}</div>')
     status = (f'<div class="os-glance-ok">Ready to backtest</div>' if not problems else
               '<div class="os-glance-problems">' + "".join(f"<div>{html.escape(problem)}</div>"
                                                            for problem in problems[:8])

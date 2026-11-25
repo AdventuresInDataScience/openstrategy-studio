@@ -233,6 +233,14 @@ METRICS = {
 }
 
 
+def objective_label(metric, direction):
+    """What a job searched for, in words: "Sharpe ratio, maximised". For the jobs table and the results."""
+    if metric == "selftest":
+        return "Self-test"
+    label = METRICS.get(metric, {}).get("label", str(metric))
+    return f"{label}, {'minimised' if direction == 'minimize' else 'maximised'}"
+
+
 def trial_extras(pf):
     """Numbers recorded for every trial whatever the objective, for constraints,
     the stability check and the deflated Sharpe ratio."""
@@ -443,7 +451,7 @@ def run_optuna(space, evaluate_batch, budget, direction, seed, options):
         "qmc": lambda: optuna.samplers.QMCSampler(seed=seed),
     }
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction=direction, sampler=samplers[options.get("sampler", "tpe")](),
+    study = optuna.create_study(direction=direction, sampler=samplers[method_of("optuna", options)](),
                                 storage=options.get("storage"), study_name=options.get("study_name", "job"),
                                 load_if_exists=True)
     batch = max(1, int(options.get("batch", 8)))
@@ -458,13 +466,6 @@ def run_optuna(space, evaluate_batch, budget, direction, seed, options):
                 study.tell(trial, state=optuna.trial.TrialState.FAIL)
         done += len(trials)
     return {}
-
-
-SCIPY_METHODS = {
-    "differential_evolution": "Differential evolution",
-    "dual_annealing": "Dual annealing",
-    "direct": "DIRECT",
-}
 
 
 def run_scipy(space, evaluate_batch, budget, direction, seed, options):
@@ -515,20 +516,27 @@ def run_scipy(space, evaluate_batch, budget, direction, seed, options):
         return params
 
     scores = {}             # each point's score, by its params, so a repeat is not run again
+    ran = 0                 # backtests run, which the budget caps
 
     def values_for(xs):
+        nonlocal ran
         points = [decode(x) for x in xs]
         texts = [json.dumps(params, sort_keys=True, default=str) for params in points]
         new = {}                    # the points not scored yet, each once
         for text, params in zip(texts, points):
             if text not in scores:
                 new.setdefault(text, params)
-        if new:
-            for text, value in zip(new, evaluate_batch(list(new.values()))):
+        # ⚠️ DIRECT treats maxfun as a soft limit and ends its iteration past it (13 trials on a budget of 12,
+        # found 25 November 2026), which the job counted as "13 of 12". A point past the budget is not run: it
+        # scores the penalty, which no best is ever chosen from.
+        allowed = dict(list(new.items())[:max(0, budget - ran)])
+        if allowed:
+            for text, value in zip(allowed, evaluate_batch(list(allowed.values()))):
                 scores[text] = sign * value if np.isfinite(value) else PENALTY
-        return [scores[text] for text in texts]
+            ran += len(allowed)
+        return [scores.get(text, PENALTY) for text in texts]
 
-    method = options.get("method", "differential_evolution")
+    method = method_of("scipy", options)
     if method == "dual_annealing":
         dual_annealing(lambda x: values_for([x])[0], bounds, rng=seed, maxfun=budget, no_local_search=True)
         return {}
@@ -663,7 +671,7 @@ def run_nevergrad(space, evaluate_batch, budget, direction, seed, options):
         return {}
     parametrization = ng.p.Dict(**parts)
     parametrization.random_state = np.random.RandomState(seed)
-    name = options.get("optimizer", "TwoPointsDE")
+    name = method_of("nevergrad", options)
     if name == "CMA" and parametrization.dimension == 1:
         # ⚠️ On one dimension Nevergrad's CMA-ES switches to the fcmaes package, which is not installed (a
         # compiled one): (1+1) instead. The Optimise page says so beside the choice.
@@ -709,21 +717,95 @@ def run_marsopt(space, evaluate_batch, budget, direction, seed, options):
     return {}
 
 
-# Labels: a library by its own name as its project writes it (Optuna, SciPy, BUTChC), a method by what
-# it does in sentence case; marsopt writes its name in lower case, so it is named by its method (its
-# package summary's words) with the package after.
+# Labels: a library by its own name as its project writes it (Optuna, SciPy, BUTChC, marsopt), a search
+# that is no library's by what it does, in sentence case.
 BACKENDS = {
     "optuna": {"label": "Optuna", "fn": run_optuna},
+    # Two methods: every point in order, one backtest each, or the same points many per backtest call
+    # (worker.py routes the batches of the "vectorised" method through evaluate_chunk; eligibility:
+    # engine.vectorisable).
     "grid": {"label": "Grid search", "fn": run_grid},
-    # The same points as "grid", evaluated many per backtest call (worker.py routes
-    # its batches through evaluate_chunk). Eligibility: engine.vectorisable.
-    "grid_vectorised": {"label": "Grid search, many trials per call", "fn": run_grid},
-    "random": {"label": "Random search (Sobol)", "fn": run_random},
+    "random": {"label": "Random search", "fn": run_random},
     "scipy": {"label": "SciPy", "fn": run_scipy},
     "butchc": {"label": "BUTChC", "fn": run_butchc},
     "nevergrad": {"label": "Nevergrad", "fn": run_nevergrad},
-    "marsopt": {"label": "Mixed adaptive random search (marsopt)", "fn": run_marsopt},
+    "marsopt": {"label": "marsopt", "fn": run_marsopt},
 }
+
+
+# Each backend's methods, the first its default: {backend: {method: {"label", "help"}}}. The Optimise page
+# asks the same two things for every backend, which backend and which of its methods (the owner, 25 November
+# 2026: Optuna asked for a sampler, SciPy for a method and Nevergrad for an optimiser), and a backend with one
+# method shows it, fixed. A job keeps the choice as backend_options["method"], which each backend reads
+# through method_of. Optuna's, SciPy's and Nevergrad's methods are their library's own names for them.
+METHODS = {
+    "optuna": {
+        "tpe": {"label": "TPE", "help": "Tree-structured Parzen estimator: learns from the trials so far where "
+                                        "the good settings are, and tries more there. The default."},
+        "cmaes": {"label": "CMA-ES", "help": "Evolves a cloud of points over the number settings, reshaping it "
+                                             "towards the best; a list of values is drawn at random."},
+        "nsga2": {"label": "NSGA-II", "help": "A genetic algorithm: breeds new settings from the best so far."},
+        "random": {"label": "Random", "help": "Every trial drawn at random: no learning."},
+        "qmc": {"label": "Quasi-random", "help": "Trials spread evenly over the ranges (a Sobol sequence): no "
+                                                 "learning."},
+    },
+    "grid": {
+        "loop": {"label": "One trial per backtest", "help": "Every combination in order, one backtest each."},
+        "vectorised": {"label": "Many trials per backtest", "help": "The same points, run many at once as "
+                                                                    "columns of one vectorbtX call: faster, for "
+                                                                    "settings that change only the signals."},
+    },
+    "random": {"sobol": {"label": "Sobol sequence", "help": "Scrambled Sobol points, spread evenly over the ranges "
+                                                            "with no learning: the baseline any other search "
+                                                            "should beat."}},
+    "scipy": {
+        "differential_evolution": {"label": "Differential evolution",
+                                   "help": "Improves a population of settings by mixing them, a whole population "
+                                           "side by side."},
+        "dual_annealing": {"label": "Dual annealing",
+                           "help": "Wanders widely at first, then settles near the best it has found (its local "
+                                   "searches are off: they would spend the budget on steps too small to change a "
+                                   "trade). One trial at a time."},
+        "direct": {"label": "DIRECT", "help": "Divides the ranges into thirds, again and again, where the scores are "
+                                              "best or the untried part is largest. One trial at a time, and it "
+                                              "uses no seed."},
+    },
+    "butchc": {"tree": {"label": "Bayesian update tree",
+                        "help": "Learns how good each value of each setting is, separately, from every trial so far, "
+                                "and draws the next trials from that. Searches the versions of a rule too."}},
+    "nevergrad": {name: {"label": item["label"], "help": item["help"]} for name, item in NEVERGRAD_OPTIMISERS.items()},
+    "marsopt": {"mars": {"label": "Mixed adaptive random search",
+                         "help": "Tries settings near the best ones so far, nearer as the search goes on. One trial "
+                                 "at a time."}},
+}
+
+
+def method_of(backend, options):
+    """The method `backend` runs: options["method"] when it is one of the backend's own, else its default.
+
+    A comparison runs several backends on one job's options, so a method named for one backend means
+    nothing to the next, which then runs its own default.
+    """
+    methods = METHODS[backend]
+    method = (options or {}).get("method")
+    return method if method in methods else next(iter(methods))
+
+
+def search_label(backend, options=None):
+    """A backend and its method in words, "Optuna · TPE": for job names, the jobs table and the results.
+
+    `backend` may be "backend:method", as a comparison names each search it runs. A job from before 25
+    November 2026 named its method by each library's own word (sampler, optimizer) and ran the grid's
+    many-trials-per-call method as a backend of its own ("grid_vectorised"); those read the same way.
+    """
+    options = dict(options or {})
+    backend, _, method = str(backend).partition(":")
+    if backend == "grid_vectorised":
+        backend, method = "grid", "vectorised"
+    method = method or options.get("method") or options.get("sampler") or options.get("optimizer")
+    if backend not in BACKENDS:
+        return backend
+    return f"{BACKENDS[backend]['label']} · {METHODS[backend][method_of(backend, {'method': method})]['label']}"
 
 
 # ---------------------------------------------------------------------------

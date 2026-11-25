@@ -199,11 +199,13 @@
   --os-tone: var(--os-tone-feature);
 }
 
-[class*="st-key-os-card-entry-"] {
+[class*="st-key-os-card-entry-"],
+[class*="st-key-os-exp-entry-"] {
   --os-tone: var(--os-tone-entry);
 }
 
-[class*="st-key-os-card-exit-"] {
+[class*="st-key-os-card-exit-"],
+[class*="st-key-os-exp-exit-"] {
   --os-tone: var(--os-tone-exit);
 }
 
@@ -422,30 +424,51 @@
   color: transparent;
 }
 
-.os-glance-row {
-  display: flex;
-  gap: 0.5rem;
-  padding: 0.18rem 0;
-  border-top: 1px solid color-mix(in srgb, var(--os-border) 60%, transparent);
-}
-
-.os-glance-label {
-  flex: 0 0 5.2rem;
-  color: var(--os-muted);
-  font-weight: 600;
-}
-
-.os-glance-text {
-  flex: 1;
+/* The strategy as it would be told (expressions.plan): its name, then one sentence a part, each with a
+   bar in its part's tone and its first words in bold, in the tone too. */
+.os-glance-name {
+  font-family: var(--os-heading-font);
+  font-weight: 700;
+  font-size: 0.9rem;
   color: var(--os-text);
-  font-family: var(--os-code-font);
-  font-size: 0.74rem;
+  margin-bottom: 0.45rem;
   word-break: break-word;
 }
 
-.os-glance-sub {
-  border-top: none;
-  padding-left: 0.6rem;
+.os-glance-line {
+  color: var(--os-text);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  padding: 0.3rem 0 0.3rem 0.55rem;
+  margin: 0.3rem 0;
+  border-left: 3px solid var(--os-tone, var(--os-border));
+  word-break: break-word;
+}
+
+.os-glance-line b {
+  color: var(--os-tone, var(--os-text));
+}
+
+/* Its own size: Streamlit sets a list's to the page's body text, bigger than the panel's. */
+.os-glance-line ul {
+  margin: 0.2rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.os-glance-line li {
+  margin: 0.1rem 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.os-glance-after {
+  margin-top: 0.2rem;
+}
+
+.os-glance-quiet {
+  color: var(--os-muted);
 }
 
 .os-glance-ok,

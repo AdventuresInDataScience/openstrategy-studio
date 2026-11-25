@@ -80,7 +80,9 @@ def start_job(data_dir, job, frames):
     job_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     job_dir = Path(data_dir) / "jobs" / job_id
     job_dir.mkdir(parents=True)
-    job = dict(job, job_id=job_id, created_at=now(), data_dir=str(data_dir))
+    # Its # (1, 2, 3 ...), shorter to keep track of than the id, kept in the job too (the owner, 25 November 2026).
+    number = store.next_job_number(data_dir)
+    job = dict(job, job_id=job_id, number=number, created_at=now(), data_dir=str(data_dir))
     write_json(job_dir / "job.json", job)
     with open(job_dir / "frames.pkl", "wb") as handle:
         pickle.dump(frames, handle)
@@ -103,7 +105,8 @@ def start_job(data_dir, job, frames):
     with open(job_dir / "worker.log", "w", encoding="utf-8") as log:
         options["stdout"] = log
         subprocess.Popen(self_command("worker", str(job_dir)), **options)
-    store.add_job(data_dir, job_id, job.get("name", ""), job["kind"], job["backend"], job["created_at"], job_dir)
+    store.add_job(data_dir, job_id, job.get("name", ""), job["kind"], job["backend"], job["created_at"], job_dir,
+                  number=number)
     return job_dir
 
 
@@ -209,12 +212,36 @@ def cancel_job(job_dir):
     (Path(job_dir) / "cancel").touch()
 
 
+# What a job was asked to do, by its folder: job.json never changes once written, and the Optimise page
+# lists every job every few seconds while one runs.
+_ASKED = {}
+
+
+def _asked(job_dir):
+    """{"metric", "direction", "backend_options", "searches"} from a job's job.json, read once per folder.
+    "searches": a comparison's backends and methods ("optuna:tpe"), else None."""
+    key = str(job_dir)
+    if key not in _ASKED:
+        job = read_job(job_dir) or {}
+        _ASKED[key] = {"metric": job.get("metric"), "direction": job.get("direction"),
+                       "backend_options": job.get("backend_options") or {},
+                       "searches": (job.get("compare") or {}).get("backends")}
+    return _ASKED[key]
+
+
 def list_jobs(data_dir):
-    """Every job with its current progress, newest first."""
+    """Every job with its current progress and what it searched for, newest first.
+
+    "number" is the job's # (store.next_job_number; 0 for none, which the index's own numbering leaves no
+    job without); "metric", "direction", "backend_options" and "searches" are its own (_asked), for the
+    jobs table's objective and method.
+    """
     rows = []
     for _, job in store.list_jobs(data_dir).iterrows():
         progress = read_progress(job["path"])
-        rows.append({"job_id": job["job_id"], "name": job["name"], "kind": job["kind"],
+        number = job.get("number")
+        rows.append({"job_id": job["job_id"], "number": 0 if pd.isna(number) else int(number), "name": job["name"],
+                     "kind": job["kind"], **_asked(job["path"]),
                      "backend": job["backend"], "created_at": job["created_at"], "status": progress["status"],
                      "done": progress.get("done", 0), "budget": progress.get("budget", 0),
                      "best_value": progress.get("best_value"), "path": job["path"],

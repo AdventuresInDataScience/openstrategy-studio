@@ -6,8 +6,8 @@ import pytest
 
 from openstrategy_studio import compile as C
 from openstrategy_studio.expressions import (append_letter, condition_name_problem, condition_text, logic_names,
-                                             logic_text, next_letter, parse_logic, remove_letter, rename_in_logic,
-                                             summary)
+                                             logic_text, next_letter, parse_logic, plan, remove_letter,
+                                             rename_in_logic)
 
 
 def test_parse_shapes():
@@ -103,13 +103,46 @@ def test_conditions_in_words():
          "right": {"price": "open"}})
 
 
-def test_summary_covers_every_step(ma_spec):
-    rows = dict(summary(ma_spec))
-    assert rows["Market"].startswith("EURUSD=X · 1d")
-    assert rows["Trades"] == "on signals, spread bets"
-    assert rows["Long entry"] == "A" and "stop 60 pts" in rows["Risk"] and "rates: static" in rows["Account"]
-    assert rows["Optimise"] == "2 variables"
-    assert ("Feature", "fast = SMA(close, 50)") in summary(ma_spec)
+def test_the_strategy_reads_as_it_would_be_told(ma_spec):
+    """The At a glance panel's strategy on a page (the owner, 25 November 2026): the market, each rule, each
+    trade's size and stops, the features and what is optimised, in sentences."""
+    sentences = plan(ma_spec)
+    by_lead = {sentence["lead"]: sentence for sentence in sentences[1:]}
+    assert sentences[0]["lead"] == "Spread bets on EURUSD=X, long only"
+    assert sentences[0]["text"].startswith(", on daily bars from 2019-01-01 to 2024-12-31, starting with 10,000")
+    assert by_lead["Buy"]["text"] == " when fast crosses above slow."
+    assert by_lead["Sell"]["text"] == " when fast crosses below slow, or at the stop or the target."
+    assert by_lead["Each trade"]["text"] == (" risks 100, with a stop loss 60 points from the entry and a take profit "
+                                             "120 points from the entry.")
+    assert "fast is SMA(close, 50)" in by_lead["Where"]["items"]
+    assert by_lead["Optimising"]["text"].startswith(" 2 settings") and len(by_lead["Optimising"]["items"]) == 2
+    assert [sentence["tone"] for sentence in sentences[:4]] == ["setup", "entry", "exit", "risk"]
+    # A share of the balance in percent, and a stop measured as one.
+    ma_spec["risk"]["sizing"] = {"risk_pct": 0.2, "risk_of": "balance"}
+    ma_spec["risk"]["stop"].update(unit="pct", pct=0.13138)
+    assert plan(ma_spec)[3]["text"].startswith(" risks 20% of the balance, with a stop loss 13.14% from the entry")
+
+
+def test_a_long_rule_reads_as_a_list():
+    """Three conditions joined one way are a list; mixed operators keep the logic line, each condition named;
+    an exit that is a list says after it that the stop closes it too."""
+    from openstrategy_studio.spec import load_template
+
+    spec = load_template("ma_cross")
+    cross = {"left": {"feature": "fast"}, "op": "crosses_above", "right": {"feature": "slow"}}
+    low = {"left": {"price": "close"}, "op": "<", "right": {"const": 1.2}}
+    friday = {"filter": "weekday", "days": [4]}
+    spec["rules"]["long_entry"] = {"conditions": {"A": cross, "B": low, "C": friday}, "logic": "A and B and C"}
+    spec["rules"]["long_exit"] = {"conditions": {"A": cross, "B": low, "C": friday}, "logic": "(A and B) or C"}
+    by_lead = {sentence["lead"]: sentence for sentence in plan(spec)}
+    assert by_lead["Buy"]["text"] == " when all of these are true:"
+    assert by_lead["Buy"]["items"] == ["fast crosses above slow", "close is below 1.2", "on Fri"]
+    assert by_lead["Sell"]["text"] == " when (A and B) or C, where:"
+    assert by_lead["Sell"]["items"][0] == "A: fast crosses above slow"
+    assert by_lead["Sell"]["after"] == "Or at the stop or the target."
+    # Two conditions read as one sentence, brackets and all.
+    spec["rules"]["long_entry"] = {"conditions": {"A": cross, "B": low}, "logic": "A and not B"}
+    assert {s["lead"]: s for s in plan(spec)}["Buy"]["text"] == " when fast crosses above slow and not close is below 1.2."
 
 
 def test_a_conditions_timing_in_words():
