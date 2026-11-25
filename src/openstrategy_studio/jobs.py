@@ -9,6 +9,7 @@ live in the session. A job is a folder, <data_dir>/jobs/<job_id>/:
     heartbeat        touched by the worker every HEARTBEAT_SECONDS, so a dead one can be told from a slow one
     trials.parquet   one row per evaluated trial
     summary.json     best trial, held-out result, stability, walk-forward results
+    best_backtest.pkl  the best trial's backtest as the results page draws it (worker.save_best_backtest)
     cancel           created by Cancel; the worker checks it before every batch
     worker.log       the worker's stdout and stderr
 

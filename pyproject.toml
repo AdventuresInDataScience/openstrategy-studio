@@ -24,6 +24,13 @@ dependencies = [
     "ta-patterns>=1.2.2",
     "butchc>=0.6.1",
     "optuna>=4",
+    # marsopt 0.2.0 ships wheels for Windows x64, Linux x64 and Apple silicon on Python 3.12 and
+    # 3.13; elsewhere (an Intel Mac, ARM Linux such as Docker on Apple silicon) it builds a
+    # Cython extension from source, which needs a C compiler.
+    "marsopt>=0.2.0",
+    # Nevergrad (Meta): PSO, CMA-ES, differential evolution and its NGOpt chooser, by ask and tell, so
+    # a batch runs on the job's worker processes. Pure Python.
+    "nevergrad>=1.0.12",
     "scipy>=1.15", # rng= replaces seed= in qmc and optimize
     "plotly-themes>=0.1.0",
     "yfinance",
@@ -37,9 +44,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# marsopt builds a Cython extension from source when no wheel matches the
-# platform, so it is an optional extra and imported lazily in optimise.py.
-marsopt = ["marsopt>=0.2.0"]
 # `openstrategy-studio desktop`: the app in its own window. On Linux pywebview
 # also needs GTK or Qt from the system packages.
 desktop = ["pywebview>=5"]

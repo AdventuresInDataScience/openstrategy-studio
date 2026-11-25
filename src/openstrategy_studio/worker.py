@@ -8,6 +8,9 @@ few seconds, so a page can tell a worker that died (its window closed, the
 machine out of memory) from a slow one (jobs.read_progress). Cancel creates a
 `cancel` file that is checked before every batch.
 
+A job with a best trial ends by saving that trial's backtest (best_backtest.pkl), which the
+Optimiser results page opens instead of re-running it.
+
 Job kinds:
     optimise       one search, then the held-back test and the stability check
     walk_forward   one search per in-sample window, each tested on the next slice
@@ -231,6 +234,17 @@ def main(job_dir):
                     for start in range(0, len(points), batch):
                         results += evaluate(points[start:start + batch], train, "stability")
                     summary["stability"] = optimise.stability_summary(results)
+        if job["kind"] != "walk_forward" and job["metric"] != "selftest":
+            # The best trial's backtest, as the Optimiser results page draws it (whole history, in sample,
+            # out of sample), made once here and kept with the job, so Show its backtest opens at once
+            # instead of re-running it (the owner, 25 November 2026). The best search trial of the whole
+            # job, as the page picks it (a comparison's is the best of every backend's runs).
+            searched = pd.DataFrame([row for row in rows if row["phase"] == "search"])
+            top = optimise.best_trial(searched, direction) if not searched.empty else None
+            if top is not None:
+                progress["stage"] = "Saving the best trial's backtest for the results page"
+                write_progress()
+                save_best_backtest(job_dir, job, json.loads(top["params_json"]), summary)
         summary["n_trials"] = sum(1 for row in rows if row["phase"] == "search")
         progress["status"] = "done"
     except RuntimeError as error:
@@ -250,6 +264,28 @@ def main(job_dir):
         jobs.write_json(job_dir / "summary.json", summary)
         flush()
     return progress["status"]
+
+
+def save_best_backtest(job_dir, job, params, summary):
+    """analysis.split_backtest of the best trial, pickled to best_backtest.pkl with its params.
+
+    On the job's own data snapshot and its own settings, so it is the run its trials were scored on.
+    A failure here is recorded in the summary and leaves the job's results whole: the results page
+    then runs the backtest itself, as it does for a job from before 25 November 2026.
+    """
+    from . import analysis
+
+    try:
+        shown = analysis.split_backtest(job, optimise.CONTEXT["data"], params, job["settings"])
+    except Exception:   # noqa: BLE001  (the search's results are complete; this is a convenience)
+        summary["best_backtest_error"] = traceback.format_exc()
+        return
+    # Atomically, like every file the page and the worker share.
+    path = job_dir / "best_backtest.pkl"
+    temporary = path.with_suffix(".pkl.tmp")
+    with open(temporary, "wb") as handle:
+        pickle.dump({"params": params, **shown}, handle)
+    jobs.retry_while_locked(lambda: os.replace(temporary, path))
 
 
 if __name__ == "__main__":

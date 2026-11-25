@@ -942,6 +942,48 @@ def check_cut_entries_settle():
     return orders != 12, f"{orders} orders (should be 12: six round trips)"
 
 
+# ---------------------------------------------------------------------------
+# 37. A run with entries cut to the cash simulates once per cut entry, at ~45 ms of Python each
+# ---------------------------------------------------------------------------
+
+def check_cut_entries_simulate_once():
+    # Check 36's account over forty round trips: a 5x spread bet that wins every trade, each entry worth
+    # 4.8 times the equity at its signal bar, so once the account has grown every entry is cut to the
+    # cash. vectorbt's simulation (its numba kernel) of these 205 bars takes about a millisecond; the
+    # run should simulate a fixed few times, not once per cut entry. Counted by wrapping vectorbt's own
+    # dispatch, which every front-door simulation goes through.
+    import time
+    import vectorbt.portfolio.dispatch as dispatch
+
+    o, h, l, c = frames([100.0 * 1.01 ** k for k in range(205)])
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "leverage": 5.0, "min_size": 1.0, "increment": 1.0}
+    real = dispatch.simulate_from_signals
+    spent = []
+
+    def timed(*args, **kwargs):
+        start = time.perf_counter()
+        out = real(*args, **kwargs)
+        spent.append(time.perf_counter() - start)
+        return out
+
+    keywords = dict(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                    entries=mask(c.index, ["X"], [("X", bar) for bar in range(0, 200, 5)]),
+                    exits=mask(c.index, ["X"], [("X", bar) for bar in range(3, 200, 5)]),
+                    notional_pct=4.8, risk_of="equity", init_cash=10_000, freq="D")
+    vbt.x.PortfolioBacktest(**keywords)                 # numba compiles on the first run
+    dispatch.simulate_from_signals = timed
+    try:
+        start = time.perf_counter()
+        vbt.x.PortfolioBacktest(**keywords)
+        whole = time.perf_counter() - start
+    finally:
+        dispatch.simulate_from_signals = real
+    runs = len(spent)
+    return runs > 3, (f"{runs} simulations for 40 entries; {whole:.2f} s in all, {1000 * sum(spent):.0f} ms of it "
+                      f"simulating (should be at most 3 simulations)")
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -981,6 +1023,8 @@ CHECKS = [
     (35, "The re-sizing loop re-issues the warnings of the run before the one it returns",
      check_warnings_describe_the_returned_run),
     (36, "The re-sizing loop gives up (RuntimeError) when many entries are cut to the cash", check_cut_entries_settle),
+    (37, "A run with entries cut to the cash simulates once per cut entry, at ~45 ms of Python each",
+     check_cut_entries_simulate_once),
 ]
 
 

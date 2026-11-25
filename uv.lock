@@ -92,6 +92,20 @@ wheels = [
 ]
 
 [[package]]
+name = "bayesian-optimization"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/81/30/c72190aa569dc274642a9a935ac32a9f6697a635d297705ad7c654503e68/bayesian-optimization-1.4.0.tar.gz", hash = "sha256:5e7b5ada7826a8a342932d67f8ae5e638ade588a12b7f7df058fb7a2defe5866", size = 19792, upload-time = "2022-11-27T23:41:31.87Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2c/af/478deae10abb1cc1034993064b41dbc6015734b4f8cafa2c3d1a05861f75/bayesian_optimization-1.4.0-py3-none-any.whl", hash = "sha256:0984cfcbc9472284778962416f0d4892286da3f54e1df2767ef89263b6e22263", size = 17895, upload-time = "2022-11-27T23:41:29.669Z" },
+]
+
+[[package]]
 name = "beautifulsoup4"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -261,6 +275,18 @@ wheels = [
 ]
 
 [[package]]
+name = "cma"
+version = "4.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/03/21/37ceb4618fb381b38e584ec91ee14a62cf544f917e59e771e44684b19cb3/cma-4.6.0.tar.gz", hash = "sha256:0445d917d17d0a67f32564ac3f5abfe31bf52bd94cda5a54826a6f13efa83a18", size = 345459, upload-time = "2026-11-15T20:22:31.233Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/68/d4/a591dd5ab88bd701cc6eb99cff506a9bf4a59844aec2a715dfc41b320e47/cma-4.6.0-py3-none-any.whl", hash = "sha256:96c76678756d36b600ce6150caa30a62933fc652b4e22cc987746a2b1561db6a", size = 357022, upload-time = "2026-11-15T20:22:29.669Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -387,6 +413,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/81/e1/56027a71e31b02ddc53c7d65b01e68edf64dea2932122fe7746a516f75d5/dill-0.4.1.tar.gz", hash = "sha256:423092df4182177d4d8ba8290c8a5b640c66ab35ec7da59ccfa00f6fa3eea5fa", size = 187315, upload-time = "2026-01-19T02:36:56.85Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/77/dc8c558f7593132cf8fefec57c4f60c83b16941c574ac5f619abb3ae7933/dill-0.4.1-py3-none-any.whl", hash = "sha256:1e1ce33e978ae97fcfcff5638477032b801c46c7c65cf717f95fbc2248f79a9d", size = 120019, upload-time = "2026-01-19T02:36:55.663Z" },
+]
+
+[[package]]
+name = "directsearch"
+version = "1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/73/508a5a6221198a009bdd8651dd033b4e76282ccf235ac8abb550f57e2c77/directsearch-1.1.tar.gz", hash = "sha256:8d5058a3f68085a259f18e9c94c4120ea6d98af383e7347363374162164c08c9", size = 48411, upload-time = "2026-06-04T08:22:26.139Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f3/eb/0e01499696b245783b98e76f1f81e96bd46b932b3626330e3c7169750954/directsearch-1.1-py3-none-any.whl", hash = "sha256:f4a4c1537381ff087d55786864b66027cc6cd1c0d0d1e19206a87b076d2a0f95", size = 48722, upload-time = "2026-06-04T08:22:24.929Z" },
 ]
 
 [[package]]
@@ -860,6 +900,23 @@ wheels = [
 ]
 
 [[package]]
+name = "nevergrad"
+version = "1.0.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "bayesian-optimization" },
+    { name = "cma" },
+    { name = "directsearch" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d7/67/8ff218de679bdaa6f12c0bb7c7491b6121e3bd46656166f7364800b188ad/nevergrad-1.0.12.tar.gz", hash = "sha256:ade90dacbb676f6dfc9fee3d4f9c628ec29eec9e3d995a31026ae8a61988b803", size = 413001, upload-time = "2025-04-23T15:34:18.359Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5a/13/8267afdb84a890d7fc3e6f0eef170b0323915c28879e79e8184f7257cf8a/nevergrad-1.0.12-py3-none-any.whl", hash = "sha256:56ff65d6a2f497ecd79af5a796968ee946c05705a6a69ca616eae5988cc5d999", size = 506324, upload-time = "2025-04-23T15:34:16.012Z" },
+]
+
+[[package]]
 name = "numba"
 version = "0.68.1"
 source = { registry = "https://pypi.org/simple" }
@@ -929,6 +986,8 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "butchc" },
+    { name = "marsopt" },
+    { name = "nevergrad" },
     { name = "numba" },
     { name = "numpy" },
     { name = "optuna" },
@@ -951,9 +1010,6 @@ dependencies = [
 desktop = [
     { name = "pywebview" },
 ]
-marsopt = [
-    { name = "marsopt" },
-]
 
 [package.dev-dependencies]
 bundle = [
@@ -966,7 +1022,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "butchc", specifier = ">=0.6.1" },
-    { name = "marsopt", marker = "extra == 'marsopt'", specifier = ">=0.2.0" },
+    { name = "marsopt", specifier = ">=0.2.0" },
+    { name = "nevergrad", specifier = ">=1.0.12" },
     { name = "numba", specifier = ">=0.66" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "optuna", specifier = ">=4" },
@@ -985,7 +1042,7 @@ requires-dist = [
     { name = "vectorbtx", extras = ["excel", "rates"], git = "https://github.com/AdventuresInDataScience/vectorbtx" },
     { name = "yfinance" },
 ]
-provides-extras = ["marsopt", "desktop"]
+provides-extras = ["desktop"]
 
 [package.metadata.requires-dev]
 bundle = [{ name = "pyinstaller", specifier = ">=6" }]

@@ -82,7 +82,7 @@ def versions():
     """Installed versions recorded with every saved run."""
     found = {}
     for name in ("vectorbt", "vectorbtx", "ta_patterns", "butchc", "optuna", "plotly", "pandas", "numpy",
-                 "streamlit", "plotly-themes", "marsopt", "openstrategy-studio"):
+                 "streamlit", "plotly-themes", "marsopt", "nevergrad", "scipy", "openstrategy-studio"):
         try:
             found[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:

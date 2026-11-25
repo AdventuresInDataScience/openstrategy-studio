@@ -17,13 +17,14 @@ uv run openstrategy-studio selfcheck   # can this machine build, backtest and op
 uv run openstrategy-studio desktop     # the app in its own window (uv sync --extra desktop)
 ```
 
-On Windows, `run.cmd` in the project folder does the same as `uv run openstrategy-studio` with both extras: double-click it, or type `run` in a terminal there. Anything after it is passed on (`run desktop`, `run selfcheck --quick`, `run --port 8600`).
+On Windows, `run.cmd` in the project folder does the same as `uv run openstrategy-studio` with the desktop extra: double-click it, or type `run` in a terminal there. Anything after it is passed on (`run desktop`, `run selfcheck --quick`, `run --port 8600`).
 
 For people who are not developers, the first-run installers in `packaging/installer/` do all of this. They end with a desktop shortcut that works offline. See [`docs/PACKAGING.md`](docs/PACKAGING.md), which also covers Docker and the experimental bundled app.
 
 Notes:
 
-* **marsopt** is an optional extra, because it builds a Cython extension when no wheel matches your platform. Install it with `uv sync --extra marsopt`. Extras are not remembered: a later plain `uv sync` removes them, so name every extra you want each time (`uv sync --extra marsopt --extra desktop`).
+* **marsopt** ships wheels for Windows x64, Linux x64 and Apple silicon. On an Intel Mac or ARM Linux (Docker on Apple silicon included) it builds a Cython extension from source, which needs a C compiler.
+* **Extras are not remembered:** a later plain `uv sync` removes the `desktop` extra, so name it each time (`uv sync --extra desktop`).
 * **Proxies.** Behind a TLS-inspecting proxy or antivirus, `uv` fails every fetch with `UnknownIssuer` unless you use `uv sync --native-tls`. The Yahoo and FRED downloaders also need `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`; see the vectorbtX README.
 * **FRED rates** need a free key in the `FRED_API_KEY` environment variable, a `.env` file in the data folder, or the Settings page. The starter templates use fixed rates, so they run without one.
 * **Moving everything.** `OPENSTRATEGY_STUDIO_HOME=<folder>` puts settings and data under one folder, which is useful for a portable install.
@@ -38,7 +39,7 @@ Notes:
    * **Risk:** sizing labelled for how you trade, stops, targets, extra exits (after a number of bars, breakeven, step trailing) and, on intraday bars, entries good for the day and closing before the day ends.
    * **Preview** marks every signal; **Pipeline** draws the strategy; **Strategy file** shows the JSON and a standalone vectorbtX script.
 3. **Backtest:** run, then read the stats tables and fourteen figures in any plotly-themes theme. You can save a run and reopen it later.
-4. **Optimise:** add the **variables to optimise**, any value of the strategy (a feature's period, a number in a rule, the stop, the target, the bars held), each over a range (start, step, stop) or a list, MT5-style. Then use grid (or the vectorised grid, many trials per call), Sobol, Optuna, scipy, BUTChC or marsopt, with constraints, a held-back test period, a stability check or walk-forward. **Compare backends** runs several of them, with several seeds each, on the same budget. Jobs run in the background and survive closing the page.
+4. **Optimise:** add the **variables to optimise**, any value of the strategy (a feature's period, a number in a rule, the stop, the target, the bars held), each over a range (start, step, stop) or a list, MT5-style. Then use grid (or the vectorised grid, many trials per call), Sobol, Optuna, SciPy (differential evolution, dual annealing, DIRECT), BUTChC, Nevergrad (particle swarm, CMA-ES, differential evolution, (1+1), TBPSA) or marsopt, with constraints, a held-back test period, a stability check or walk-forward. **Compare backends** runs several of them, with several seeds each, on the same budget. Jobs run in the background and survive closing the page.
 5. **Results:** see the trials, the best settings with **Apply to the strategy**, convergence, a pair heatmap, parallel coordinates, a re-run check, the deflated Sharpe ratio, walk-forward folds and the backend comparison. You can also compare saved runs.
 6. **Patterns:** see how each of the 300 detectors was followed on your data, then add one to a rule in one click.
 

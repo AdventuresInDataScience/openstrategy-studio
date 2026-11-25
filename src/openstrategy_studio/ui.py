@@ -338,6 +338,30 @@ def open_panel(path, opened=True):
     st.session_state.setdefault("panels", {})[path] = opened
 
 
+def kept(name, default, options=None):
+    """The key for a page setting that is not part of the strategy and lasts the session, across pages.
+
+    Streamlit forgets a widget's value as soon as a page without it is drawn, so leaving the Optimise
+    page and coming back put every search setting back to its default (the owner, 25 November 2026).
+    The value is kept apart from the widget, in session_state["kept"], and handed to the widget through
+    its key before it is drawn. Give the widget no default of its own (no value=, index= or default=):
+    a default beside a value set by key makes Streamlit warn on the page. `options`: what the widget
+    offers now; a kept value it no longer offers (a backend a conditional space cannot use) goes back
+    to `default`. Not the spec's: a strategy's own values go through key() and set_value().
+    """
+    key = f"kept:{name}"
+    store = st.session_state.setdefault("kept", {})
+    value = st.session_state[key] if key in st.session_state else store.get(name, default)
+    if options is not None:
+        wanted = value if isinstance(value, list) else [value]
+        if not all(item in options for item in wanted):
+            value = default
+    # Before the widget is drawn, so allowed; a change the user makes reruns the page, which keeps it here.
+    st.session_state[key] = value
+    store[name] = value
+    return key
+
+
 def chart_theme_options():
     """(chart theme names, {name: label}) in the selector's groups, for the pickers and Settings."""
     from . import analysis

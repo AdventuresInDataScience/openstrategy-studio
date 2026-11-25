@@ -172,9 +172,10 @@ if best is not None and job["metric"] != "selftest":
                                help="Writes these values into the job's strategy, keeping the optimisation "
                                     "ranges, and opens it on the Build page.")
         show = buttons.button("Show its backtest", icon=":material/show_chart:",
-                              help="Runs the best settings over the whole history and draws it, with a dashed line "
-                                   "where the held-back part starts, and its numbers in sample, out of sample and "
-                                   "over the whole period.")
+                              help="Draws the best settings over the whole history, with a dashed line where the "
+                                   "held-back part starts, and its numbers in sample, out of sample and over the "
+                                   "whole period. The job saved it as it finished; a job from before 25 November "
+                                   "2026 runs it now.")
         check = buttons.button("Check it reproduces", icon=":material/verified:",
                                help="Re-runs the best trial to check the stored result still comes out the same, "
                                     "and works out the deflated Sharpe ratio.")
@@ -189,8 +190,18 @@ if best is not None and job["metric"] != "selftest":
         st.success("Applied. The Build page now shows these values.")
 
     if show:
-        shown = ui.run_guarded("Running the best trial's backtest",
-                               lambda: analysis.split_backtest(job, load_frames(job_dir), params, settings))
+        def best_backtest():
+            # The job's own record (worker.save_best_backtest), when it is of these settings: a job that
+            # is still running may have found a better trial since. Otherwise it is run now.
+            saved_path = job_dir / "best_backtest.pkl"
+            if saved_path.exists():
+                with open(saved_path, "rb") as handle:
+                    saved = pickle.load(handle)
+                if saved["params"] == params:
+                    return {key: saved[key] for key in ("results", "split", "table")}
+            return analysis.split_backtest(job, load_frames(job_dir), params, settings)
+
+        shown = ui.run_guarded("Opening the best trial's backtest", best_backtest)
         if shown is not None:
             st.session_state["best_backtest"] = {"job": job_id, **shown}
     if check:

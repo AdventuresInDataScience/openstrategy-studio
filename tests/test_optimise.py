@@ -26,13 +26,32 @@ def drive(backend, budget=200, seed=0, options=None):
     return trials, best
 
 
-def check(backend, tolerance=0.05, **kwargs):
+def check(backend, tolerance=0.05, visits_trap=True, **kwargs):
+    """`visits_trap=False` for a search that homes in without ever sampling the trap (DIRECT, CMA-ES): its NaN
+    handling is then checked by invalid_half instead."""
     trials, (params, value) = drive(backend, **kwargs)
     assert len(trials) <= kwargs.get("budget", 200)
-    assert any(not np.isfinite(v) for _, v in trials) or backend == "grid", "the NaN trap was never visited"
+    if visits_trap:
+        assert any(not np.isfinite(v) for _, v in trials) or backend == "grid", "the NaN trap was never visited"
     assert params["a"] <= 8.5, "a NaN trial must never be reported as the best"
     assert value >= OPTIMUM - tolerance, (backend, params, value)
     return trials
+
+
+def invalid_half(backend, budget=120, options=None):
+    """Every trial with a above 5 is invalid (NaN): the search finishes, and its best is a valid one."""
+    trials = []
+
+    def evaluate_batch(params_list):
+        values = [float("nan") if params["a"] > 5 else O.selftest_objective(SPACE, params) for params in params_list]
+        trials.extend(zip(params_list, values))
+        return values
+
+    O.BACKENDS[backend]["fn"](SPACE, evaluate_batch, budget, "maximize", 0, options or {})
+    finite = [(params, value) for params, value in trials if np.isfinite(value)]
+    assert len(finite) < len(trials), "no invalid trial was tried"
+    best = max(finite, key=lambda item: item[1])
+    assert best[0]["a"] <= 5 and best[1] >= OPTIMUM - 0.2, best
 
 
 def test_grid():
@@ -50,6 +69,41 @@ def test_scipy_differential_evolution():
 
 def test_scipy_dual_annealing():
     check("scipy", tolerance=0.1, options={"method": "dual_annealing"})
+
+
+def test_scipy_direct_runs_each_point_once():
+    """DIRECT, one trial at a time; a rounded whole number or list index that lands on a point already
+    tried is not run again (DIRECT's thirds give many such repeats)."""
+    trials = check("scipy", tolerance=0.1, visits_trap=False, options={"method": "direct"})
+    tried = [tuple(sorted(params.items())) for params, _ in trials]
+    assert len(tried) == len(set(tried))
+    invalid_half("scipy", options={"method": "direct"})
+
+
+@pytest.mark.parametrize("optimizer", ["TwoPointsDE", "PSO", "CMA", "PortfolioDiscreteOnePlusOne", "OnePlusOne",
+                                       "TBPSA"])
+def test_nevergrad(optimizer):
+    """Every Nevergrad optimiser the Optimise page offers, on the cheap objective with its NaN trap, in batches
+    as the job runs them; and a seed repeats it."""
+    pytest.importorskip("nevergrad")
+    assert optimizer in O.NEVERGRAD_OPTIMISERS
+    options = {"optimizer": optimizer, "batch": 4}
+    first = check("nevergrad", tolerance=0.15, visits_trap=optimizer != "CMA", options=options, budget=300)
+    invalid_half("nevergrad", options=options)
+    second, _ = drive("nevergrad", budget=300, options=options)
+    assert [params for params, _ in first] == [params for params, _ in second]
+    # A whole number is kept on its step, from its start.
+    stepped = {"b": {"min": 3, "max": 30, "int": True, "step": 3}}
+    seen = []
+    O.run_nevergrad(stepped, lambda batch: seen.extend(batch) or [0.0] * len(batch), 40, "maximize", 0, options)
+    assert {params["b"] for params in seen} <= set(range(3, 31, 3))
+
+
+def test_nevergrad_offers_only_what_the_page_lists():
+    """The page offers NEVERGRAD_OPTIMISERS and nothing else; every name is in Nevergrad's registry."""
+    ng = pytest.importorskip("nevergrad")
+    assert set(O.NEVERGRAD_OPTIMISERS) <= set(ng.optimizers.registry)
+    assert "NGOpt" not in O.NEVERGRAD_OPTIMISERS       # its metamodels fail on numpy 2.5 (see the comment there)
 
 
 def test_optuna():
@@ -126,6 +180,47 @@ def test_the_range_check_runs_each_end_and_says_where_trades_fall_short(ma_spec,
     # A float range on its step: (0.2 - 0.01) / 0.01 is 18.999999999999996, still 0.2.
     rows = O.range_check(ma_spec, ohlcv, {"risk.stop.pct": {"min": 0.01, "max": 0.2, "step": 0.01}}, min_trades=0)
     assert [row["value"] for row in rows[1:]] == [0.01, 0.2] and all(row["enough"] for row in rows)
+
+
+def test_the_range_check_runs_each_point_once(ma_spec, ohlcv, tmp_path, monkeypatch):
+    """The owner (25 November 2026): every Start re-ran the check, at up to 30 s a point on a levered, risk-sized
+    strategy. Each point's run is kept on disk: the same check again runs nothing, a changed minimum only
+    re-judges, a widened range runs its new end only, and a changed strategy or data runs again."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import engine
+
+    slow = "features.slow.params.timeperiod"
+    space = {slow: {"min": 10, "max": 40, "int": True, "step": 5}}
+    cache = tmp_path / "cache" / "range_check.json"
+    first = O.range_check(ma_spec, ohlcv, space, min_trades=5, cache=cache)
+    assert cache.exists() and not any(row["cached"] for row in first)
+    runs = []
+    real = engine.run_backtest
+    monkeypatch.setattr(engine, "run_backtest", lambda *args, **kwargs: runs.append(kwargs["params"]) or real(*args, **kwargs))
+    again = O.range_check(ma_spec, ohlcv, space, min_trades=5, cache=cache)
+    assert not runs and all(row["cached"] for row in again)
+    assert [(row["trades"], row["enough"]) for row in again] == [(row["trades"], row["enough"]) for row in first]
+    # The minimum is not in the key: only whether each point is enough changes.
+    most = max(row["trades"] for row in first)
+    stricter = O.range_check(ma_spec, ohlcv, space, min_trades=most + 1, cache=cache)
+    assert not runs and not any(row["enough"] for row in stricter)
+    # A widened range: its new end only.
+    O.range_check(ma_spec, ohlcv, {slow: {"min": 10, "max": 60, "int": True, "step": 5}}, min_trades=5, cache=cache)
+    assert runs == [{slow: 60}]
+    # A changed strategy (outside its optimise section) or changed data: every point again.
+    runs.clear()
+    ma_spec["features"]["fast"]["params"]["timeperiod"] = 6
+    O.range_check(ma_spec, ohlcv, space, min_trades=5, cache=cache)
+    assert len(runs) == 3
+    runs.clear()
+    ohlcv["close"] = ohlcv["close"] * 1.0001
+    O.range_check(ma_spec, ohlcv, space, min_trades=5, cache=cache)
+    assert len(runs) == 3
+    # Its optimise section is not in the key: the variables' own ranges are the points.
+    runs.clear()
+    ma_spec["optimise"]["variables"] = {}
+    O.range_check(ma_spec, ohlcv, space, min_trades=5, cache=cache)
+    assert not runs
 
 
 def test_every_metric_scores_a_real_backtest(ma_spec, ohlcv, momentum_spec, ohlcv_multi):

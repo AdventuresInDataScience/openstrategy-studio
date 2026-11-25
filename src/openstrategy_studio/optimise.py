@@ -16,6 +16,7 @@ processes run. It reads the job and its data from module globals set by
 cross a process boundary.
 """
 
+import hashlib
 import itertools
 import json
 import math
@@ -459,14 +460,29 @@ def run_optuna(space, evaluate_batch, budget, direction, seed, options):
     return {}
 
 
+SCIPY_METHODS = {
+    "differential_evolution": "Differential evolution",
+    "dual_annealing": "Dual annealing",
+    "direct": "DIRECT",
+}
+
+
 def run_scipy(space, evaluate_batch, budget, direction, seed, options):
-    """differential_evolution (parallel through `workers`) or dual_annealing.
+    """differential_evolution (parallel through `workers`), dual_annealing or direct (one trial at a time).
 
     scipy minimises, so the objective is negated when maximising. Categoricals
-    are an integer index; log ranges are searched in log space.
+    are an integer index; log ranges are searched in log space. A setting rounded
+    to a whole number or a list's index often lands on a point already tried
+    (DIRECT samples the centres of thirds, and 3.5 and 3.9 are both 4), so each
+    point is run once and its score reused: the budget caps scipy's calls, and the
+    backtests run can be fewer.
+
+    DIRECT (scipy.optimize.direct, its locally biased form): divides the box of
+    ranges into thirds, again and again, where the scores are best or the boxes
+    are largest. Deterministic, so the seed does nothing.
     """
     _require_flat(space, "scipy")
-    from scipy.optimize import differential_evolution, dual_annealing
+    from scipy.optimize import differential_evolution, direct, dual_annealing
 
     names = list(space)
     bounds = []
@@ -498,12 +514,28 @@ def run_scipy(space, evaluate_batch, budget, direction, seed, options):
                 params[name] = float(value)
         return params
 
-    def values_for(xs):
-        values = evaluate_batch([decode(x) for x in xs])
-        return [sign * value if np.isfinite(value) else PENALTY for value in values]
+    scores = {}             # each point's score, by its params, so a repeat is not run again
 
-    if options.get("method", "differential_evolution") == "dual_annealing":
+    def values_for(xs):
+        points = [decode(x) for x in xs]
+        texts = [json.dumps(params, sort_keys=True, default=str) for params in points]
+        new = {}                    # the points not scored yet, each once
+        for text, params in zip(texts, points):
+            if text not in scores:
+                new.setdefault(text, params)
+        if new:
+            for text, value in zip(new, evaluate_batch(list(new.values()))):
+                scores[text] = sign * value if np.isfinite(value) else PENALTY
+        return [scores[text] for text in texts]
+
+    method = options.get("method", "differential_evolution")
+    if method == "dual_annealing":
         dual_annealing(lambda x: values_for([x])[0], bounds, rng=seed, maxfun=budget, no_local_search=True)
+        return {}
+    if method == "direct":
+        # maxiter as large as the budget, so the budget is what stops it (or DIRECT's own tolerances,
+        # once its boxes are smaller than any step that could change a trade).
+        direct(lambda x: values_for([x])[0], bounds, maxfun=budget, maxiter=max(1000, budget))
         return {}
     # A population of popsize * d per generation; size both to fit the budget.
     dims = len(names)
@@ -546,6 +578,107 @@ def run_butchc(space, evaluate_batch, budget, direction, seed, options):
     return {"prob_tree": result.get("prob_tree")}
 
 
+# Nevergrad's optimisers offered, by their name in its registry, with what each does in Nevergrad's own
+# words (its docstrings, 1.0.12). ⚠️ Not NGOpt, its chooser, nor anything built on its metamodels: on
+# numpy 2.5 they raise TypeError ("only 0-dimensional arrays can be converted to Python scalars", from
+# float() of a one-element array in nevergrad/optimization/metamodel.py). tests/test_optimise.py runs
+# every one listed here, so a library change that breaks one fails there.
+NEVERGRAD_OPTIMISERS = {
+    "TwoPointsDE": {"label": "Differential evolution, two-point crossover",
+                    "help": "Mixes members of a population, mutating along the differences between them, with a "
+                            "genetic two-point crossover. Copes well with many trials at once."},
+    "PSO": {"label": "Particle swarm",
+            "help": "A swarm of settings, each moving with its own inertia towards its own best and the swarm's "
+                    "best. Robust, and copes well with many trials at once."},
+    "CMA": {"label": "CMA-ES",
+            "help": "An evolution strategy: samples from a bell curve that it reshapes towards the best "
+                    "directions. Best on number settings with a budget large against their count."},
+    "PortfolioDiscreteOnePlusOne": {"label": "(1+1), mixed mutations",
+                                    "help": "Mutates the best settings so far, with a mix of mutation sizes. "
+                                            "Suits whole numbers and lists of values, where a small step does "
+                                            "not matter."},
+    "OnePlusOne": {"label": "(1+1) evolution strategy",
+                   "help": "Mutates the best settings so far by a step it adapts. Simple and robust on number "
+                           "settings, best with fewer than about eight trials at once."},
+    "TBPSA": {"label": "TBPSA, for noisy scores",
+              "help": "An evolution strategy that adapts its population size, among the best in many noisy "
+                      "problems. A backtest's score is not noisy (the same settings score the same), but it can "
+                      "jump from one setting to the next."},
+}
+
+
+def run_nevergrad(space, evaluate_batch, budget, direction, seed, options):
+    """Nevergrad 1.0.12, by ask and tell in batches, so a batch runs on the job's worker processes.
+
+    Flat spaces only. A whole number is searched as a count of its steps from the start (as Optuna keeps
+    it on its step), a list as a Choice, a log range as Log; a setting with one value is fixed. Nevergrad
+    minimises, so the objective is negated when maximising, and an invalid trial is told PENALTY (under
+    the 5e20 above which Nevergrad clips and warns). Each search is told it may have `batch` trials out
+    at once (num_workers), which some of its optimisers size their populations by.
+    """
+    _require_flat(space, "nevergrad")
+    import nevergrad as ng
+
+    # Positional names: a setting's path has dots, which Nevergrad's names are not promised to allow.
+    parts = {}
+    fixed = {}
+    for number, (name, opt) in enumerate(space.items()):
+        label = f"p{number}"
+        if "values" in opt:
+            if len(opt["values"]) == 1:
+                fixed[name] = opt["values"][0]
+            else:
+                parts[label] = ng.p.Choice(list(opt["values"]))
+        elif opt.get("int"):
+            steps = (int(opt["max"]) - int(opt["min"])) // int(opt.get("step") or 1)
+            if steps <= 0:
+                fixed[name] = int(opt["min"])
+            else:
+                parts[label] = ng.p.Scalar(lower=0, upper=steps).set_integer_casting()
+        elif float(opt["max"]) <= float(opt["min"]):
+            fixed[name] = float(opt["min"])
+        elif opt.get("log"):
+            parts[label] = ng.p.Log(lower=float(opt["min"]), upper=float(opt["max"]))
+        else:
+            parts[label] = ng.p.Scalar(lower=float(opt["min"]), upper=float(opt["max"]))
+    names = {f"p{number}": name for number, name in enumerate(space)}
+
+    def decode(value):
+        params = dict(fixed)
+        for label, chosen in value.items():
+            name = names[label]
+            opt = space[name]
+            if "values" in opt:
+                params[name] = chosen
+            elif opt.get("int"):
+                params[name] = int(opt["min"]) + int(chosen) * int(opt.get("step") or 1)
+            else:
+                params[name] = float(chosen)
+        return params
+
+    batch = max(1, int(options.get("batch", 8)))
+    sign = -1.0 if direction == "maximize" else 1.0
+    if not parts:
+        evaluate_batch([dict(fixed)])           # nothing to search: the one point there is
+        return {}
+    parametrization = ng.p.Dict(**parts)
+    parametrization.random_state = np.random.RandomState(seed)
+    name = options.get("optimizer", "TwoPointsDE")
+    if name == "CMA" and parametrization.dimension == 1:
+        # ⚠️ On one dimension Nevergrad's CMA-ES switches to the fcmaes package, which is not installed (a
+        # compiled one): (1+1) instead. The Optimise page says so beside the choice.
+        name = "OnePlusOne"
+    optimiser = ng.optimizers.registry[name](parametrization=parametrization, budget=budget, num_workers=batch)
+    done = 0
+    while done < budget:
+        candidates = [optimiser.ask() for _ in range(min(batch, budget - done))]
+        values = evaluate_batch([decode(candidate.value) for candidate in candidates])
+        for candidate, value in zip(candidates, values):
+            optimiser.tell(candidate, sign * value if np.isfinite(value) else PENALTY)
+        done += len(candidates)
+    return {}
+
+
 def run_marsopt(space, evaluate_batch, budget, direction, seed, options):
     """marsopt 0.2.0: sequential, flat spaces, string categories only."""
     _require_flat(space, "marsopt")
@@ -576,16 +709,20 @@ def run_marsopt(space, evaluate_batch, budget, direction, seed, options):
     return {}
 
 
+# Labels: a library by its own name as its project writes it (Optuna, SciPy, BUTChC), a method by what
+# it does in sentence case; marsopt writes its name in lower case, so it is named by its method (its
+# package summary's words) with the package after.
 BACKENDS = {
-    "optuna": {"label": "Optuna (default)", "fn": run_optuna},
-    "grid": {"label": "Grid", "fn": run_grid},
+    "optuna": {"label": "Optuna", "fn": run_optuna},
+    "grid": {"label": "Grid search", "fn": run_grid},
     # The same points as "grid", evaluated many per backtest call (worker.py routes
     # its batches through evaluate_chunk). Eligibility: engine.vectorisable.
-    "grid_vectorised": {"label": "Grid, many trials per call", "fn": run_grid},
-    "random": {"label": "Random (Sobol)", "fn": run_random},
-    "scipy": {"label": "scipy", "fn": run_scipy},
+    "grid_vectorised": {"label": "Grid search, many trials per call", "fn": run_grid},
+    "random": {"label": "Random search (Sobol)", "fn": run_random},
+    "scipy": {"label": "SciPy", "fn": run_scipy},
     "butchc": {"label": "BUTChC", "fn": run_butchc},
-    "marsopt": {"label": "marsopt (optional extra)", "fn": run_marsopt},
+    "nevergrad": {"label": "Nevergrad", "fn": run_nevergrad},
+    "marsopt": {"label": "Mixed adaptive random search (marsopt)", "fn": run_marsopt},
 }
 
 
@@ -617,20 +754,56 @@ def best_trial(trials, direction):
     return finite.loc[index]
 
 
+RANGE_CHECK_KEPT = 2000        # points the range check's cache keeps, the newest
+
+
+def frames_key(data):
+    """A short hash of a run's data (every field's values, index and columns), for a cache key."""
+    digest = hashlib.sha256()
+    for name in sorted(data):
+        frame = data[name]
+        digest.update(name.encode("utf-8"))
+        if isinstance(frame, (pd.DataFrame, pd.Series)):
+            names = list(frame.columns) if isinstance(frame, pd.DataFrame) else [frame.name]
+            digest.update(str(names).encode("utf-8"))
+            digest.update(pd.util.hash_pandas_object(frame, index=True).to_numpy().tobytes())
+        else:
+            digest.update(repr(frame).encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
 def range_check(spec, data, space, min_trades, window=None, data_dir=None, offline=False, static_rate=None,
-                metric="sharpe"):
+                cache=None):
     """Before a job starts: the strategy at its own settings, then each searched setting at both ends of its
     range, on its step as the searches keep it (Optuna moves a stop of 42 by 3 from 10 to 40), or at each of a
     list's options (at most eight, else the first and last), the others at their own; on the history the
     search uses (`window`).
 
     [{"path" (None: the strategy's own settings), "value", "trades", "enough" (at least `min_trades`),
-      "error", "notes" (what vectorbtX said, as a trial records it)}]. A setting whose ends fall short may still
-    have valid values between them; a strategy whose own settings and every end fall short is unlikely to have
-    any (the owner's MA job, 20 November 2026: 5,000 trials, none valid, from a slippage of 20% a fill). Only
-    the top level of a conditional space: a nested setting needs its branch chosen.
+      "error", "notes" (what vectorbtX said, as a trial records it), "cached"}]. A setting whose ends fall short
+    may still have valid values between them; a strategy whose own settings and every end fall short is unlikely
+    to have any (the owner's MA job, 20 November 2026: 5,000 trials, none valid, from a slippage of 20% a fill).
+    Only the top level of a conditional space: a nested setting needs its branch chosen.
+
+    `cache`: a JSON file that keeps each point's run (trades, error, notes), keyed by everything that decides
+    it: the strategy less its optimise section, the point's value, the window, the data's own values, the
+    vectorbtX settings in force and the libraries' versions. So a check repeated after a page visit, a restart
+    or a change of backend runs nothing, and a widened range runs only its new end (the owner, 25 November
+    2026: each run of a levered, risk-sized strategy can take 30 s). Whether a point is enough is worked out
+    afresh from `min_trades`, which is not in the key.
     """
-    job = {"metric": metric, "constraints": {"min_trades": min_trades or None}}
+    from .config import VECTORBTX_KEYS
+    from .jobs import read_json, write_json
+    from .spec import spec_hash
+
+    vbt_settings = engine.vectorbtx().settings["vectorbtx"]
+    # ⚠️ Everything a run reads, or a stale count is shown for a changed strategy. Rates fetched from FRED
+    # while the run prepares are not in it; they move a trade count only through the account's carry.
+    base = {"spec": {key: value for key, value in spec.items() if key != "optimise"},
+            "window": None if window is None else [str(window[0]), str(window[1])], "data": frames_key(data),
+            "offline": bool(offline), "static_rate": static_rate,
+            "vectorbtx": {key: vbt_settings.get(key) for key in VECTORBTX_KEYS}, "versions": engine.versions()}
+    known = read_json(cache, default={}) if cache else {}
     points = [(None, None)]
     for path, opt in space.items():
         if "values" in opt:
@@ -645,22 +818,32 @@ def range_check(spec, data, space, min_trades, window=None, data_dir=None, offli
         for value in ends:
             points.append((path, value))
     rows = []
+    ran = False
     for path, value in points:
         params = {} if path is None else {path: _python(value)}
-        try:
-            run = engine.run_backtest(spec, data, params=params, window=window, data_dir=data_dir, offline=offline,
-                                      static_rate=static_rate)
-        except (engine.backtest_error(), RuntimeError) as error:
-            # ⚠️ RuntimeError too: vectorbtX's re-sizing loop gives up on a run where many entries are
-            # cut to the cash (docs/UPSTREAM.md issue 36). The check reports it at that point, since a
-            # trial there would stop the whole job, rather than abort the check or hide it.
-            rows.append({"path": path, "value": value, "trades": None, "enough": False,
-                         "error": f"could not run: {error}", "notes": None})
-            continue
-        result = score(run["pf"], job, params, notes=run["warnings"])
-        rows.append({"path": path, "value": value, "trades": result["n_trades"],
-                     "enough": not min_trades or result["n_trades"] >= min_trades, "error": None,
-                     "notes": result["notes"]})
+        key = spec_hash({**base, "params": params})
+        found = known.get(key)
+        cached = found is not None
+        if not cached:
+            ran = True
+            try:
+                run = engine.run_backtest(spec, data, params=params, window=window, data_dir=data_dir,
+                                          offline=offline, static_rate=static_rate)
+            except engine.backtest_error() as error:
+                # A point vectorbtX rejects is reported at that point, as a trial records it, rather than
+                # aborting the check. (vectorbtX 5cbe635 raises BacktestError, not RuntimeError, when its
+                # re-sizing loop cannot settle: docs/UPSTREAM.md issue 36.)
+                found = {"trades": None, "error": f"could not run: {error}", "notes": None}
+            else:
+                # The trade count and the notes only: no constraint, and the cheapest metric.
+                result = score(run["pf"], {"metric": "total_return"}, params, notes=run["warnings"])
+                found = {"trades": result["n_trades"], "error": None, "notes": result["notes"]}
+            known[key] = found          # appended, so the oldest points are the ones dropped
+        rows.append({"path": path, "value": value, **found, "cached": cached,
+                     "enough": found["trades"] is not None and (not min_trades or found["trades"] >= min_trades)})
+    if cache and ran:
+        Path(cache).parent.mkdir(parents=True, exist_ok=True)
+        write_json(cache, dict(list(known.items())[-RANGE_CHECK_KEPT:]))
     return rows
 
 

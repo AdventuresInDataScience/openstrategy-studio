@@ -1039,11 +1039,17 @@ def test_the_optimiser_results_lead_with_the_best_settings_in_and_out_of_sample(
     part; the trials table names the settings the same way."""
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
-    from openstrategy_studio import jobs
+    from openstrategy_studio import analysis, jobs
 
     monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
     job_dir = finished_job(tmp_path)
     summary = jobs.read_summary(job_dir)
+    # The job saved its best trial's backtest as it finished, so the page opens it without a run (the owner,
+    # 25 November 2026).
+    assert (job_dir / "best_backtest.pkl").exists() and "best_backtest_error" not in summary
+    reruns = []
+    real = analysis.split_backtest
+    monkeypatch.setattr(analysis, "split_backtest", lambda *args, **kwargs: reruns.append(1) or real(*args, **kwargs))
     app = testing.AppTest.from_file(str(APP / "pages" / "5_Optimiser_results.py"), default_timeout=180)
     app.run()
     assert not app.exception, [item.value for item in app.exception]
@@ -1062,6 +1068,7 @@ def test_the_optimiser_results_lead_with_the_best_settings_in_and_out_of_sample(
     # The best trial's backtest: its out-of-sample objective is the job's held-back number.
     next(button for button in app.button if button.label == "Show its backtest").click().run()
     assert not app.exception, [item.value for item in app.exception]
+    assert not reruns, "the stored backtest was run again"
     shown = app.session_state["best_backtest"]
     assert shown["split"] is not None
     table = shown["table"]
@@ -1069,6 +1076,13 @@ def test_the_optimiser_results_lead_with_the_best_settings_in_and_out_of_sample(
     assert table.loc["Sharpe ratio (the objective)", "Out of sample (held back)"] == f"{summary['held_out']['metric']:.4g}"
     assert "Sharpe ratio" not in table.index          # the objective is not listed twice
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+    # A job from before the backtest was saved runs it, with the same numbers.
+    (job_dir / "best_backtest.pkl").unlink()
+    del app.session_state["best_backtest"]
+    next(button for button in app.button if button.label == "Show its backtest").click().run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert reruns == [1]
+    assert app.session_state["best_backtest"]["table"].equals(table)
 
 
 def test_the_best_trials_chart_marks_where_the_held_back_part_starts():
@@ -1136,6 +1150,106 @@ def test_a_running_job_shows_its_stage_progress_and_time_left(tmp_path, monkeypa
     assert "10 of 40 trials" in text and "best so far 0.71" in text and "about 3 min left" in text, text
     assert any("Searching" in item.value for item in app.markdown if "os-meta" in item.value)
     assert [button for button in app.button if button.key == "cancel:running-job"]
+
+
+def test_every_backend_shows_its_options_named_in_words(tmp_path, monkeypatch):
+    """Each backend's own options render, each with a tooltip, under the backend's own name (the owner, 25 November
+    2026: the list mixed capitals and package names); BUTChC's batch starts at the worker count."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import config, optimise
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    picker = next(item for item in app.selectbox if item.label == "Backend")
+    assert picker.options == [optimise.BACKENDS[name]["label"] for name in optimise.BACKENDS]
+    for name in optimise.BACKENDS:
+        next(item for item in app.selectbox if item.label == "Backend").set_value(name).run()
+        assert not app.exception, (name, [item.value for item in app.exception])
+        assert not settings_without_a_tooltip(app), (name, settings_without_a_tooltip(app))
+        assert next(item for item in app.text_input if item.label == "Job name").value.endswith(
+            optimise.BACKENDS[name]["label"])
+        if name == "butchc":
+            batch = next(item for item in app.slider if item.label == "Batch")
+            assert batch.value == min(16, int(config.load_settings()["workers"]))
+    assert not [item for item in app.warning if "optional extra" in item.value]
+
+
+def test_the_optimise_settings_last_across_pages(tmp_path, monkeypatch):
+    """The owner (25 November 2026): leaving the Optimise page and coming back put every search setting back to
+    its default, which also made Start check the ranges again. They are kept for the session (ui.kept)."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    app = testing.AppTest.from_file(str(APP / "Home.py"), default_timeout=180)
+    app.session_state["spec"] = load_template("ma_cross")
+    app.session_state["spec_rev"] = 0
+    app.run()
+    app.switch_page("pages/4_Optimise.py").run()
+    assert not app.exception, [item.value for item in app.exception]
+    widget = lambda kind, label: next(item for item in getattr(app, kind) if item.label == label)
+    widget("selectbox", "Backend").set_value("nevergrad").run()
+    widget("selectbox", "Optimiser").set_value("PSO").run()
+    widget("number_input", "Budget (trials)").set_value(120).run()
+    widget("number_input", "Minimum trades").set_value(7).run()
+    widget("selectbox", "Metric").set_value("sortino").run()
+    widget("slider", "Hold back the last part of the history for testing").set_value(20).run()
+    spec = copy.deepcopy(app.session_state["spec"])
+    app.switch_page("pages/2_Build.py").run()
+    assert not app.exception, [item.value for item in app.exception]
+    app.switch_page("pages/4_Optimise.py").run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert widget("selectbox", "Backend").value == "nevergrad"
+    assert widget("selectbox", "Optimiser").value == "PSO"
+    assert widget("number_input", "Budget (trials)").value == 120
+    assert widget("number_input", "Minimum trades").value == 7
+    assert widget("selectbox", "Metric").value == "sortino"
+    assert widget("slider", "Hold back the last part of the history for testing").value == 20
+    assert app.session_state["spec"] == spec            # they are the page's, not the strategy's
+    # A budget is kept for each backend; a backend's own default is where one starts.
+    widget("selectbox", "Backend").set_value("optuna").run()
+    assert widget("number_input", "Budget (trials)").value == 200
+    assert not [item for item in app.warning if "Session State API" in item.value]
+
+
+def test_a_stopped_job_is_reported_until_another_is_started(tmp_path, monkeypatch):
+    """The owner (25 November 2026): a job that died on 19 November still headed the Optimise page under every
+    later run. Its warning shows while it is the newest job; once another is started its row says it stopped."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import config, jobs, store
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    data_dir = config.data_dir(config.load_settings())
+
+    def add(job_id, status, created_at, backend="optuna"):
+        job_dir = data_dir / "jobs" / job_id
+        job_dir.mkdir(parents=True)
+        jobs.write_json(job_dir / "progress.json", {
+            "status": status, "done": 0, "budget": 200, "updated_at": created_at,
+            "error": "The job stopped without finishing, after 0 of 200 trials." if status == "stopped" else None})
+        store.add_job(data_dir, job_id, f"MA cross: {job_id}", "optimise", backend, created_at, job_dir)
+
+    def render():
+        app = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+        app.session_state["spec"] = load_template("ma_cross")
+        app.session_state["spec_rev"] = 0
+        app.run()
+        assert not app.exception, [item.value for item in app.exception]
+        return app, [item.value for item in app.warning if "stopped without finishing" in item.value]
+
+    add("old", "stopped", "2026-11-19T13:21:52+00:00")
+    _, said = render()
+    assert said == ["**MA cross: old**: The job stopped without finishing, after 0 of 200 trials."]
+    add("new", "done", "2026-11-25T09:51:20+00:00", backend="butchc")
+    app, said = render()
+    assert not said, said
+    table = app.dataframe[-1].value.set_index("Job")
+    assert table.loc["MA cross: old", "Status"] == "Stopped from outside before it finished"
+    assert table.loc["MA cross: new", "Status"] == "Done" and table.loc["MA cross: new", "Backend"] == "BUTChC"
 
 
 def test_a_job_with_no_valid_trial_says_why(tmp_path, monkeypatch):
