@@ -943,45 +943,84 @@ def check_cut_entries_settle():
 
 
 # ---------------------------------------------------------------------------
-# 37. A run with entries cut to the cash simulates once per cut entry, at ~45 ms of Python each
+# 37. A run with entries cut to the cash rebuilds the whole run for each cut entry, ~30 ms of Python each
 # ---------------------------------------------------------------------------
 
-def check_cut_entries_simulate_once():
+def check_cut_entries_build_the_run_once():
     # Check 36's account over forty round trips: a 5x spread bet that wins every trade, each entry worth
     # 4.8 times the equity at its signal bar, so once the account has grown every entry is cut to the
-    # cash. vectorbt's simulation (its numba kernel) of these 205 bars takes about a millisecond; the
-    # run should simulate a fixed few times, not once per cut entry. Counted by wrapping vectorbt's own
-    # dispatch, which every front-door simulation goes through.
+    # cash, and the re-sizing loop makes one pass per cut entry. vectorbt's simulation of these 205 bars
+    # takes about a millisecond; a pass used to prepare the run twice and build a whole Portfolio around
+    # it, about 30 ms. The whole run should be built a fixed few times (the first run and the one it
+    # settles on), whatever the passes. Counted on Portfolio.from_signals, which builds every one; the
+    # kernel replays of the fix (vectorbtx.frontend.replay) are counted beside them, for the record.
     import time
-    import vectorbt.portfolio.dispatch as dispatch
+    import vectorbtx.core.portfolio as module
 
     o, h, l, c = frames([100.0 * 1.01 ** k for k in range(205)])
     instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
                   "leverage": 5.0, "min_size": 1.0, "increment": 1.0}
-    real = dispatch.simulate_from_signals
-    spent = []
-
-    def timed(*args, **kwargs):
-        start = time.perf_counter()
-        out = real(*args, **kwargs)
-        spent.append(time.perf_counter() - start)
-        return out
-
     keywords = dict(close=c, open=o, high=h, low=l, instruments={"X": instrument},
                     entries=mask(c.index, ["X"], [("X", bar) for bar in range(0, 200, 5)]),
                     exits=mask(c.index, ["X"], [("X", bar) for bar in range(3, 200, 5)]),
                     notional_pct=4.8, risk_of="equity", init_cash=10_000, freq="D")
     vbt.x.PortfolioBacktest(**keywords)                 # numba compiles on the first run
-    dispatch.simulate_from_signals = timed
+    original = module.Portfolio.from_signals.__func__
+    built, replayed = [], []
+
+    def counted(cls, *args, **kwargs):
+        built.append(1)
+        return original(cls, *args, **kwargs)
+
+    try:
+        import vectorbtx.frontend.replay as replay
+    except ImportError:
+        replay = None
+    real_replay = getattr(replay, "replay", None)
+    module.Portfolio.from_signals = classmethod(counted)
+    if real_replay is not None:
+        replay.replay = lambda *args: replayed.append(1) or real_replay(*args)
     try:
         start = time.perf_counter()
         vbt.x.PortfolioBacktest(**keywords)
         whole = time.perf_counter() - start
     finally:
-        dispatch.simulate_from_signals = real
-    runs = len(spent)
-    return runs > 3, (f"{runs} simulations for 40 entries; {whole:.2f} s in all, {1000 * sum(spent):.0f} ms of it "
-                      f"simulating (should be at most 3 simulations)")
+        module.Portfolio.from_signals = classmethod(original)
+        if real_replay is not None:
+            replay.replay = real_replay
+    return len(built) > 3, (f"the whole run built {len(built)} times for 40 entries, {len(replayed)} kernel "
+                            f"replays, {whole:.2f} s in all (should be built at most 3 times)")
+
+
+# ---------------------------------------------------------------------------
+# 38. A minimum commission on an exit is worked out from another order's size
+# ---------------------------------------------------------------------------
+
+def check_exit_commission_from_its_own_size():
+    # An unlevered share, a commission of 0.1% with a minimum of 5, half the starting cash per trade
+    # (notional_pct, so 49 shares at 100, 44 at 110.5...). Each order should pay max(0.1% of its own
+    # value, 5). The minimum is worked out before the run from the sizes frame (resolve_costs), whose
+    # value at an exit's bar is what an ENTRY there would be (fewer shares as the price rises), not the
+    # position the exit closes; so an exit of 49 shares at 105.1 pays 5.00, not 5.20.
+    # The same with a minimum of zero (which OpenStrategy Studio fills a blank with): the minimum
+    # path made every exit pay the 0.1% of the entry an exit's bar would have, 4.99 for 5.20.
+    o, h, l, c = frames([100.0 * 1.01 ** k for k in range(40)])
+    said = []
+    wrong_total = 0
+    for minimum in (0.0, 5.0):
+        instrument = {"mode": "equity", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                      "leverage": 1.0, "commission_pct": 0.001, "commission_min": minimum}
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", 0), ("X", 10), ("X", 20)]),
+                                     exits=mask(c.index, ["X"], [("X", 5), ("X", 15), ("X", 25)]),
+                                     notional_pct=0.5, init_cash=10_000, freq="D")
+        records = pf.orders.values
+        own = np.maximum(0.001 * records["size"] * records["price"], minimum)
+        wrong = int(np.sum(~np.isclose(records["fees"], own, rtol=1e-9, atol=1e-9)))
+        wrong_total += wrong
+        said.append(f"minimum {minimum:g}: {wrong} of {len(records)} orders pay another order's commission "
+                    f"(paid {np.round(records['fees'], 2).tolist()}, own {np.round(own, 2).tolist()})")
+    return wrong_total > 0, "; ".join(said)
 
 
 CHECKS = [
@@ -1023,8 +1062,9 @@ CHECKS = [
     (35, "The re-sizing loop re-issues the warnings of the run before the one it returns",
      check_warnings_describe_the_returned_run),
     (36, "The re-sizing loop gives up (RuntimeError) when many entries are cut to the cash", check_cut_entries_settle),
-    (37, "A run with entries cut to the cash simulates once per cut entry, at ~45 ms of Python each",
-     check_cut_entries_simulate_once),
+    (37, "A run with entries cut to the cash rebuilds the whole run for each cut entry, ~30 ms of Python each",
+     check_cut_entries_build_the_run_once),
+    (38, "A minimum commission on an exit is worked out from another order's size", check_exit_commission_from_its_own_size),
 ]
 
 
