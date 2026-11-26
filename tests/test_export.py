@@ -1,6 +1,7 @@
 """Test 8: the exported script and the in-app run agree."""
 
 import ast
+import copy
 
 import pandas as pd
 import pytest
@@ -52,7 +53,7 @@ def test_export_equivalence_shared_account(shared_spec, ohlcv_stocks):
     pytest.importorskip("vectorbtx")
     source = export_script(shared_spec)
     assert "cash='shared'" in source and "entry_priority=entry_priority" in source
-    assert "entry_priority = full(F['strength__momentum'], close)" in source
+    assert "entry_priority = full(F['strength__real'], close)" in source
     in_app = engine.run_backtest(shared_spec, ohlcv_stocks)["pf"]
     exported = run_exported(shared_spec, ohlcv_stocks)
     pd.testing.assert_series_equal(in_app.stats(), exported.stats())
@@ -67,9 +68,113 @@ def test_export_equivalence_shared_account(shared_spec, ohlcv_stocks):
 def test_export_equivalence_every_template_shape(ohlcv):
     """Rules with patterns, filters, shifts and channels export the same signals."""
     pytest.importorskip("vectorbtx")
-    for name in ("donchian_breakout", "rsi_reversion"):
+    for name in ("donchian_breakout", "rsi_reversion", "candlestick_reversal"):
         spec = S.load_template(name)
         symbol = spec["data"]["symbols"][0]
         data = {field: frame.rename(columns={"EURUSD=X": symbol}) for field, frame in ohlcv.items()}
         in_app = engine.run_backtest(spec, data)["pf"]
         pd.testing.assert_series_equal(in_app.stats(), run_exported(spec, data).stats())
+
+
+def test_export_equivalence_catalogue_logic_and_order_timing(ma_spec):
+    """TA-Lib, pandas-ta and the Studio's own entries, a feature of a feature, a logic line with
+    xor and not, and the intraday order masks: the script and the app agree."""
+    pytest.importorskip("vectorbtx")
+    from conftest import make_ohlcv
+    from openstrategy_studio import indicators
+
+    spec = copy.deepcopy(ma_spec)
+    spec["data"]["timeframe"] = "1h"
+    spec["account"]["freq"] = "1h"
+    spec["features"]["kc"] = indicators.new_feature("talib:KC")
+    spec["features"]["ce"] = indicators.new_feature("pandas_ta:CE")
+    spec["features"]["band"] = dict(indicators.new_feature("studio:percent_band"), inputs={"source": {"feature": "slow"}})
+    entry = spec["rules"]["long_entry"]
+    entry["conditions"]["B"] = {"left": {"price": "close"}, "op": ">", "right": {"feature": "kc", "output": "lowerband"}}
+    entry["conditions"]["C"] = {"left": {"price": "close"}, "op": "<", "right": {"feature": "band", "output": "upper"}}
+    entry["conditions"]["D"] = {"left": {"price": "close"}, "op": ">", "right": {"feature": "ce", "output": "ce_l"}}
+    entry["logic"] = "(A or (B xor C)) and not D"
+    spec["risk"]["orders"] = {"good_for_day": True, "flat_by_day_end": True}
+    assert S.validate_spec(spec) == []
+    data = make_ohlcv(600, ("EURUSD=X",), freq="1h", seed=5)
+    source = export_script(spec)
+    assert "run_library_indicator('pandas_ta', 'CE'" in source and "day_boundaries(close.index)" in source
+    in_app = engine.run_backtest(spec, data, params={"features.fast.params.timeperiod": 5,
+                                                     "features.slow.params.timeperiod": 20})
+    applied = S.apply_params(spec, {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20})
+    pd.testing.assert_series_equal(in_app["pf"].stats(), run_exported(applied, data).stats())
+
+
+def test_export_equivalence_timing_and_exit_conditions(ma_spec, ohlcv):
+    """A cross within the last 5 bars, a level held for 3, a weekly comparison for 2 weeks, and an
+    exit on a Friday or a weekly close below its open: the script and the app agree."""
+    pytest.importorskip("vectorbtx")
+    spec = copy.deepcopy(ma_spec)
+    entry = spec["rules"]["long_entry"]
+    entry["conditions"]["A"]["within_bars"] = 5
+    entry["conditions"]["B"] = {"left": {"price": "close"}, "op": ">", "right": {"feature": "slow"}, "for_bars": 3}
+    entry["conditions"]["C"] = {"filter": "higher_timeframe", "timeframe": "1w", "left": {"price": "close"},
+                                "op": ">", "right": {"price": "open"}, "for_bars": 2}
+    entry["logic"] = "A and B and C"
+    exit_ = spec["rules"]["long_exit"]
+    exit_["conditions"]["A"]["bars_ago"] = 1
+    exit_["conditions"]["B"] = {"filter": "weekday", "days": [4]}
+    exit_["conditions"]["C"] = {"filter": "higher_timeframe", "timeframe": "1w", "left": {"price": "close"},
+                                "op": "<", "right": {"price": "open"}}
+    exit_["logic"] = "A or B or C"
+    assert S.validate_spec(spec) == []
+    source = export_script(spec)
+    assert "within_bars=5" in source and "for_bars=3" in source and "bars_ago=1" in source
+    params = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}
+    in_app = engine.run_backtest(spec, ohlcv, params=params)
+    assert in_app["compiled"]["entries"].to_numpy().any() and in_app["compiled"]["exits"].to_numpy().any()
+    pd.testing.assert_series_equal(in_app["pf"].stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())
+
+
+def test_export_equivalence_stops_in_percent(ma_spec, ohlcv):
+    """A trailing stop and a take profit in % of the price (vectorbt's own sl_stop, sl_trail and tp_stop)."""
+    pytest.importorskip("vectorbtx")
+    spec = copy.deepcopy(ma_spec)
+    spec["risk"]["sizing"] = {"stake": 1.0}                 # risk sizing needs a stop in points
+    spec["risk"]["stop"].update(kind="trailing", unit="pct", pct=0.004)
+    spec["risk"]["target"].update(unit="pct", pct=0.008)
+    assert S.validate_spec(spec) == []
+    source = export_script(spec)
+    assert "sl_stop=0.004" in source and "sl_trail=True" in source and "tp_stop=0.008" in source
+    params = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}
+    in_app = engine.run_backtest(spec, ohlcv, params=params)["pf"]
+    assert int(in_app.trades.count().sum()) > 0
+    pd.testing.assert_series_equal(in_app.stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())
+
+
+
+def test_export_equivalence_stops_from_a_line_and_a_share_of_the_equity(ma_spec, ohlcv):
+    """A stop at a line's level, a target at a multiple of an ATR, risk sized from the equity; then a
+    trailing stop at a multiple of the ATR with positions worth a multiple of the balance."""
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import indicators
+
+    params = {"features.fast.params.timeperiod": 5, "features.slow.params.timeperiod": 20}
+    spec = copy.deepcopy(ma_spec)
+    spec["features"]["atr"] = indicators.new_feature("talib:ATR")
+    # 5%: over a stop as wide as the slow MA, 1% of 10,000 is under the 1-a-point minimum stake.
+    spec["risk"]["sizing"] = {"risk_pct": 0.05, "risk_of": "equity"}
+    spec["risk"]["stop"].update(kind="fixed", unit="level", line={"feature": "slow"})
+    spec["risk"]["target"].update(kind="fixed", unit="multiple", multiple=4.0, line={"feature": "atr"})
+    assert S.validate_spec(spec) == []
+    source = export_script(spec)
+    assert "stop_price = full(F[" in source and "target_points = 4.0 * full(F[" in source
+    assert "risk_of='equity'" in source
+    in_app = engine.run_backtest(spec, ohlcv, params=params)["pf"]
+    assert int(in_app.trades.count().sum()) > 0
+    pd.testing.assert_series_equal(in_app.stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())
+
+    # Worth twice the balance (funded by the 30x leverage): half of 10,000 is under a 1-a-point stake.
+    spec["risk"]["sizing"] = {"notional_pct": 2.0, "risk_of": "balance"}
+    spec["risk"]["stop"].update(kind="trailing", unit="multiple", multiple=2.0, line={"feature": "atr"})
+    spec["risk"]["target"]["kind"] = "none"
+    assert S.validate_spec(spec) == []
+    assert "trail_points = 2.0 * full(F[" in export_script(spec)
+    in_app = engine.run_backtest(spec, ohlcv, params=params)["pf"]
+    assert int(in_app.trades.count().sum()) > 0
+    pd.testing.assert_series_equal(in_app.stats(), run_exported(S.apply_params(spec, params), ohlcv).stats())

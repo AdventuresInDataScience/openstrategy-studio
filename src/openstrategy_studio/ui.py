@@ -15,16 +15,23 @@ State rules (plan section 11):
 """
 
 import copy
+import html
 import json
+import os
+import re
+import threading
 import traceback
+from importlib import resources
 from pathlib import Path
 
 import streamlit as st
 
-from . import config, data as data_module
-from .blocks import BLOCKS
-from .spec import (COMPARISON_OPS, PRICE_FIELDS, TIMEFRAME_MINUTES, default_spec, get_path, is_choice, is_opt,
-                   set_path, value_of)
+from . import config, data as data_module, indicators, style
+from .expressions import (LOGIC_WORDS, append_letter, condition_name_problem, condition_text, next_condition_name,
+                          next_letter, parse_logic, plan, remove_letter)
+from .spec import (COMPARISON_OPS, HIGHER_TIMEFRAMES, PATTERN_SIDES, PRICE_FIELDS, TIMEFRAME_MINUTES, TIMING_KEYS,
+                   default_spec, feature_name_problem, get_path, is_choice, rename_condition,
+                   rename_feature, set_path, tunable_inputs)
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
@@ -45,18 +52,75 @@ def _apply_settings_once(settings_json):
     return True
 
 
+# The start-up warm-up's state, once it has been started: {"done": threading.Event, "error": text or None}.
+WARM_UP = {}
+
+
+@st.cache_resource(show_spinner=False)
+def _start_warm_up():
+    """Compile numba's code in a background thread, once per Studio start (engine.warm_up).
+
+    The thread never touches Streamlit. Its own try/except is the exception to "one per
+    page": it runs outside any page, and a failure there costs nothing but the head start
+    (the first real run compiles what it needs anyway), so it is recorded and shown as a
+    note, never raised.
+    """
+    state = {"done": threading.Event(), "error": None}
+
+    def work():
+        from . import engine
+        try:
+            engine.warm_up()
+        except Exception as error:   # noqa: BLE001  (best effort; see the docstring)
+            state["error"] = f"{type(error).__name__}: {error}"
+        finally:
+            state["done"].set()
+
+    threading.Thread(target=work, name="openstrategy-warm-up", daemon=True).start()
+    WARM_UP.update(state)
+    return True
+
+
+def warming_up():
+    """True while the start-up warm-up is still compiling."""
+    return bool(WARM_UP) and not WARM_UP["done"].is_set()
+
+
 def boot(title):
-    """Call first on every page. Returns (settings, data_dir)."""
-    st.set_page_config(page_title=f"{title} · OpenStrategy Studio", layout="wide")
+    """Call first on every page. Returns (settings, data_dir).
+
+    Also dresses the page in its theme (style.py): the stylesheet, the sidebar's logo,
+    and the "page" chart theme, all from the theme file Streamlit itself started with.
+    """
+    st.set_page_config(page_title=f"{title} · OpenStrategy Studio", page_icon=":material/candlestick_chart:",
+                       layout="wide")
     if "settings" not in st.session_state:
         st.session_state["settings"] = config.load_settings()
     settings = st.session_state["settings"]
     _apply_settings_once(json.dumps(settings, sort_keys=True))
+    # OPENSTRATEGY_STUDIO_WARM_UP=0 turns it off for one process (the tests set it).
+    if settings.get("warm_up", True) and os.environ.get("OPENSTRATEGY_STUDIO_WARM_UP", "1") != "0":
+        _start_warm_up()
+    look, problems = style.active_theme(settings)
+    # Style tags alone: Streamlit puts them where they take no space on the page.
+    st.html(f"<style>{style.stylesheet(look)}</style>")
+    st.logo(style.logo_svg(look), icon_image=style.logo_svg(look, mark_only=True), size="large")
+    from . import analysis
+    analysis.use_page_theme(look)
+    if problems:
+        st.warning("Page theme: " + " ".join(problems))
     data_dir = config.data_dir(settings)
     if "spec" not in st.session_state:
         st.session_state["spec"] = default_spec()
         st.session_state["spec_rev"] = 0
     return settings, data_dir
+
+
+def page_help(page):
+    """The sidebar's guide to this page, from help/<page>.md (packaged, so easy to edit)."""
+    entry = resources.files("openstrategy_studio") / "help" / f"{page}.md"
+    with st.sidebar.expander("How to use this page", expanded=False, icon=":material/help:"):
+        st.markdown(entry.read_text(encoding="utf-8"))
 
 
 def current():
@@ -96,7 +160,7 @@ def replace_spec(spec):
 
 
 def has_python_block(spec):
-    return any(feature.get("block") == "python" for feature in (spec.get("features") or {}).values())
+    return any(feature.get("indicator") == "studio:python" for feature in (spec.get("features") or {}).values())
 
 
 def _get(path, default):
@@ -106,9 +170,50 @@ def _get(path, default):
         return default
 
 
+def renew_widgets():
+    """New keys for every spec-bound widget, so each re-seeds from the spec on the next run.
+
+    ⚠️ Needed after any structural change (a condition added or removed, a switch of
+    kind): Streamlit keeps a keyed widget's own state and ignores its new value, so the
+    logic line would keep its old text, and a reused letter would show a deleted
+    condition's settings, and write them back.
+    """
+    st.session_state["spec_rev"] = st.session_state.get("spec_rev", 0) + 1
+
+
+def rerun_after(change):
+    """Make a structural change to the spec (add, remove, switch), save it and redraw."""
+    change()
+    save_draft()
+    renew_widgets()
+    st.rerun()
+
+
+def prune_variables():
+    """Drop optimise variables whose value the strategy no longer has.
+
+    Called by any change that removes a value: a rule or condition deleted, a condition's
+    kind or comparison switched, a side switched from a number to a feature, a stop turned
+    into another kind. Without it the variable would stay behind, and validate_spec would
+    say so until it was removed by hand.
+    """
+    known = {row["path"] for row in tunable_inputs(current())}
+    found = (current().get("optimise") or {}).get("variables") or {}
+    for path in [path for path in found if path not in known]:
+        del found[path]
+
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
+
+# The one tooltip of every "Log scale" checkbox (the tear sheets, the saved runs compared, the walk-forward
+# curve, the Build preview), each of which draws its figure through analysis.log_scale.
+LOG_SCALE_HELP = ("Draws the values on a log axis, so equal percentage moves are the same height: a fall from "
+                  "2,000,000 to 1,000,000 looks as big as one from 2,000 to 1,000. Long histories and accounts "
+                  "that grew a lot read better this way. A value at or below zero cannot be drawn on it and "
+                  "leaves a gap.")
+
 
 def chart(fig):
     # ⚠️ theme=None ALWAYS: the default theme="streamlit" overrides the template's
@@ -147,17 +252,248 @@ def run_guarded(label, fn):
             return None
 
 
-def theme_picker(settings, prefix):
-    """Theme selector in three groups, plus the glow checkbox for line figures."""
+def tear_sheet(results, prefix, run_id, settings=None, theme=None, glow=False, split=None):
+    """A backtest's tear sheet: how it was funded, what vectorbtX flagged, a chart picked from the figures,
+    then every metric, each symbol, the trades and the orders.
+
+    The Backtest results page draws one for its run, and the Optimiser results page one for each part of a
+    best trial (in sample, out of sample, the whole period: the owner, 25 November 2026). `prefix` keeps
+    each one's widgets apart, `run_id` keys the figure cache. Pass `settings` to draw a chart theme picker
+    beside the view, or `theme` and `glow` when the page has one already. `split`: the first held-back bar,
+    marked on the charts that run along the dates (analysis.fig_split).
+    """
+    from . import analysis
+
+    # How the run was funded. Runs saved before the meta recorded it say nothing.
+    accounts = results["meta"].get("accounts") or {}
+    if accounts.get("model") == "separate":
+        st.info(f"{accounts['count']} separate accounts, one per symbol, each starting with {accounts['each']:,.0f} "
+                f"({accounts['count'] * accounts['each']:,.0f} in all). The tables and charts treat them as one book; "
+                "the table under them shows each account on its own."
+                + (" To trade every symbol from one account, make the account shared on the Build page's Account tab."
+                   if results["meta"]["kind"] == "signals" else ""))
+    elif accounts.get("model") == "shared" and results["meta"]["kind"] == "signals":
+        st.caption(f"One account of {accounts['each']:,.0f}, shared by every symbol.")
+
+    # What vectorbtX could not price, or priced on an assumption, with what to change in the Studio.
+    # Runs saved before the meta recorded these say nothing.
+    notes = results["meta"].get("warnings") or []
+    if notes:
+        lines = []
+        for note, hint in analysis.warning_hints(notes):
+            lines.append(f"- {note}" + (f"\n\n  **{hint}**" if hint else ""))
+        st.warning("vectorbtX flagged this run. The run finished, but its numbers may leave something out:\n\n"
+                   + "\n".join(lines))
+
+    # --- the chart first ---
+    names = analysis.available_figures(results)
+    row = st.columns([2, 3])
+    name = row[0].selectbox("View", names, format_func=lambda key_: analysis.FIGURES[key_]["label"],
+                            key=f"{prefix}:view",
+                            help="Which chart to draw from this run. It opens on the equity curve against buy and "
+                                 "hold.")
+    if theme is None:
+        with row[1]:
+            theme, glow = theme_picker(settings, prefix)
+    # A log axis for a value or a price (the owner, 26 November 2026: a 1975 to 2026 history is unreadable
+    # without one). Kept for the session, one per tear sheet, and offered only where the figure can take it.
+    log = False
+    if analysis.FIGURES[name].get("log"):
+        log = row[0].checkbox("Log scale", key=kept(f"{prefix}:log", False), help=LOG_SCALE_HELP)
+    options = {}
+    if name == "price":
+        symbols = results["meta"]["symbols"]
+        choices = sorted(results["features"]["feature"].unique()) if "features" in results else []
+        left, right = st.columns(2)
+        options["symbol"] = left.selectbox("Symbol", symbols, key=f"{prefix}:symbol",
+                                           help="Which symbol's prices and trades to show.")
+        options["overlays"] = tuple(right.multiselect("Overlay features (pattern hits show as diamonds)", choices,
+                                                      key=f"{prefix}:overlays",
+                                                      help="Feature lines to draw over the price."))
+    elif name == "rolling":
+        options["window"] = st.slider("Window (bars)", 10, 504, 63, key=f"{prefix}:window",
+                                      help="How many bars each rolling figure is measured over (63 is about a "
+                                           "quarter of daily bars).")
+    elif name == "monte_carlo":
+        options["paths"] = st.select_slider("Paths", [100, 250, 500, 1000, 2500], value=500, key=f"{prefix}:paths",
+                                            help="How many times the trades are put in a random order to draw the "
+                                                 "bands. More gives steadier bands and takes longer.")
+    # Built only when selected, and cached on (run, view, theme, split, log scale, options).
+    cache = st.session_state.setdefault("figures", {})
+    cache_key = (run_id, name, theme, glow, str(split), log, tuple(sorted(options.items())))
+    if cache_key not in cache:
+        cache[cache_key] = analysis.fig_split(results, split, theme, glow, name, log=log, **options)
+    figure = cache[cache_key]
+    for item in figure if isinstance(figure, tuple) else (figure,):
+        chart(item)
+
+    # --- then every metric ---
+    st.divider()
+    columns = st.columns(3)
+    for column, (table_name, label) in zip(columns, (("portfolio", "Portfolio"), ("trades", "Trades"),
+                                                     ("returns", "Returns"))):
+        with column:
+            st.markdown(f"**{label}**")
+            table(analysis.stats_frame(results, table_name), height=420)
+    st.caption("Z-score reads the other way round from most metrics: a negative value means wins and losses cluster "
+               "in streaks. It is a dependency test, not a quality score. A blank is a number the run does not have, "
+               "such as a Sharpe ratio with no trades.")
+    if "per_symbol" in results:
+        st.markdown("**Each symbol**")
+        table(results["per_symbol"], hide_index=False)
+        if accounts.get("model") != "separate":
+            st.caption("A symbol in a shared account has no equity of its own, so only what it traded is shown.")
+    with st.expander("Trades"):
+        table(results["trades"])
+    with st.expander("Orders"):
+        table(results["orders"])
+
+
+def glance(spec, problems):
+    """The strategy at a glance, as it would be told (expressions.plan): its name, then a sentence for each
+    part in the part's tone (the market, each rule, each trade's size and stops, the features, what is
+    optimised), always in view beside the form; then the problems, or that it is ready."""
+    rows = []
+    for sentence in plan(spec):
+        tone = f" os-tone-{sentence['tone']}" if sentence["tone"] else " os-glance-quiet"
+        items = "".join(f"<li>{html.escape(item)}</li>" for item in sentence["items"])
+        after = f'<div class="os-glance-after">{html.escape(sentence["after"])}</div>' if sentence.get("after") else ""
+        rows.append(f'<div class="os-glance-line{tone}"><b>{html.escape(sentence["lead"])}</b>'
+                    f'{html.escape(sentence["text"])}{f"<ul>{items}</ul>" if items else ""}{after}</div>')
+    rows.insert(0, f'<div class="os-glance-name">{html.escape(str(spec.get("name") or "Untitled strategy"))}</div>')
+    status = (f'<div class="os-glance-ok">Ready to backtest</div>' if not problems else
+              '<div class="os-glance-problems">' + "".join(f"<div>{html.escape(problem)}</div>"
+                                                           for problem in problems[:8])
+              + (f"<div>... and {len(problems) - 8} more</div>" if len(problems) > 8 else "") + "</div>")
+    st.html(f'<div class="os-glance"><div class="os-glance-title">At a glance</div>{"".join(rows)}{status}</div>')
+
+
+# ---------------------------------------------------------------------------
+# Cards and sections: the Build page's hierarchy, drawn by themes/studio.css
+# ---------------------------------------------------------------------------
+# A page sets no colour of its own: it names a tone (a part of the strategy) and the
+# stylesheet colours the card from the page theme's tone_* tokens.
+TONES = ["setup", "feature", "entry", "exit", "risk", "account", "add"]
+
+
+def _css_name(name):
+    """A key fragment the stylesheet's attribute selectors can match: no spaces or dots."""
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", str(name))
+
+
+def card(name, tone):
+    """A card in a section's tone: a keyed container (os-card-<tone>-<name>) that studio.css draws."""
+    return st.container(key=f"os-card-{tone}-{_css_name(name)}")
+
+
+def sub_card(name):
+    """A card inside a card (a condition inside a rule): it keeps its parent's tone."""
+    return st.container(key=f"os-sub-{_css_name(name)}")
+
+
+def heading(text, tone=None, help=None):
+    """A small heading inside a tab, in a section's tone, with an optional ⓘ."""
+    tone_class = f" os-tone-{tone}" if tone else ""
+    st.markdown(f'<div class="os-heading{tone_class}">{html.escape(text)}</div>', unsafe_allow_html=True, help=help)
+
+
+def section(title, tone, name, expanded=True, icon=None):
+    """A collapsible section in a tone: an expander keyed os-exp-<tone>-<name>, which keeps its
+    own open or closed state across reruns."""
+    return st.expander(title, expanded=expanded, key=f"os-exp-{tone}-{_css_name(name)}", icon=icon)
+
+
+def card_header(name, title, meta="", code="", off="", help=None, fold=None):
+    """A card's title row: the title in the card's tone, then details, and room for buttons.
+
+    Returns the row (a horizontal container), so the caller adds its icon buttons to it,
+    on the same line as the title (the owner's call: a delete is a bin on the title, not a
+    button in the box). `meta` is muted text, `code` a formula in a chip, `off` an italic
+    note such as "not used".
+
+    `fold=(path, default, key, what)` makes the card fold like an expander: the title itself
+    is the button, with a chevron before it (the owner's call, 20 November 2026: a small icon
+    among the buttons on the right was not found). Read whether it is open with
+    is_open(path, default) after this call.
+    """
+    row = st.container(horizontal=True, vertical_alignment="center", gap="small", key=f"os-head-{_css_name(name)}")
+    text = ""
+    if fold is None:
+        text = f'<span class="os-title">{html.escape(title)}</span>'
+    else:
+        path, default, key_, what = fold
+        opened = is_open(path, default)
+        # A callback, so the chevron and the body agree on the run the click starts.
+        row.button(title, key=key_, type="tertiary", icon=":material/expand_more:" if opened else
+                   ":material/chevron_right:", help=f"Fold away {what}" if opened else f"Show {what}",
+                   on_click=open_panel, args=(path, not opened))
+    if meta:
+        text += f'<span class="os-meta">{html.escape(meta)}</span>'
+    if code:
+        text += f'<span class="os-code">{html.escape(code)}</span>'
+    if off:
+        text += f'<span class="os-off">{html.escape(off)}</span>'
+    # Stretched, so the buttons the caller adds sit at the right whatever the title's length.
+    row.markdown(text or "&nbsp;", unsafe_allow_html=True, help=help, width="stretch")
+    return row
+
+
+def is_open(path, default=False):
+    """Whether a card's body is shown. Kept per session by path; a card never toggled is `default`."""
+    return st.session_state.setdefault("panels", {}).get(path, default)
+
+
+def open_panel(path, opened=True):
+    """Have a card open (or closed) the next time it is drawn: a new or renamed feature or condition."""
+    st.session_state.setdefault("panels", {})[path] = opened
+
+
+def kept(name, default, options=None):
+    """The key for a page setting that is not part of the strategy and lasts the session, across pages.
+
+    Streamlit forgets a widget's value as soon as a page without it is drawn, so leaving the Optimise
+    page and coming back put every search setting back to its default (the owner, 25 November 2026).
+    The value is kept apart from the widget, in session_state["kept"], and handed to the widget through
+    its key before it is drawn. Give the widget no default of its own (no value=, index= or default=):
+    a default beside a value set by key makes Streamlit warn on the page. `options`: what the widget
+    offers now; a kept value it no longer offers (a backend a conditional space cannot use) goes back
+    to `default`. Not the spec's: a strategy's own values go through key() and set_value().
+    """
+    key = f"kept:{name}"
+    store = st.session_state.setdefault("kept", {})
+    value = st.session_state[key] if key in st.session_state else store.get(name, default)
+    if options is not None:
+        wanted = value if isinstance(value, list) else [value]
+        if not all(item in options for item in wanted):
+            value = default
+    # Before the widget is drawn, so allowed; a change the user makes reruns the page, which keeps it here.
+    st.session_state[key] = value
+    store[name] = value
+    return key
+
+
+def chart_theme_options():
+    """(chart theme names, {name: label}) in the selector's groups, for the pickers and Settings."""
     from . import analysis
 
     groups = analysis.theme_groups()
     options = [theme for names in groups.values() for theme in names]
     labels = {theme: f"{group}: {theme.replace('_', ' ')}" for group, names in groups.items() for theme in names}
-    default = settings.get("default_theme", "plotly_white")
+    labels[analysis.PAGE_THEME] = "Match the page theme"
+    return options, labels
+
+
+def theme_picker(settings, prefix):
+    """Chart theme selector in its groups, plus the glow checkbox for line figures."""
+    from . import analysis
+
+    options, labels = chart_theme_options()
+    default = settings.get("default_theme", analysis.PAGE_THEME)
     left, right = st.columns([3, 1])
     theme = left.selectbox("Chart theme", options, index=options.index(default) if default in options else 0,
-                           format_func=labels.get, key=f"{prefix}:theme")
+                           format_func=labels.get, key=f"{prefix}:theme",
+                           help="The colours and fonts of the charts on this page. Match the page theme follows the "
+                                "page's own colours; the default is set on the Settings page.")
     glow = right.checkbox("Glow", value=theme in analysis.GLOW_THEMES, key=f"{prefix}:glow",
                           help="Adds a glow to line charts; suits star wars, cyberpunk and synthwave.")
     return theme, glow
@@ -167,377 +503,738 @@ def theme_picker(settings, prefix):
 # Spec-bound inputs
 # ---------------------------------------------------------------------------
 
-def _opt_controls(path, declaration, value, current_opt):
-    """Min / max / step / log for numbers, allowed values for choices. Returns the opt dict."""
-    kind = declaration["type"]
-    if kind == "choice":
-        allowed = st.multiselect("Values to try", declaration["options"],
-                                 default=(current_opt or {}).get("values") or declaration["options"],
-                                 key=key(path, ":opt:values"))
-        return {"values": allowed}
-    integer = kind == "int"
-    low_default = declaration.get("min", value / 2 if value else 0)
-    high_default = declaration.get("max", value * 2 if value else 1)
-    opt = current_opt or {"min": low_default, "max": high_default}
-    columns = st.columns(4)
-    cast = int if integer else float
-    number = {"step": 1} if integer else {"format": "%g"}
-    low = columns[0].number_input("Min", value=cast(opt.get("min", low_default)), key=key(path, ":opt:min"), **number)
-    high = columns[1].number_input("Max", value=cast(opt.get("max", high_default)), key=key(path, ":opt:max"),
-                                   **number)
-    step = columns[2].number_input("Grid step", value=cast(opt.get("step") or 0), min_value=cast(0),
-                                   key=key(path, ":opt:step"), help="Grid backend only; 0 means ten points.",
-                                   **number)
-    out = {"min": cast(low), "max": cast(high)}
-    if integer:
-        out["int"] = True
-    elif columns[3].checkbox("Log scale", value=bool(opt.get("log")), key=key(path, ":opt:log")):
-        out["log"] = True
-    if step:
-        out["step"] = cast(step)
-    return out
+def param_input(path, declaration, label=None, help=None, container=None):
+    """One value bound to the spec: a number, a choice, a switch, text or code.
 
-
-def param_input(path, declaration, label=None, help=None, optimisable=True):
-    """One parameter bound to the spec, with an Optimise toggle beside every numeric
-    or categorical field. Turning it on reveals the search range and stores the
-    {"value", "opt"} node from plan section 5."""
-    node = _get(path, declaration.get("default"))
-    if declaration["type"] == "float" and is_opt(node) and node["opt"].get("int"):
-        # The spec already searches this in whole numbers: keep it that way.
-        declaration = dict(declaration, type="int")
+    A declaration with no default (pandas-ta leaves many to the library) shows as a
+    blank box, and blank means "the library's own default": nothing is written.
+    Optimisation ranges live on the Optimise page, not here.
+    """
+    where = container or st
+    default = declaration.get("default")
+    value = _get(path, default)
     kind = declaration["type"]
-    value = value_of(node)
     label = label or declaration.get("label") or path.rsplit(".", 1)[-1].replace("_", " ").capitalize()
-    can_optimise = optimisable and kind in ("int", "float", "choice")
-    if can_optimise:
-        left, right = st.columns([4, 1])
-    else:
-        left, right = st.container(), None
-    if kind == "int":
-        new = left.number_input(label, value=int(value if value is not None else 0), step=1, help=help,
-                                key=key(path))
+    if kind in ("int", "float") and value is None:
+        text = where.text_input(label, value="", placeholder="the indicator's default", help=help, key=key(path))
+        new = None
+        if text.strip():
+            try:
+                new = int(text) if kind == "int" else float(text)
+            except ValueError:
+                where.error(f"{label}: type a {'whole ' if kind == 'int' else ''}number, or leave it blank.")
+                return value
+    elif kind == "int":
+        new = int(where.number_input(label, value=int(value), step=1, help=help, key=key(path)))
     elif kind == "float":
-        new = left.number_input(label, value=float(value if value is not None else 0.0), format="%g", help=help,
-                                key=key(path))
+        new = float(where.number_input(label, value=float(value), format="%g", help=help, key=key(path)))
     elif kind == "bool":
-        new = left.checkbox(label, value=bool(value), help=help, key=key(path))
+        new = bool(where.checkbox(label, value=bool(value), help=help, key=key(path)))
     elif kind == "choice":
-        options = declaration["options"]
-        new = left.selectbox(label, options, index=options.index(value) if value in options else 0, help=help,
-                             key=key(path))
+        options = list(declaration["options"])
+        if value is None:
+            options = [None] + options
+        new = where.selectbox(label, options, index=options.index(value) if value in options else 0, help=help,
+                              key=key(path), format_func=lambda option: "the indicator's default" if option is None
+                              else str(option))
     elif kind == "code":
-        new = left.text_area(label, value=value or "", height=160, help=help, key=key(path))
+        new = where.text_area(label, value=value or "", height=160, help=help, key=key(path))
     else:
-        new = left.text_input(label, value="" if value is None else str(value), help=help, key=key(path))
-    result = new
-    if can_optimise:
-        right.write("")
-        if right.toggle("Optimise", value=is_opt(node), key=key(path, ":opt")):
-            previous = node["opt"] if is_opt(node) else None
-            result = {"value": new, "opt": _opt_controls(path, declaration, new, previous)}
-    if result != node:
-        set_value(path, result)
-    return result
+        text = where.text_input(label, value="" if value is None else str(value), help=help, key=key(path))
+        new = text if text != "" or value is not None else None
+    if new != value and not (new is None and value is None):
+        set_value(path, new)
+    return new
 
 
-def source_input(path, features, own_name):
-    """A block's input: a price field or another feature's output."""
-    node = _get(path, "close")
-    options = list(PRICE_FIELDS)
+def _output_options(features, exclude=None):
+    """Every feature output as "name.output", for pickers."""
+    options = []
     for name, feature in features.items():
-        if name != own_name and feature.get("block") in BLOCKS:
-            options += [f"{name}.{output}" for output in BLOCKS[feature["block"]]["outputs"]]
+        if name == exclude or feature.get("indicator") not in indicators.catalogue():
+            continue
+        options += [f"{name}.{output}" for output in indicators.outputs(feature["indicator"])]
+    return options
+
+
+def _output_label(features, option):
+    """How an output reads in a picker: a feature with one output is just its name ("fast", not "fast.real")."""
+    name, _, output = option.partition(".")
+    if name in features and len(indicators.outputs(features[name]["indicator"])) == 1:
+        return name
+    return option
+
+
+def input_select(path, features, own_name, label):
+    """A feature input: a price field or another feature's output.
+
+    Its tooltip says what can be picked; the entry's own description sits above the inputs.
+    """
+    node = _get(path, "close")
+    options = list(PRICE_FIELDS) + _output_options(features, exclude=own_name)
     if isinstance(node, dict):
-        output = node.get("output") or BLOCKS[features[node["feature"]]["block"]]["outputs"][0]
+        output = node.get("output") or (indicators.outputs(features[node["feature"]]["indicator"])[0]
+                                        if node.get("feature") in features else "")
         current_label = f"{node['feature']}.{output}"
     else:
         current_label = node
-    chosen = st.selectbox("Input", options, index=options.index(current_label) if current_label in options else 0,
-                          key=key(path))
-    if chosen in PRICE_FIELDS:
-        new = chosen
-    else:
-        name, output = chosen.split(".", 1)
-        new = {"feature": name, "output": output}
+    chosen = st.selectbox(label, options, index=options.index(current_label) if current_label in options else 0,
+                          key=key(path), format_func=lambda option: _output_label(features, option),
+                          help="The line this is computed on: a price, or another feature's output, so features "
+                               "can be chained (an RSI of an EMA).")
+    new = chosen if chosen in PRICE_FIELDS else dict(zip(("feature", "output"), chosen.split(".", 1)))
     if new != node:
         set_value(path, new)
 
 
-def ref_input(path, features, label):
-    """One side of a comparison: a feature output, a price, or a number (optimisable)."""
+def ref_input(path, features, label, allow_const=True, help=None):
+    """One side of a comparison: a feature output, a price, or a number.
+
+    `help` is the tooltip on the first box, which says what this side is for; it defaults
+    to what the three kinds are.
+    """
     ref = _get(path, {"price": "close"})
-    kinds = (["feature"] if features else []) + ["price", "const"]
+    kinds = (["feature"] if features else []) + ["price"] + (["const"] if allow_const else [])
     names = {"feature": "Feature", "price": "Price", "const": "Number"}
     kind = next((name for name in ("feature", "price", "const") if name in ref), "price")
     chosen = st.selectbox(label, kinds, index=kinds.index(kind) if kind in kinds else 0, format_func=names.get,
-                          key=key(path, ":kind"))
+                          key=key(path, ":kind"),
+                          help=help or "A feature's output, a price, or a fixed number. Pick which, then which one "
+                                       "in the box below.")
     if chosen != kind:
-        first = next(iter(features), None)
-        set_value(path, {"feature": first} if chosen == "feature" else {"price": "close"} if chosen == "price"
-                  else {"const": 0})
+        first = _output_options(features)[:1]
+        set_value(path, dict(zip(("feature", "output"), first[0].split(".", 1))) if chosen == "feature" and first
+                  else {"price": "close"} if chosen == "price" else {"const": 0.0})
+        # A number's variable goes when the side reads a line instead, and bars ago's the other way.
+        prune_variables()
+        save_draft()
+        renew_widgets()
         st.rerun()
     if chosen == "feature":
-        options = [f"{name}.{output}" for name, feature in features.items() if feature.get("block") in BLOCKS
-                   for output in BLOCKS[feature["block"]]["outputs"]]
-        output = ref.get("output") or (BLOCKS[features[ref["feature"]]["block"]]["outputs"][0]
+        options = _output_options(features)
+        output = ref.get("output") or (indicators.outputs(features[ref["feature"]]["indicator"])[0]
                                        if ref.get("feature") in features else None)
         current_label = f"{ref.get('feature')}.{output}"
         picked = st.selectbox("Which", options, index=options.index(current_label) if current_label in options else 0,
-                              key=key(path, ":feature"), label_visibility="collapsed")
+                              key=key(path, ":feature"), label_visibility="collapsed",
+                              format_func=lambda option: _output_label(features, option))
         name, output = picked.split(".", 1)
         new = {"feature": name}
-        if len(BLOCKS[features[name]["block"]]["outputs"]) > 1:
+        if len(indicators.outputs(features[name]["indicator"])) > 1:
             new["output"] = output
     elif chosen == "price":
         new = {"price": st.selectbox("Which", PRICE_FIELDS, index=PRICE_FIELDS.index(ref.get("price", "close")),
                                      key=key(path, ":price"), label_visibility="collapsed")}
     else:
-        param_input(f"{path}.const", {"type": "float", "default": 0.0}, label="Value")
+        param_input(f"{path}.const", {"type": "float", "default": 0.0}, label="Value",
+                    help="A fixed number, such as 30 for an RSI level. It can be optimised on the Optimise page.")
         return
-    shift = st.number_input("Bars ago", min_value=0, step=1, value=int(ref.get("shift", 0)), key=key(path, ":shift"),
-                            help="0 is the current bar. History only: it never moves a signal forward.")
-    if shift:
+    shift = st.number_input("Bars ago", min_value=0, step=1, value=int(ref.get("shift", 0) or 0),
+                            key=key(path, ":shift"), help="0 is the current bar. History only: it never moves a "
+                                                          "signal forward. It can be optimised, from 0 up, with the "
+                                                          "condition's Optimise list.")
+    # A shift of 0 that a trial wrote (Apply to the strategy) stays: rendering must not change the spec.
+    if shift or "shift" in ref:
         new["shift"] = int(shift)
     if new != ref:
         set_value(path, new)
 
 
 # ---------------------------------------------------------------------------
-# Rule builder
+# Features: the nested picker and each feature's settings
 # ---------------------------------------------------------------------------
 
-def new_leaf(kind, features):
-    first = next(iter(features), None)
-    if kind == "pattern":
-        return {"pattern": "hammer", "module": "candle", "side": "bullish", "params": {}}
-    if kind == "filter":
-        return {"filter": "weekday", "days": [0, 1, 2, 3, 4]}
-    return {"left": {"feature": first} if first else {"price": "close"}, "op": ">", "right": {"const": 0}}
+def feature_picker(features):
+    """Add a feature: category, then family, then the indicator or pattern, with its outputs shown first.
+
+    Drawn as the dashed "add" card under the features, so the entry it describes reads as
+    something to add, not as a feature already there. The feature it adds opens at once,
+    just above, with every setting showing.
+    """
+    with card("feature-picker", "add"):
+        card_header("feature-picker", "Add a feature",
+                    meta="indicators, patterns, levels and transforms, each computed on every bar")
+        _feature_picker_body(features)
 
 
-@st.cache_data(show_spinner=False)
-def pattern_catalogue():
-    from .blocks import pattern_catalogue as catalogue
-    return catalogue()
-
-
-def _pattern_editor(path, node):
+def _feature_picker_body(features):
+    menu = indicators.menu()
     columns = st.columns(3)
-    module = columns[0].selectbox("Family", ["candle", "chart"], index=["candle", "chart"].index(node.get("module", "candle")),
-                                  format_func={"candle": "Candlestick", "chart": "Chart pattern"}.get,
-                                  key=key(path, ":module"))
-    catalogue = [row for row in pattern_catalogue() if row["module"] == module]
-    names = [row["name"] for row in catalogue]
-    name = columns[1].selectbox("Pattern", names, index=names.index(node["pattern"]) if node["pattern"] in names else 0,
-                                key=key(path, ":pattern"))
-    side = columns[2].selectbox("Side", ["bullish", "bearish", "either"],
-                                index=["bullish", "bearish", "either"].index(node.get("side", "either")),
-                                key=key(path, ":side"))
-    row = next(item for item in catalogue if item["name"] == name)
-    if (module, name, side) != (node.get("module"), node["pattern"], node.get("side")):
-        set_value(path, {"pattern": name, "module": module, "side": side,
-                         "params": {} if name != node["pattern"] else node.get("params", {})})
-        st.rerun()
-    if row["direction"] in ("bullish", "bearish") and side not in (row["direction"], "either"):
-        st.warning(f"{name} is a {row['direction']} pattern; as {side} it will never fire.")
-    with st.expander("Detector settings"):
-        for keyword, default in row["params"].items():
-            if isinstance(default, bool):
-                declaration = {"type": "bool", "default": default}
-            elif isinstance(default, int):
-                declaration = {"type": "int", "default": default}
-            elif isinstance(default, float):
-                declaration = {"type": "float", "default": default}
-            elif isinstance(default, str):
-                declaration = {"type": "str", "default": default}
-            else:
-                continue
-            param_input(f"{path}.params.{keyword}", declaration, label=keyword.replace("_", " "))
+    # Plain keys, not spec-bound: the picker remembers where you were between adds.
+    category = columns[0].selectbox("Category", list(menu), key="pick:category",
+                                    help="Indicators, statistics, price levels, candlestick and chart patterns, "
+                                         "transforms of other lines, and your own Python code.")
+    families = menu[category]
+    family = columns[1].selectbox("Family", list(families), key=f"pick:family:{category}",
+                                  format_func=lambda name: f"{name} ({len(families[name])})",
+                                  help="A group within the category. The number is how many it holds.")
+    ids = families[family]
+    picked = columns[2].selectbox("Indicator" if category in ("Indicator", "Statistical") else "Item", ids,
+                                  format_func=lambda item_id: indicators.entry(item_id)["label"],
+                                  key=f"pick:item:{category}:{family}",
+                                  help="The one to add. Its description, outputs and the prices it reads show "
+                                       "below; its settings can be changed once it is added.")
+    item = indicators.entry(picked)
+    # What it is, in the add card itself: its description, what it reads, its settings with their
+    # defaults (so "over n bars" shows its n before it is added) and its outputs.
+    st.markdown(f"**{item['label']}** · " + (item.get("description") or "")[:400])
+    settings = []
+    for name, declaration in item["params"].items():
+        if declaration["type"] == "code":
+            continue
+        default = declaration.get("default")
+        settings.append(f"{name} {'(library default)' if default is None else default}")
+    reads = [f"{name} (default {item['defaults'].get(name) or 'close'})" for name in item["inputs"]]
+    st.caption("Outputs: " + ", ".join(item["outputs"])
+               + (f"  ·  reads: {', '.join(reads)}" if reads else "")
+               + (f"  ·  settings: {', '.join(settings)}" if settings else "  ·  no settings"))
+    stem = re.sub(r"[^a-z0-9]+", "_", item["function"].split(":")[-1].lower()).strip("_") or "feature"
+    if not stem[0].isalpha():
+        stem = "f_" + stem
+    suggestion, number = stem, 2
+    while suggestion in features:
+        suggestion, number = f"{stem}_{number}", number + 1
+    left, right = st.columns([3, 1], vertical_alignment="bottom")
+    # Keyed on the suggestion too, so it moves on (sma, sma_2 ...) once a name is taken.
+    name = left.text_input("Name it", value=suggestion, key=f"pick:name:{picked}:{suggestion}",
+                           help="How the rules refer to it, such as fast or rsi. Letters, digits and "
+                                "underscores, starting with a letter.")
+    if right.button("Add feature", type="primary", key="pick:add", icon=":material/add:", width="stretch"):
+        problem = feature_name_problem(name, set(features))
+        if problem:
+            st.error(problem)
+        else:
+            def add():
+                features[name] = indicators.new_feature(picked)
+                # It opens with every setting showing, so they are set where it was added.
+                open_panel(f"features.{name}")
+            rerun_after(add)
 
 
-def _comparison_editor(path, node, features):
+def feature_card(name, feature, features):
+    """One feature as a card: its name, type and formula on the title row with an edit and a bin
+    button there, and its settings below while it is open.
+
+    Returns the formula it showed (indicators.describe), so the page can redraw once when an
+    edit inside changed it (the title is drawn before the settings write back).
+    """
+    item = indicators.catalogue().get(feature.get("indicator"))
+    described = indicators.describe(feature)
+    path = f"features.{name}"
+    with card(f"feature-{name}", "feature"):
+        row = card_header(f"feature-{name}", name, meta=item["label"] if item else str(feature.get("indicator")),
+                          code=described, fold=(path, False, key(path, ":open"), "its settings"))
+        opened = is_open(path, False)
+        row.button("", key=key(path, ":delete"), type="tertiary", icon=":material/delete:",
+                   help=f"Delete {name}. Rules and features that read it will say so until they are changed.",
+                   on_click=_delete_feature, args=(features, name))
+        if opened:
+            feature_editor(name, feature, features)
+    return described
+
+
+def _delete_feature(features, name):
+    """The bin on a feature's card (a callback, so the page redraws without it at once)."""
+    features.pop(name, None)
+    prune_variables()            # its settings leave the Optimise page with it
+    save_draft()
+    renew_widgets()
+
+
+def feature_editor(name, feature, features):
+    """One feature's name, inputs and settings, and its outputs (inside its card).
+
+    Its description first, then one grid: the name, what it is applied to, then its settings.
+    """
+    item = indicators.catalogue().get(feature.get("indicator"))
+    if item is not None and item.get("description"):
+        st.caption(item["description"][:300])
+    columns = st.columns(3)
+    typed = columns[0].text_input(
+        "Name", value=name, key=key(f"features.{name}", ":name"),
+        help="How the rules and other features refer to it, such as fast or rsi: letters, digits and underscores, "
+             "starting with a letter. Renaming it renames every use too: the rules, features that read it, the "
+             "selection score, the entry priority and the Optimise page's variables.")
+    if typed.strip() != name:
+        problem = feature_name_problem(typed.strip(), set(features) - {name})
+        if problem:
+            # A refused name stays in the box with the reason under it; nothing changes.
+            st.error(problem)
+        else:
+            def rename():
+                rename_feature(current(), name, typed.strip())
+                # Its card's open state is kept by name: it stays open under the new one.
+                open_panel(f"features.{typed.strip()}")
+            # A structural change: every widget key under the old name must be renewed.
+            rerun_after(rename)
+    if item is None:
+        st.error(f"{name} uses an unknown indicator ({feature.get('indicator')}). Delete it and add it again.")
+    else:
+        if item["id"] == "studio:python":
+            st.warning("Python code runs on your machine. Only use code you trust.")
+        # The inputs follow the name in the same row (and wrap under it), so a one-input feature
+        # shows its name and what it is applied to side by side.
+        for index, input_name in enumerate(item["inputs"], start=1):
+            with columns[index % 3]:
+                input_select(f"features.{name}.inputs.{input_name}", features, name,
+                             "Applied to" if len(item["inputs"]) == 1 else f"Input: {input_name}")
+        params = list(item["params"].items())
+        columns = st.columns(3) if params else []
+        for index, (param, declaration) in enumerate(params):
+            with columns[index % 3]:
+                param_input(f"features.{name}.params.{param}", declaration, label=param.replace("_", " "),
+                            help=indicators.param_help(item["id"], param))
+        st.caption(f"Outputs: {', '.join(f'{name}.{output}' for output in item['outputs'])}")
+        # A single-type average (SMA, EMA ...) can become the Moving average entry at the same
+        # type, which gives the same numbers, so its type can be optimised like any setting.
+        kind = indicators.SAME_AS_MA.get(item["id"])
+        if kind:
+            tries = [kind] + [other for other in ("SMA", "EMA") if other != kind]
+            if st.button("Let the optimiser pick the type", key=key(f"features.{name}", ":any_type"),
+                         help=f"Swaps this {kind} for the Moving average entry set to {kind}, which gives exactly "
+                              "the same numbers, and adds its type to the Optimise page's variables with "
+                              f"{' and '.join(tries)} to try (add others there). The period, the inputs and the "
+                              "rules stay as they are."):
+                def swap():
+                    feature["indicator"] = "talib:MA"
+                    feature.setdefault("params", {})["matype"] = kind
+                    # Written directly, not through set_path: the variable's key holds dots.
+                    found = current().setdefault("optimise", {}).setdefault("variables", {})
+                    found.setdefault(f"features.{name}.params.matype", {"values": tries})
+                rerun_after(swap)
+
+
+# ---------------------------------------------------------------------------
+# Rules: named conditions and a logic line
+# ---------------------------------------------------------------------------
+
+# The kinds a condition can be, in the Kind list of every rule (exits included: see compile_signals).
+# Calendar and higher-timeframe conditions are both {"filter": ...} in the spec.
+CONDITION_KINDS = {"comparison": "Compare two lines", "pattern": "A pattern appears",
+                   "calendar": "Day, month or time of day", "higher": "On a higher timeframe"}
+TIMING_LABELS = {"now": "On this bar", "for_bars": "On each of the last N bars", "within_bars": "On any of the last N bars",
+                 "bars_ago": "N bars ago"}
+
+
+def condition_kind(node):
+    """Which entry of CONDITION_KINDS a condition is."""
+    if "pattern" in node:
+        return "pattern"
+    if node.get("filter") == "higher_timeframe":
+        return "higher"
+    if "filter" in node:
+        return "calendar"
+    return "comparison"
+
+
+def _higher_than(timeframe):
+    return [tf for tf in HIGHER_TIMEFRAMES if TIMEFRAME_MINUTES[tf] > TIMEFRAME_MINUTES.get(timeframe, 0)]
+
+
+def new_condition(kind, features, timeframe="1d"):
+    if kind == "pattern":
+        patterns = [name for name, feature in features.items() if str(feature.get("indicator")).startswith("pattern:")]
+        return {"pattern": patterns[0] if patterns else "", "side": "bullish"}
+    if kind == "calendar":
+        return {"filter": "weekday", "days": [0, 1, 2, 3, 4]}
+    if kind == "higher":
+        higher = _higher_than(timeframe) or ["1M"]
+        return {"filter": "higher_timeframe", "timeframe": higher[0], "left": {"price": "close"}, "op": ">",
+                "right": {"price": "open"}}
+    first = _output_options(features)[:1]
+    left = dict(zip(("feature", "output"), first[0].split(".", 1))) if first else {"price": "close"}
+    if first and len(indicators.outputs(features[left["feature"]]["indicator"])) == 1:
+        left.pop("output", None)
+    return {"left": left, "op": ">", "right": {"const": 0.0}}
+
+
+def new_rule(features):
+    """A rule with one condition comparing two lines, named condition1."""
+    name = next_condition_name(set())
+    return {"conditions": {name: new_condition("comparison", features)}, "logic": name}
+
+
+def _pattern_condition(path, node, features):
+    patterns = [name for name, feature in features.items() if str(feature.get("indicator")).startswith("pattern:")]
+    if not patterns:
+        st.info("Add a candlestick or chart pattern on the Features step first.")
+        return
+    left, right = st.columns(2)
+    name = left.selectbox("Pattern", patterns, index=patterns.index(node.get("pattern")) if node.get("pattern")
+                          in patterns else 0, key=key(path, ":pattern"),
+                          help="One of the pattern features added on the Features tab. It counts on the bar that "
+                               "completes the pattern; the trade fills at the next bar's open.")
+    side = right.selectbox("Side", PATTERN_SIDES, index=PATTERN_SIDES.index(node.get("side", "either")),
+                           key=key(path, ":side"),
+                           help="bullish: only when the pattern points up. bearish: only when it points down. "
+                                "either: whichever way it points.")
+    if (name, side) != (node.get("pattern"), node.get("side")):
+        set_value(path, {"pattern": name, "side": side})
+    item = indicators.entry(features[name]["indicator"])
+    if item.get("direction") in ("bullish", "bearish") and side not in (item["direction"], "either"):
+        st.warning(f"{item['label']} is a {item['direction']} pattern; as {side} it will never fire.")
+
+
+def _comparison_condition(path, node, features):
     columns = st.columns([3, 2, 3])
     with columns[0]:
-        ref_input(f"{path}.left", features, "When")
+        ref_input(f"{path}.left", features, "When",
+                  help="The line being tested: a feature's output or a price.")
     with columns[1]:
         op = st.selectbox("Condition", COMPARISON_OPS, index=COMPARISON_OPS.index(node.get("op", ">")),
-                          format_func=OP_LABELS.get, key=key(path, ":op"))
+                          format_func=OP_LABELS.get, key=key(path, ":op"),
+                          help="Above and below hold on every bar they are true. Crosses fires only on the bar "
+                               "the line moves from one side to the other. Between needs two bounds. Rising and "
+                               "falling compare the line with itself some bars ago.")
         if op != node.get("op"):
-            # Keep the leaf's own keys (a higher-timeframe filter keeps "filter" and
+            # Keep the condition's own keys (a higher-timeframe filter keeps "filter" and
             # "timeframe"); swap the operands for the new operator's.
-            leaf = {k: v for k, v in node.items() if k not in ("right", "lower", "upper", "bars")}
-            leaf["op"] = op
+            changed = {name: value for name, value in node.items() if name not in ("right", "lower", "upper", "bars")}
+            changed["op"] = op
             if op == "between":
-                leaf.update(lower={"const": 0}, upper={"const": 1})
+                changed.update(lower={"const": 0.0}, upper={"const": 1.0})
             elif op in ("rising", "falling"):
-                leaf["bars"] = 1
+                changed["bars"] = 1
             else:
-                leaf["right"] = node.get("right", {"const": 0})
-            set_value(path, leaf)
+                changed["right"] = node.get("right", {"const": 0.0})
+            set_value(path, changed)
+            prune_variables()
+            save_draft()
+            renew_widgets()
             st.rerun()
     with columns[2]:
         if op == "between":
-            ref_input(f"{path}.lower", features, "Lower bound")
-            ref_input(f"{path}.upper", features, "Upper bound")
+            ref_input(f"{path}.lower", features, "Lower bound", help="The line must be at or above this.")
+            ref_input(f"{path}.upper", features, "Upper bound", help="The line must be at or below this.")
         elif op in ("rising", "falling"):
-            param_input(f"{path}.bars", {"type": "int", "default": 1, "min": 1}, label="Bars")
+            param_input(f"{path}.bars", {"type": "int", "default": 1}, label="Bars",
+                        help="Compared with its value this many bars ago: rising means higher than then.")
         else:
-            ref_input(f"{path}.right", features, "Than")
+            ref_input(f"{path}.right", features, "Than",
+                      help="What the line is compared with: another feature, a price, or a fixed number.")
 
 
-def _filter_editor(path, node, features, timeframe):
-    kinds = ["weekday", "month", "session", "higher_timeframe"]
+def _calendar_condition(path, node, timeframe):
+    """A weekday, month or time-of-day condition: the same on every bar of its day, so no timing."""
+    kinds = ["weekday", "month", "session"]
     if TIMEFRAME_MINUTES.get(timeframe, 0) >= 1440:
         kinds.remove("session")          # time-of-day means nothing on daily bars
-    labels = {"weekday": "Weekdays", "month": "Months", "session": "Trading session (UTC)",
-              "higher_timeframe": "Higher timeframe condition"}
-    kind = st.selectbox("Filter", kinds, index=kinds.index(node["filter"]) if node["filter"] in kinds else 0,
-                        format_func=labels.get, key=key(path, ":filter"))
+    labels = {"weekday": "On chosen weekdays", "month": "In chosen months", "session": "In a time-of-day session (UTC)"}
+    kind = st.selectbox("Which", kinds, index=kinds.index(node["filter"]) if node["filter"] in kinds else 0,
+                        format_func=labels.get, key=key(path, ":filter"),
+                        help="True on the weekdays or in the months you pick, or inside a time-of-day session "
+                             "(intraday bars only). In an entry rule joined with and, it allows entries only then; "
+                             "in an exit rule joined with or, it closes a position then (a Friday exit).")
     if kind != node["filter"]:
         defaults = {"weekday": {"days": [0, 1, 2, 3, 4]}, "month": {"months": list(range(1, 13))},
-                    "session": {"from": "07:00", "to": "16:00"},
-                    "higher_timeframe": {"timeframe": "1w", "left": {"price": "close"}, "op": ">",
-                                         "right": {"price": "open"}}}
+                    "session": {"from": "07:00", "to": "16:00"}}
         set_value(path, {"filter": kind, **defaults[kind]})
+        renew_widgets()
         st.rerun()
     if kind == "weekday":
-        days = st.multiselect("Trade on", list(range(7)), default=node.get("days", []), format_func=DAY_NAMES.__getitem__,
-                              key=key(path, ":days"))
+        days = st.multiselect("Weekdays", list(range(7)), default=node.get("days", []),
+                              format_func=DAY_NAMES.__getitem__, key=key(path, ":days"),
+                              help="The weekday of the bar the condition is read on (UTC). The order fills at the "
+                                   "next bar's open, which may fall on the next day.")
         if days != node.get("days"):
             set_value(f"{path}.days", days)
     elif kind == "month":
-        months = st.multiselect("Trade in", list(range(1, 13)), default=node.get("months", []),
-                                format_func=lambda month: MONTH_NAMES[month - 1], key=key(path, ":months"))
+        months = st.multiselect("Months", list(range(1, 13)), default=node.get("months", []),
+                                format_func=lambda month: MONTH_NAMES[month - 1], key=key(path, ":months"),
+                                help="The month of the bar the condition is read on.")
         if months != node.get("months"):
             set_value(f"{path}.months", months)
-    elif kind == "session":
+    else:
         left, right = st.columns(2)
-        start = left.text_input("From (HH:MM)", value=node.get("from", "07:00"), key=key(path, ":from"))
-        end = right.text_input("To (HH:MM)", value=node.get("to", "16:00"), key=key(path, ":to"))
+        start = left.text_input("From (HH:MM)", value=node.get("from", "07:00"), key=key(path, ":from"),
+                                help="The session's start, in UTC, 24-hour clock: a bar that starts at or after it "
+                                     "counts.")
+        end = right.text_input("To (HH:MM)", value=node.get("to", "16:00"), key=key(path, ":to"),
+                               help="The session's end, in UTC, 24-hour clock: a bar that starts at it no longer "
+                                    "counts. It may wrap past midnight (22:00 to 02:00).")
         if (start, end) != (node.get("from"), node.get("to")):
             set_value(f"{path}.from", start)
             set_value(f"{path}.to", end)
-    else:
-        higher = [tf for tf in ["1h", "4h", "1d", "1w", "1M"] if TIMEFRAME_MINUTES[tf] > TIMEFRAME_MINUTES.get(timeframe, 0)]
-        chosen = st.selectbox("Timeframe", higher, index=higher.index(node["timeframe"]) if node.get("timeframe") in higher else 0,
-                              key=key(path, ":tf"), help="Computed on completed higher bars only, so it never peeks ahead.")
-        if chosen != node.get("timeframe"):
-            set_value(f"{path}.timeframe", chosen)
-        _comparison_editor(path, node, features)
 
 
-def rule_editor(path, features, timeframe, entry, depth=0):
-    """A nested rule builder: groups joined by all / any / not, up to three levels deep.
-
-    One recursive function. Widget keys come from the node's path in the tree, so
-    they stay unique and stable."""
-    node = _get(path, None)
-    with st.container(border=True):
-        if is_choice(node):
-            _choice_editor(path, node, features, timeframe, entry, depth)
-            return
-        if node is not None and ("all" in node or "any" in node or "not" in node):
-            joiner = "all" if "all" in node else "any" if "any" in node else "not"
-            labels = {"all": "All of these are true", "any": "Any of these is true", "not": "This is NOT true"}
-            top_left, top_right = st.columns([4, 1])
-            chosen = top_left.selectbox("Group", ["all", "any", "not"], index=["all", "any", "not"].index(joiner),
-                                        format_func=labels.get, key=key(path, ":group"), label_visibility="collapsed")
-            children = node["not"] if joiner == "not" else node[joiner]
-            children = [children] if joiner == "not" else children
-            if chosen != joiner:
-                set_value(path, {"not": children[0]} if chosen == "not" else {chosen: children})
-                st.rerun()
-            if depth and top_right.button("Remove group", key=key(path, ":remove")):
-                _remove(path)
-            for index in range(len(children)):
-                child = f"{path}.not" if joiner == "not" else f"{path}.{joiner}.{index}"
-                rule_editor(child, features, timeframe, entry, depth + 1)
-            if joiner != "not":
-                buttons = st.columns(4)
-                kinds = [("comparison", "Add condition"), ("pattern", "Add pattern")]
-                if entry:
-                    kinds.append(("filter", "Add filter"))
-                for column, (kind, label) in zip(buttons, kinds):
-                    if column.button(label, key=key(path, f":add:{kind}")):
-                        node[joiner].append(new_leaf(kind, features))
-                        save_draft()
-                        st.rerun()
-                if depth < 2 and buttons[3].button("Add group", key=key(path, ":add:group")):
-                    node[joiner].append({"any": [new_leaf("comparison", features)]})
-                    save_draft()
-                    st.rerun()
-            if depth < 2 and st.button("Turn into alternatives", key=key(path, ":alternatives"),
-                                       help="Keep this rule as one option and add others; the optimiser "
-                                            "(BUTChC or Optuna) can then choose between them."):
-                set_value(path, {"choose": "a", "options": {"a": copy.deepcopy(node)}})
-                st.rerun()
-            return
-        if node is None:
-            return
-        header, remove = st.columns([4, 1])
-        kind = "pattern" if "pattern" in node else "filter" if "filter" in node else "comparison"
-        header.caption({"pattern": "Pattern", "filter": "Filter", "comparison": "Condition"}[kind])
-        if depth and remove.button("Remove", key=key(path, ":remove")):
-            _remove(path)
-        if kind == "pattern":
-            _pattern_editor(path, node)
-        elif kind == "filter":
-            _filter_editor(path, node, features, timeframe)
-        else:
-            _comparison_editor(path, node, features)
+def _higher_condition(path, node, features, timeframe):
+    higher = _higher_than(timeframe)
+    chosen = st.selectbox("Timeframe", higher, index=higher.index(node["timeframe"]) if node.get("timeframe")
+                          in higher else 0, key=key(path, ":tf"),
+                          help="The comparison below is computed on these bars, completed ones only, so it never "
+                               "peeks ahead: on a Wednesday a weekly condition reads last week.")
+    if chosen != node.get("timeframe"):
+        set_value(f"{path}.timeframe", chosen)
+    _comparison_condition(path, node, features)
 
 
-def _choice_editor(path, node, features, timeframe, entry, depth):
-    """Structural alternatives: one rule tree per option, and which one is used now."""
-    labels = list(node["options"])
-    st.caption("Alternatives: the strategy uses one of these. Turn on Optimise to let BUTChC or Optuna choose.")
-    param_input(f"{path}.choose", {"type": "choice", "options": labels, "default": labels[0]}, label="Use")
-    for label in labels:
-        with st.expander(f"Alternative {label}", expanded=label == value_of(node["choose"])):
-            rule_editor(f"{path}.options.{label}", features, timeframe, entry, depth + 1)
-            if len(labels) > 1 and st.button("Remove this alternative", key=key(path, f":drop:{label}")):
-                del node["options"][label]
-                remaining = list(node["options"])
-                selector = node["choose"]
-                if is_opt(selector):
-                    selector["opt"]["values"] = [value for value in selector["opt"]["values"] if value in remaining]
-                    if selector["value"] not in remaining:
-                        selector["value"] = remaining[0]
-                elif selector not in remaining:
-                    node["choose"] = remaining[0]
-                save_draft()
-                st.rerun()
-    left, middle, right = st.columns([2, 1, 2])
-    new_label = left.text_input("New alternative", value=f"option_{len(labels) + 1}", key=key(path, ":new_label"),
-                                label_visibility="collapsed")
-    if middle.button("Add", key=key(path, ":add_alternative")):
-        if not new_label.isidentifier() or new_label in labels:
-            st.error("Name the alternative with letters, digits and underscores, different from the others.")
-        else:
-            node["options"][new_label] = copy.deepcopy(node["options"][value_of(node["choose"])])
-            if is_opt(node["choose"]):
-                node["choose"]["opt"]["values"].append(new_label)
-            save_draft()
-            st.rerun()
-    if right.button("Keep only the one in use", key=key(path, ":collapse")):
-        set_value(path, copy.deepcopy(node["options"][value_of(node["choose"])]))
+def _timing_input(path, node, higher=False):
+    """When the condition must have held: now, on each of the last N bars, on any of them, or N bars ago.
+
+    Bound to the condition's own TIMING_KEYS (one at most), so the bars can be optimised
+    like any other number.
+    """
+    current = next((name for name in TIMING_KEYS if node.get(name)), "now")
+    options = ["now"] + TIMING_KEYS
+    columns = st.columns([3, 1])
+    unit = "higher-timeframe bars" if higher else "bars"
+    chosen = columns[0].selectbox(
+        "Must hold", options, index=options.index(current), format_func=TIMING_LABELS.get, key=key(path, ":timing"),
+        help=f"On this bar: as it is now. On each of the last N {unit}: true on this bar and the N - 1 before it, "
+             f"such as RSI above 50 for 3 bars in a row. On any of the last N {unit}: true at least once in that "
+             f"window, this bar included, such as a cross within the last 5 bars. N {unit} ago: the whole condition "
+             "as it was then, such as a cross 1 bar ago. Each reads past bars only. To let the optimiser search N, "
+             "pick one of the last three and add N in the Optimise list below: on each of, or any of, the last 1 "
+             "bar is the same as on this bar, so a search from 1 includes it.")
+    if chosen != current:
+        changed = {name: value for name, value in node.items() if name not in TIMING_KEYS}
+        if chosen != "now":
+            changed[chosen] = int(node.get(current) or (1 if chosen == "bars_ago" else 3))
+        set_value(path, changed)
+        prune_variables()
+        save_draft()
+        renew_widgets()
         st.rerun()
+    if chosen != "now":
+        bars = columns[1].number_input("N", min_value=1, step=1, value=int(node[chosen]), key=key(f"{path}.{chosen}"),
+                                       help="How many bars. It can be optimised: add it in the Optimise list below.")
+        if int(bars) != node[chosen]:
+            set_value(f"{path}.{chosen}", int(bars))
 
 
-def _remove(path):
-    parent, _, last = path.rpartition(".")
-    container = get_path(current(), parent)
-    if isinstance(container, list):
-        del container[int(last)]
+def condition_editor(path, name, node, features, timeframe, on_remove, on_rename):
+    """One named condition as a card inside its rule: its name and what it says on the title row,
+    with an edit and a bin button there, and its kind, settings and timing while it is open.
+
+    The title is the condition in words, so a closed card still says what it does. A new or
+    renamed one opens (open_panel). on_rename(new) renames it (and reruns), or returns why it
+    cannot.
+    """
+    kind = condition_kind(node)
+    with sub_card(f"condition-{path}"):
+        row = card_header(f"condition-{path}", name, code=condition_text(node),
+                          fold=(path, False, key(path, ":open"), "its settings"))
+        opened = is_open(path, False)
+        row.button("", key=key(path, ":remove"), type="tertiary", icon=":material/delete:", on_click=on_remove,
+                   help="Delete this condition: its name leaves the logic line, and its values leave the Optimise "
+                        "page.")
+        if not opened:
+            _optimised_note(path)
+            return
+        head = st.columns([2, 4], vertical_alignment="bottom")
+        typed = head[0].text_input("Name", value=name, key=key(path, ":name"),
+                                   help="What the logic line calls this condition, such as trend or rsi_low: "
+                                        "letters, digits and underscores, starting with a letter. Renaming it "
+                                        "renames it in the logic line and in the Optimise page's variables too.")
+        kinds = list(CONDITION_KINDS)
+        chosen = head[1].selectbox("Kind", kinds, index=kinds.index(kind), format_func=CONDITION_KINDS.get,
+                                   key=key(path, ":kind"),
+                                   help="Compare two lines (fast crosses above slow), a pattern appearing, the day, "
+                                        "month or time of day, or a comparison on a higher timeframe (the weekly "
+                                        "close above its open). Every rule takes every kind.")
+        if typed.strip() != name:
+            # A refused name stays in the box with the reason under it, as a broken logic line does.
+            st.error(on_rename(typed.strip()))
+        if chosen != kind:
+            set_value(path, new_condition(chosen, features, timeframe))
+            prune_variables()
+            save_draft()
+            renew_widgets()
+            st.rerun()
+        if kind == "pattern":
+            _pattern_condition(path, node, features)
+        elif kind == "calendar":
+            _calendar_condition(path, node, timeframe)
+        elif kind == "higher":
+            _higher_condition(path, node, features, timeframe)
+        else:
+            _comparison_condition(path, node, features)
+        if kind != "calendar":
+            _timing_input(path, _get(path, node), higher=kind == "higher")
+        _optimised_note(path)
+
+
+def _optimised_note(path):
+    """Which of a condition's values the optimiser searches, and over what: read-only.
+
+    The Optimise page is the one place a value is added to the search or taken out of it (the
+    owner's call, 20 November 2026: a picker here as well made it unclear where the choice is
+    made). This only says what is searched, so it is in sight while the rule is built.
+    """
+    spec = current()
+    rows = {row["path"]: row for row in tunable_inputs(spec) if row["path"].startswith(path + ".")}
+    found = (spec.get("optimise") or {}).get("variables") or {}
+    parts = []
+    for item, row in rows.items():
+        variable = found.get(item)
+        if not variable:
+            continue
+        labels = row.get("labels") or {}
+        if "values" in variable:
+            tries = ", ".join(str(labels.get(value, value)) for value in variable["values"])
+        else:
+            tries = f"{variable['start']:g} to {variable['stop']:g}" + (f" by {variable['step']:g}"
+                                                                         if variable.get("step") else "")
+        parts.append(f"{row['label'].rsplit(' › ', 1)[-1]} {tries}")
+    if parts:
+        st.caption(":material/tune: Optimised: " + "; ".join(parts) + ". Set on the Optimise page.")
+
+
+def _rule_body(path, rule, features, timeframe):
+    """The conditions and the logic line of one rule (one version of it)."""
+    conditions = rule.setdefault("conditions", {})
+    for letter in list(conditions):
+        def remove(letter=letter):
+            conditions.pop(letter, None)
+            rule["logic"] = remove_letter(rule.get("logic", ""), letter)
+            prune_variables()
+            save_draft()
+            renew_widgets()
+
+        def rename(new, letter=letter):
+            problem = condition_name_problem(new, set(conditions) - {letter})
+            if problem:
+                return problem
+            open_panel(f"{path}.conditions.{new}")
+            # A structural change: every widget key under the old name must be renewed.
+            rerun_after(lambda: rename_condition(current(), path, letter, new))
+        described = condition_text(conditions[letter])
+        condition_editor(f"{path}.conditions.{letter}", letter, conditions[letter], features, timeframe, remove,
+                         rename)
+        # The card's title is drawn before the settings inside write their new values, so after
+        # an edit it would show the old words until the next click: draw the page again, once
+        # (the second pass finds them equal), as the Features tab does.
+        if letter in conditions and condition_text(conditions[letter]) != described:
+            st.rerun()
+    logic = st.text_input("Logic", value=rule.get("logic", ""), key=key(path, ":logic"),
+                          help="Combine the conditions by name with and, or, xor, nand, nor, xnor and not, using "
+                               "brackets: (condition1 and (condition2 or condition3)) and not condition4, or trend "
+                               "and not overbought. Names match exactly, capitals included. Brackets are needed "
+                               "wherever two different words meet.")
+    if logic != rule.get("logic"):
+        set_value(f"{path}.logic", logic)
+    try:
+        tree = parse_logic(logic)
+    except ValueError as error:
+        st.error(f"Logic: {error}")
     else:
-        # The only child of a "not": the parent group goes with it.
-        grand, _, slot = parent.rpartition(".")
-        holder = get_path(current(), grand)
-        if isinstance(holder, list):
-            del holder[int(slot)]
-    save_draft()
-    st.rerun()
+        if isinstance(tree, dict) and "op" in tree:
+            st.caption(f"Fires when {LOGIC_WORDS[tree['op']]} of its parts.")
+    buttons = st.container(horizontal=True, vertical_alignment="center", gap="small")
+    clicked = buttons.button("Add condition", key=key(path, ":add"), icon=":material/add:",
+                             help="Adds a condition comparing two lines, named condition1, condition2 and so on, and "
+                                  "joins it to the logic line with the word beside this button (and, or). Pick its "
+                                  "kind in its Kind list: a comparison, a pattern, the day or time, or a higher "
+                                  "timeframe. Edit the logic line for anything else.")
+    joiner = buttons.selectbox("Join new with", ["and", "or"], key=key(path, ":join"), label_visibility="collapsed",
+                               format_func=lambda op: f"joined with {op}", width=170)
+    if clicked:
+        def add():
+            name = next_condition_name(set(conditions))
+            conditions[name] = new_condition("comparison", features, timeframe)
+            rule["logic"] = append_letter(rule.get("logic", ""), name, joiner)
+            open_panel(f"{path}.conditions.{name}")
+        rerun_after(add)
+
+
+def rule_editor(path, features, timeframe):
+    """A rule slot's body: its conditions and logic line, or the version in use when the
+    optimiser can choose between versions."""
+    node = _get(path, None)
+    if node is None:
+        return
+    if is_choice(node):
+        labels = list(node["options"])
+        top = st.columns([2, 2, 2], vertical_alignment="bottom")
+        chosen = top[0].selectbox("Version in use", labels, index=labels.index(node["choose"]),
+                                  key=key(path, ":choose"),
+                                  help="The optimiser can choose between versions: add rules." + path.split(".")[-1]
+                                       + ".choose to the variables on the Optimise page.")
+        if chosen != node["choose"]:
+            set_value(f"{path}.choose", chosen)
+            renew_widgets()
+            st.rerun()
+        if top[1].button("Add a version (a copy of this one)", key=key(path, ":copy")):
+            def add_version():
+                label = next_letter(set(labels)).lower()
+                node["options"][label] = copy.deepcopy(node["options"][chosen])
+                node["choose"] = label
+            rerun_after(add_version)
+        if len(labels) > 1 and top[2].button("Delete this version", key=key(path, ":drop")):
+            def drop_version():
+                del node["options"][chosen]
+                node["choose"] = next(iter(node["options"]))
+                prune_variables()
+            rerun_after(drop_version)
+        if len(labels) == 1 and top[2].button("Back to a single rule", key=key(path, ":single")):
+            def single():
+                set_path(current(), path, node["options"][chosen])
+                prune_variables()
+            rerun_after(single)
+        _rule_body(f"{path}.options.{chosen}", node["options"][chosen], features, timeframe)
+        return
+    _rule_body(path, node, features, timeframe)
+
+
+def rule_title(node):
+    """What a rule's title row says after its name: its logic line, or the version in use."""
+    if node is None:
+        return ""
+    if is_choice(node):
+        return f"version {node['choose']}: {node['options'][node['choose']].get('logic') or '?'}"
+    return node.get("logic") or "(no logic line)"
+
+
+def rule_card(slot, label, features, timeframe, help_text):
+    """One rule slot as a card in its tone (entries green, exits red): its name and logic line on
+    the title row, with an edit, a versions and a bin button there, and its conditions below.
+
+    A slot with no rule is one line, with a button to add one. Returns the title it showed, so
+    the page can redraw once when the logic line inside changed it.
+    """
+    rules = current().setdefault("rules", {})
+    node = rules.get(slot)
+    path = f"rules.{slot}"
+    tone = "entry" if slot.endswith("entry") else "exit"
+    with card(f"rule-{slot}", tone):
+        if node is None:
+            row = card_header(f"rule-{slot}", label, off="not used", help=help_text)
+
+            def start():
+                rules[slot] = new_rule(features)
+                open_panel(f"{path}.conditions.{next(iter(rules[slot]['conditions']))}")
+                save_draft()
+                renew_widgets()
+            row.button(f"Add a {label.lower()} rule", key=key(path, ":add_rule"), icon=":material/add:",
+                       type="tertiary", on_click=start,
+                       help="Starts the rule with one condition, condition1, comparing two lines. Add more conditions "
+                            "and join them in its logic line.")
+            return ""
+        title = rule_title(node)
+        row = card_header(f"rule-{slot}", label, code=title, help=help_text,
+                          fold=(path, True, key(path, ":open"), "its conditions"))
+        opened = is_open(path, True)
+        if not is_choice(node):
+            def versions():
+                set_path(current(), path, {"choose": "a", "options": {"a": copy.deepcopy(node)}})
+                save_draft()
+                renew_widgets()
+            row.button("", key=key(path, ":versions"), type="tertiary", icon=":material/call_split:",
+                       on_click=versions,
+                       help="Make versions of this rule: keep it as version a and add others, so the optimiser "
+                            "(BUTChC or Optuna) can choose between them.")
+
+        def clear():
+            rules[slot] = None
+            prune_variables()
+            save_draft()
+            renew_widgets()
+        row.button("", key=key(path, ":delete_rule"), type="tertiary", icon=":material/delete:", on_click=clear,
+                   help="Delete the whole rule: its conditions, its logic line and any versions of it, and take "
+                        "their values off the Optimise page.")
+        if opened:
+            rule_editor(path, features, timeframe)
+    return title
 
 
 # ---------------------------------------------------------------------------
@@ -553,16 +1250,17 @@ def data_mtimes(spec, data_dir):
 
 
 @st.cache_data(max_entries=16, show_spinner=False)
-def _cached_frames(data_json, instruments_json, fx_json, data_dir, mtimes):
+def _cached_frames(data_json, instruments_json, fx_json, setup_json, data_dir, mtimes):
     spec = {"data": json.loads(data_json), "instruments": json.loads(instruments_json),
-            "account": {"fx": json.loads(fx_json)}}
+            "account": {"fx": json.loads(fx_json)}, "setup": json.loads(setup_json)}
     return data_module.load_for_spec(spec, Path(data_dir))
 
 
 def load_frames_for(spec, data_dir):
     """The run's data, cached on the data section, instruments and the parquet files' modification times."""
     return _cached_frames(json.dumps(spec["data"], sort_keys=True), json.dumps(spec.get("instruments") or {}, sort_keys=True),
-                          json.dumps((spec.get("account") or {}).get("fx"), sort_keys=True), str(data_dir),
+                          json.dumps((spec.get("account") or {}).get("fx"), sort_keys=True),
+                          json.dumps(spec.get("setup") or {}, sort_keys=True), str(data_dir),
                           data_mtimes(spec, data_dir))
 
 

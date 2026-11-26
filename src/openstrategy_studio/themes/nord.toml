@@ -1,0 +1,45 @@
+# Nord: the arctic Nord palette, soft corners. Its charts use the nord chart theme,
+# whose paper colour is this page's background. See daylight.toml for what each key does.
+
+[theme]
+base = "dark"
+primaryColor = "#88C0D0"
+backgroundColor = "#2E3440"
+secondaryBackgroundColor = "#3B4252"
+textColor = "#ECEFF4"
+borderColor = "#434C5E"
+linkColor = "#88C0D0"
+font = "'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif"
+headingFont = "'Segoe UI Variable Display', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif"
+codeFont = "'Cascadia Code', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace"
+baseFontSize = 15
+baseRadius = "0.8rem"
+buttonRadius = "0.8rem"
+paddingTop = "1.5rem"
+headingFontSizes = ["2.4rem", "1.75rem", "1.3rem"]
+headingFontWeights = [700, 600, 600]
+metricValueFontSize = "1.8rem"
+dataframeHeaderBackgroundColor = "#353C4A"
+chartCategoricalColors = ["#88C0D0", "#BF616A", "#A3BE8C", "#EBCB8B", "#B48EAD", "#5E81AC", "#D08770", "#8FBCBB"]
+
+[theme.sidebar]
+backgroundColor = "#272C36"
+secondaryBackgroundColor = "#2E3440"
+textColor = "#D8DEE9"
+borderColor = "#3B4252"
+
+[studio]
+label = "Nord"
+description = "The arctic Nord palette; charts in the nord theme."
+accent = "#B48EAD"
+gradient = "linear-gradient(120deg, #88C0D0 0%, #81A1C1 50%, #B48EAD 100%)"
+title_fill = "linear-gradient(120deg, #8FBCBB 0%, #88C0D0 45%, #B48EAD 100%)"
+surface = "#343A47"
+muted = "#A3ADBF"
+on_primary = "#2E3440"
+shadow = "0 1px 2px rgba(0, 0, 0, 0.25), 0 6px 18px rgba(0, 0, 0, 0.18)"
+shadow_hover = "0 8px 26px rgba(0, 0, 0, 0.28)"
+glow = "radial-gradient(900px 500px at 0% -10%, rgba(136, 192, 208, 0.10), transparent 60%)"
+positive = "#A3BE8C"
+negative = "#BF616A"
+chart_theme = "nord"

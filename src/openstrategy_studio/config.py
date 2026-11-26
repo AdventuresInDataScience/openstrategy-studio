@@ -20,10 +20,12 @@ VECTORBTX_KEYS = ["rounding", "financing_markup", "carry_markup", "fx_markup", "
 
 DEFAULTS = {
     "data_dir": "",                 # blank: platformdirs.user_data_dir("openstrategy-studio")
-    "default_theme": "plotly_white",
+    "page_theme": "midnight",       # a file in themes/ or the user's themes folder (style.py); applies at start
+    "default_theme": "page",        # the charts' theme; "page" follows the page theme (analysis.PAGE_THEME)
     "workers": max(1, (os.cpu_count() or 2) - 1),
     "offline": False,
-    "spike_multiple": 10.0,         # import check: bars this many median ranges wide are flagged
+    "warm_up": True,                # compile numba's code in the background at start (engine.warm_up)
+    "spike_multiple": 10.0,         # import check: a move or range this many times its recent typical one is flagged
     "fred_api_key": "",             # prefer the FRED_API_KEY environment variable or a .env file
     "vectorbtx": {key: None for key in VECTORBTX_KEYS},
 }
@@ -113,7 +115,12 @@ def apply_environment(settings):
     _load_dotenv(config_dir() / ".env")
     _load_dotenv(folder / ".env")
     if settings.get("fred_api_key"):
-        os.environ.setdefault("FRED_API_KEY", settings["fred_api_key"])
+        # A key typed on the Settings page wins over the environment and .env files: it is
+        # the latest thing the user asked for. setdefault would keep the first key this
+        # process saw, so a corrected key would be ignored until the next start (and
+        # workers, which inherit this environment, would get the old one too).
+        # vectorbtX reads FRED_API_KEY at each download, so the new key applies at once.
+        os.environ["FRED_API_KEY"] = settings["fred_api_key"]
     # Keep the numba cache in a folder we know is writable (it matters for a
     # bundled app, where the package folder may be read-only).
     os.environ.setdefault("NUMBA_CACHE_DIR", str(folder / "numba_cache"))

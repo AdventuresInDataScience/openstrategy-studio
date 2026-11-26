@@ -73,6 +73,21 @@ def test_sslkeylogfile_is_dropped_on_windows(monkeypatch, tmp_path):
     subprocess.run([sys.executable, "-c", "import ssl; ssl.create_default_context()"], check=True)
 
 
+def test_a_corrected_fred_key_replaces_the_old_one(monkeypatch, tmp_path):
+    """Saving a new key on the Settings page re-applies settings in the same process; the
+    new key must replace the old one there and then, and beat an environment variable."""
+    from openstrategy_studio import config
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    monkeypatch.setenv("FRED_API_KEY", "from-the-environment")
+    settings = config.load_settings()
+    config.apply_environment(settings)
+    assert os.environ["FRED_API_KEY"] == "from-the-environment"     # nothing typed: the variable stays
+    for typed in ("mistyped", "corrected"):
+        config.apply_environment(dict(settings, fred_api_key=typed))
+        assert os.environ["FRED_API_KEY"] == typed
+
+
 @pytest.mark.skipif(shutil.which("bash") is None or os.name == "nt", reason="needs bash")
 def test_installer_script_parses():
     subprocess.run(["bash", "-n", str(ROOT / "packaging" / "installer" / "install.sh")], check=True)

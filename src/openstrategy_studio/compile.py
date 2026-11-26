@@ -11,25 +11,23 @@ which only the engine reads.
 """
 
 import hashlib
-import textwrap
 
 import numpy as np
 import pandas as pd
 
-from . import engine
-from .blocks import BLOCKS
+from . import engine, indicators
 from .data import resample_frames
-from .spec import (PRICE_FIELDS, RESAMPLE_RULE, RULE_SLOTS, apply_params, canonical_json, cash_model,
-                   feature_order, strategy_kind)
+from .expressions import parse_logic
+from .spec import (LINE_UNITS, PRICE_FIELDS, RESAMPLE_RULE, RULE_SLOTS, TIMING_KEYS, apply_params, canonical_json,
+                   cash_model, feature_order, strategy_kind)
 
 # ---------------------------------------------------------------------------
 # Feature cache
 # ---------------------------------------------------------------------------
 # Optimisation reruns the compiler thousands of times, so feature results are
-# memoised per process, keyed by (block, canonical JSON of its resolved params,
-# data fingerprint). Pattern features include every detector keyword in the key.
-# Whole backtests are NOT memoised: vectorbt is fast enough and stale portfolio
-# objects are memory-heavy.
+# memoised per process, keyed by (indicator, canonical JSON of its parameters and
+# inputs, data fingerprint). Whole backtests are NOT memoised: vectorbt is fast
+# enough and stale portfolio objects are memory-heavy.
 # ⚠️ Cached frames are shared: never modify a feature frame in place.
 FEATURE_CACHE = {}
 CACHE_LIMIT = 256
@@ -52,16 +50,14 @@ def data_fingerprint(data):
     return digest.hexdigest()
 
 
-def _merged_params(feature):
-    """Every declared parameter of the feature's block, defaults filled in."""
-    params = {}
-    for key, declaration in BLOCKS[feature["block"]]["params"].items():
-        params[key] = feature.get(key, declaration["default"])
-    return params
-
-
 def _output_name(features, ref):
-    return ref.get("output") or BLOCKS[features[ref["feature"]]["block"]]["outputs"][0]
+    """The output a reference reads: its own, else the feature's first."""
+    return ref.get("output") or indicators.outputs(features[ref["feature"]]["indicator"])[0]
+
+
+def _input_ref(feature, name):
+    item = indicators.entry(feature["indicator"])
+    return (feature.get("inputs") or {}).get(name, item["defaults"].get(name) or "close")
 
 
 def compile_features(features, data, fingerprint=None):
@@ -71,36 +67,27 @@ def compile_features(features, data, fingerprint=None):
     keys = {}
     for name in feature_order(features):
         feature = features[name]
-        block = BLOCKS[feature["block"]]
-        params = _merged_params(feature)
-        key_params = dict(params)
-        source = None
-        if "source" in block["params"]:
-            if isinstance(params["source"], dict):
-                # A feature of a feature (an RSI of a moving average, say). Key on
-                # the upstream's own cache key so a change upstream misses here too.
-                upstream = params["source"]
-                output = _output_name(features, upstream)
-                source = computed[upstream["feature"]][output]
-                key_params["source"] = f"{keys[upstream['feature']]}/{output}"
+        item = indicators.entry(feature["indicator"])
+        frames = []
+        input_keys = []
+        for input_name in item["inputs"]:
+            ref = _input_ref(feature, input_name)
+            if isinstance(ref, dict):
+                # A feature of a feature (an RSI of a moving average, say). Key on the
+                # upstream's own cache key so a change upstream misses here too.
+                output = _output_name(features, ref)
+                frames.append(computed[ref["feature"]][output])
+                input_keys.append(f"{keys[ref['feature']]}/{output}")
             else:
-                source = data[params["source"]]
-        key = (feature["block"], canonical_json(key_params), fingerprint)
+                frames.append(data[ref])
+                input_keys.append(ref)
+        key = (feature["indicator"], canonical_json({"params": indicators.call_params(feature), "inputs": input_keys}),
+               fingerprint)
         if key not in FEATURE_CACHE:
-            _cache_put(key, block["compile"](params, data, source))
+            _cache_put(key, indicators.compute(feature, frames, data))
         computed[name] = FEATURE_CACHE[key]
         keys[name] = hashlib.blake2b(repr(key).encode(), digest_size=8).hexdigest()
     return computed
-
-
-def _pattern_signal(leaf, data, fingerprint):
-    """A pattern rule leaf's detector output, through the same cache as features."""
-    params = {"module": leaf.get("module", "candle"), "name": leaf["pattern"],
-              "params": dict(leaf.get("params") or {})}
-    key = ("pattern", canonical_json(params), fingerprint)
-    if key not in FEATURE_CACHE:
-        _cache_put(key, BLOCKS["pattern"]["compile"](params, data, None))
-    return FEATURE_CACHE[key]["signal"]
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +115,7 @@ def resolve_ref(ref, data, features, spec_features):
         value = data[ref["price"]]
     else:
         value = float(ref["const"])
-    shift = int(ref.get("shift", 0))
+    shift = int(ref.get("shift", 0) or 0)
     if shift and isinstance(value, pd.DataFrame):
         value = value.shift(shift)          # the value `shift` bars ago: history only
     return value
@@ -143,29 +130,37 @@ def _session_mask(index, start, end):
     return (times >= start) | (times < end)      # a session that wraps past midnight
 
 
-def evaluate_rule(node, data, features, spec_features, fingerprint):
-    """A boolean DataFrame (shaped like close) for one rule tree."""
+def held(mask, node):
+    """A condition's timing (spec.TIMING_KEYS) applied to its boolean frame. History only.
+
+    for_bars N     true on this bar and each of the N - 1 before it ("RSI above 50 for 3 bars")
+    within_bars N  true on at least one of the last N bars, this one included ("crossed within 5 bars")
+    bars_ago N     the condition as it was N bars ago ("a cross 1 bar ago")
+    No timing: the mask as it is. Each window ends at the current bar, so nothing looks ahead
+    (tests/test_lookahead.py checks all three).
+    """
+    if node.get("for_bars"):
+        bars = int(node["for_bars"])
+        # min_periods=bars: until there are N bars of history, "each of the last N" cannot hold.
+        return mask.astype(float).rolling(bars, min_periods=bars).sum().eq(bars)
+    if node.get("within_bars"):
+        return mask.astype(float).rolling(int(node["within_bars"]), min_periods=1).sum().gt(0)
+    if node.get("bars_ago"):
+        return mask.shift(int(node["bars_ago"]), fill_value=False)
+    return mask
+
+
+def evaluate_condition(node, data, features, spec_features, fingerprint):
+    """A boolean DataFrame (shaped like close) for one condition, its timing applied (held)."""
     close = data["close"]
-    if "all" in node or "any" in node:
-        combine_all = "all" in node
-        result = None
-        for child in node["all" if combine_all else "any"]:
-            signal = evaluate_rule(child, data, features, spec_features, fingerprint)
-            if result is None:
-                result = signal
-            else:
-                result = (result & signal) if combine_all else (result | signal)
-        return result
-    if "not" in node:
-        return ~evaluate_rule(node["not"], data, features, spec_features, fingerprint)
     if "pattern" in node:
-        signal = _pattern_signal(node, data, fingerprint)
+        signal = features[node["pattern"]]["signal"]
         side = node.get("side", "either")
         if side == "bullish":
-            return signal == 1
+            return held(signal == 1, node)
         if side == "bearish":
-            return signal == -1
-        return signal != 0
+            return held(signal == -1, node)
+        return held(signal != 0, node)
     if "filter" in node:
         kind = node["filter"]
         if kind == "session":
@@ -183,14 +178,16 @@ def evaluate_rule(node, data, features, spec_features, fingerprint):
         higher = resample_frames(data, RESAMPLE_RULE[node["timeframe"]])
         higher_fp = data_fingerprint(higher)
         higher_features = compile_features(spec_features, higher, higher_fp)
-        condition = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars", "shift")
-                     if key in node}
-        signal = evaluate_rule(condition, higher, higher_features, spec_features, higher_fp)
+        # The timing goes with the comparison, so it counts HIGHER bars ("for 3 weeks"), and is
+        # applied before the shift to completed bars: it is not applied again below.
+        comparison = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars", *TIMING_KEYS)
+                      if key in node}
+        signal = evaluate_condition(comparison, higher, higher_features, spec_features, higher_fp)
         signal = signal.shift(1, fill_value=False)
         signal = signal.astype(float).reindex(close.index, method="ffill")
         return signal.fillna(0.0).astype(bool)
 
-    # A comparison leaf.
+    # A comparison.
     op = node["op"]
     left = resolve_ref(node["left"], data, features, spec_features)
     if op in ("rising", "falling"):
@@ -226,26 +223,64 @@ def evaluate_rule(node, data, features, spec_features, fingerprint):
             result = left <= right
     # Indicator warm-up periods are NaN, and NaN compares False. fillna keeps the
     # dtype boolean whatever the inputs were.
-    result = pd.DataFrame(result).fillna(False).astype(bool)
-    shift = int(node.get("shift", 0))
-    if shift:
-        result = result.shift(shift, fill_value=False)
-    return result
+    return held(pd.DataFrame(result).fillna(False).astype(bool), node)
+
+
+def evaluate_logic(tree, masks):
+    """Combine the conditions' masks as the logic line says (expressions.parse_logic's tree)."""
+    if isinstance(tree, str):
+        return masks[tree]
+    if "not" in tree:
+        return ~evaluate_logic(tree["not"], masks)
+    values = [evaluate_logic(arg, masks) for arg in tree["args"]]
+    op = tree["op"]
+    combined = values[0]
+    for value in values[1:]:
+        if op in ("and", "nand"):
+            combined = combined & value
+        elif op in ("or", "nor"):
+            combined = combined | value
+        else:
+            combined = combined ^ value          # xor and xnor: true for an odd number
+    return ~combined if op in ("nand", "nor", "xnor") else combined
+
+
+def evaluate_rule(rule, data, features, spec_features, fingerprint):
+    """A boolean DataFrame (shaped like close) for one rule: its conditions, combined by its logic line."""
+    masks = {letter: evaluate_condition(condition, data, features, spec_features, fingerprint)
+             for letter, condition in rule["conditions"].items()}
+    return evaluate_logic(parse_logic(rule["logic"]), masks)
+
+
+def day_boundaries(index):
+    """(next bar is another day, next-but-one bar is another day) as boolean arrays, by UTC date.
+
+    ⚠️ VERIFY for a market whose trading day crosses midnight UTC (FX rolls at 17:00 New
+    York): its "day" here is the calendar date of the bars, which the Risk step says.
+    """
+    dates = np.asarray(index.normalize())
+    last = np.ones(len(dates), dtype=bool)
+    last[:-1] = dates[1:] != dates[:-1]
+    second_last = np.zeros(len(dates), dtype=bool)
+    second_last[:-1] = last[1:] & ~last[:-1]
+    return last, second_last
 
 
 # ---------------------------------------------------------------------------
 # Signal strategies
 # ---------------------------------------------------------------------------
 
-def compile_signals(spec, data):
+def compile_signals(spec, data, data_dir=None):
     """{"entries", "exits", "short_entries", "short_exits"}: boolean frames like close.
 
     Plus "entry_priority", a float frame like close, when a shared account ranks
-    competing entries by a feature.
+    competing entries by a feature; and a stop's or target's frame when it is measured
+    from a line (stop_lines): "stop_points", "trail_points", "target_points",
+    "stop_price", "trail_price" or "target_price", named as the front door's argument.
 
-    `spec` must already have its parameters applied (no "opt" nodes). All of them are
-    on the bar the signal is computed on: the front door shifts every one of them to
-    the next bar's open itself, so none is shifted here.
+    `spec` must already have its parameters applied. All of them are on the bar the
+    signal is computed on: the front door shifts every one of them to the next bar's
+    open itself, so none is shifted here. `data_dir` finds a universe file's point sizes.
     """
     close = data["close"]
     fingerprint = data_fingerprint(data)
@@ -255,21 +290,44 @@ def compile_signals(spec, data):
     # 2. Features, in dependency order.
     features = compile_features(spec_features, data, fingerprint)
 
-    # 3. Rules. A missing rule is all-False. Filters live inside entry rules
-    #    only (validate_spec rejects them in exits), so they gate entries and
-    #    never trap a position open.
+    # 3. Rules. A missing rule is all-False. Every condition kind may sit in any rule,
+    #    exits included (the owner's call, 17 November 2026): a weekday or higher-timeframe
+    #    condition is a condition like any other, joined by the logic line. "A or Friday"
+    #    is a time exit; "A and the week is down" narrows A, as any "and" does. A stop, a
+    #    target and the extra exits close a position whatever an exit rule says.
     rules = spec.get("rules") or {}
     names = {"long_entry": "entries", "long_exit": "exits",
              "short_entry": "short_entries", "short_exit": "short_exits"}
     out = {}
     for slot in RULE_SLOTS:
-        node = rules.get(slot)
-        if node:
-            out[names[slot]] = evaluate_rule(node, data, features, spec_features, fingerprint)
+        rule = rules.get(slot)
+        if rule:
+            out[names[slot]] = evaluate_rule(rule, data, features, spec_features, fingerprint)
         else:
             out[names[slot]] = pd.DataFrame(False, index=close.index, columns=close.columns)
 
-    # 4. The entry priority of a shared account, when it ranks competing entries by a
+    # 4. Order timing (intraday). Each signal fills at the NEXT bar's open, so:
+    #    * good for the day: an entry whose fill would be on the next day lapses, so an
+    #      entry on a day's last bar is dropped;
+    #    * flat by the day's end: an exit fires on the day's second-to-last bar (it fills
+    #      at the last bar's open), and entries that would fill on that last bar or later
+    #      are dropped. Masks on the signal bar: nothing is shifted.
+    #    ⚠️ An approximation of real order types, which vectorbtX does not have yet
+    #    (docs/UPSTREAM.md issue 20): the exit fills at the last bar's OPEN, not the close.
+    orders = (spec.get("risk") or {}).get("orders") or {}
+    if orders.get("good_for_day") or orders.get("flat_by_day_end"):
+        last, second_last = day_boundaries(close.index)
+        blocked = last.copy()
+        if orders.get("flat_by_day_end"):
+            blocked = blocked | second_last
+            closing = _mask_frame(second_last, close)
+            out["exits"] = out["exits"] | closing
+            out["short_exits"] = out["short_exits"] | closing
+        allowed = _mask_frame(~blocked, close)
+        out["entries"] = out["entries"] & allowed
+        out["short_entries"] = out["short_entries"] & allowed
+
+    # 5. The entry priority of a shared account, when it ranks competing entries by a
     #    feature: higher goes first, so "lowest first" is the negated score. A missing
     #    score (warm-up) goes last. Ties keep symbol order (vectorbtX's rule).
     priority = (spec.get("account") or {}).get("entry_priority") or {}
@@ -277,12 +335,92 @@ def compile_signals(spec, data):
         score = _full(resolve_ref(priority["score"], data, features, spec_features), close)
         out["entry_priority"] = score if priority.get("highest_first", True) else -score
 
+    # 6. A stop or target from a line, on the signal bar like everything above.
+    out.update(stop_lines(spec, data, features, spec_features, data_dir))
+
     # ⚠️ No shift here, for any of them. The front door shifts entries, exits, short
     # entries and short exits to the next bar's open itself (vectorbtX 16293a2,
     # docs/UPSTREAM.md issue 1, which used to leave the shorts unshifted), and shifts a
     # priority score with them. Shifting here as well would delay every signal two bars.
     # test_engine.py::test_short_signal_fills_next_open checks the outcome.
     return out
+
+
+def point_value(spec, close, data_dir=None):
+    """What one point is in the price `close` is written in, per bar and symbol.
+
+    The point size, times the rate the price was converted into the account currency at
+    (vectorbtX's fx_rate_of reads it off a converted frame; 1 when nothing was converted).
+    ⚠️ A point is a unit of the instrument's own price: on a USD share converted to pounds
+    it is a cent times the rate, not a penny (docs/UPSTREAM.md issue 29).
+    """
+    from vectorbtx.fx.convert import fx_rate_of
+
+    sizes = pd.Series(engine.point_sizes(spec, list(close.columns), data_dir), index=close.columns, dtype=float)
+    rate = fx_rate_of(close, index=close.index, columns=close.columns)
+    if rate is None:
+        return pd.DataFrame(np.broadcast_to(sizes.to_numpy(), close.shape), index=close.index,
+                            columns=close.columns)
+    return rate.mul(sizes, axis=1)
+
+
+def stop_lines(spec, data, features, spec_features, data_dir=None):
+    """{front-door argument: frame} for a stop or target measured from a line, on the signal bar.
+
+    A multiple of a line (3 x an ATR) is a distance in price, sent as points
+    (stop_points, or trail_points when the stop trails, target_points for a target): the
+    distance divided by the point value, which vectorbtX multiplies back at the fill. A
+    line's level (an EMA, the signal bar's low) is sent as a price (stop_price,
+    trail_price, target_price). The front door shifts each frame with the signals, so the
+    value at the signal bar's close is the one used from the fill (docs/UPSTREAM.md
+    issues 26 and 31). A missing value (an indicator warming up) places no stop on that
+    entry; with risk sizing, no entry.
+    """
+    close = data["close"]
+    risk = spec.get("risk") or {}
+    out = {}
+    for part, kinds in (("stop", ("fixed", "trailing")), ("target", ("fixed",))):
+        node = risk.get(part) or {}
+        unit = node.get("unit", "points")
+        if node.get("kind", "none") not in kinds or unit not in LINE_UNITS:
+            continue
+        line = _full(resolve_ref(node["line"], data, features, spec_features), close)
+        name = engine.STOP_LINE_ARGS[unit]["target" if part == "target" else node["kind"]]
+        if unit == "level":
+            out[name] = line
+        else:
+            out[name] = float(node["multiple"]) * line / point_value(spec, close, data_dir)
+    return out
+
+
+def stop_line_code(spec, spec_features, data_dir=None):
+    """The export's lines for stop_lines: the same frames, from the same line."""
+    risk = spec.get("risk") or {}
+    body = []
+    for part, kinds in (("stop", ("fixed", "trailing")), ("target", ("fixed",))):
+        node = risk.get(part) or {}
+        unit = node.get("unit", "points")
+        if node.get("kind", "none") not in kinds or unit not in LINE_UNITS:
+            continue
+        name = engine.STOP_LINE_ARGS[unit]["target" if part == "target" else node["kind"]]
+        line = f"full({_ref_code(node['line'], spec_features)}, close)"
+        if unit == "level":
+            body.append(f"{name} = {line}")
+        else:
+            if not any(text.startswith("point_value = ") for text in body):
+                sizes = engine.point_sizes(spec, list(spec["data"]["symbols"]), data_dir)
+                body += ["# A point in the price as converted: the point size times the conversion rate (1 if none).",
+                         "from vectorbtx.fx.convert import fx_rate_of",
+                         f"_sizes = pd.Series({sizes!r}, index=close.columns)",
+                         "_rate = fx_rate_of(close, index=close.index, columns=close.columns)",
+                         "point_value = _rate.mul(_sizes, axis=1) if _rate is not None else "
+                         "pd.DataFrame(np.broadcast_to(_sizes.to_numpy(), close.shape), index=close.index, "
+                         "columns=close.columns)"]
+            body.append(f"{name} = {float(node['multiple'])!r} * {line} / point_value")
+    if body:
+        body.insert(0, "# The stop or target from a line, on the signal bar like the signals: the front door shifts it "
+                       "with them.")
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +437,21 @@ def inverse_vol_weight(prices, window=20):
     volatility = prices.pct_change(fill_method=None).rolling(window).std()
     inverse = 1.0 / volatility.replace(0.0, np.nan)
     return inverse.div(inverse.sum(axis=1), axis=0)
+
+
+def first_invested_bar(weights):
+    """A schedule that is True only on the first bar with any weight: buy and hold.
+
+    Not simply the first bar: inverse-volatility weights are empty while their window
+    warms up, and buying then would hold cash for ever.
+    """
+    invested = weights.sum(axis=1) > 0
+    schedule = pd.Series(False, index=weights.index)
+    if invested.any():
+        schedule.loc[invested.idxmax()] = True
+    else:
+        schedule.iloc[0] = True
+    return schedule
 
 
 def compile_weights(spec, data):
@@ -355,12 +508,18 @@ def compile_weights(spec, data):
         total = raw.sum(axis=1)
         weights = raw.div(total.where(total > 0), axis=0).fillna(0.0)
 
-    # 4. Schedule. Calendar dates, optionally combined with a drift threshold.
+    # 4. Schedule: never (buy and hold), every bar, or calendar dates optionally
+    #    combined with a drift threshold.
     #    ⚠️ Always pass schedule= to drifted_weights, or drift accumulates from the
     #    first bar and the threshold test becomes always-true.
     schedule_spec = spec["schedule"]
-    calendar = schedule_spec.get("calendar")
-    if calendar:
+    rebalance = schedule_spec["rebalance"]
+    if rebalance == "never":
+        schedule = first_invested_bar(weights)
+    elif rebalance == "every_bar":
+        schedule = engine.always_schedule(close.index)
+    else:
+        calendar = schedule_spec["calendar"]
         schedule = engine.calendar_schedule(close.index, freq=calendar["freq"], on=calendar.get("on", "first"))
         if schedule_spec.get("threshold") is not None:
             drifted = engine.drifted_weights(weights, close, schedule=schedule)
@@ -369,8 +528,6 @@ def compile_weights(spec, data):
                 schedule = schedule & breached
             else:
                 schedule = schedule | breached
-    else:
-        schedule = engine.always_schedule(close.index)
 
     # 5. Weights stay a full-shape frame. The library turns them into
     #    NaN-off-schedule targets itself. ⚠️ Never forward-fill them: that would
@@ -422,59 +579,61 @@ def higher_timeframe(signal, base_index):
     return signal.fillna(0.0).astype(bool)
 
 
-def pattern_signal(open_, high, low, close, volume, module, name, keywords):
-    import inspect
-    import ta_patterns
-    import ta_patterns.chart_patterns
-    detector = getattr(ta_patterns.chart_patterns if module == "chart" else ta_patterns, name)
-    keywords = dict(keywords)
-    wants_volume = "v" in inspect.signature(detector).parameters
-    out = pd.DataFrame(0, index=close.index, columns=close.columns, dtype="int8")
-    for symbol in close.columns:
-        arrays = [frame[symbol].to_numpy(dtype=float) for frame in (open_, high, low, close)]
-        if wants_volume:
-            keywords["v"] = volume[symbol].to_numpy(dtype=float)
-        out[symbol] = np.asarray(detector(*arrays, **keywords), dtype="int8")
-    return out
+def day_boundaries(index):
+    dates = np.asarray(index.normalize())
+    last = np.ones(len(dates), dtype=bool)
+    last[:-1] = dates[1:] != dates[:-1]
+    second_last = np.zeros(len(dates), dtype=bool)
+    second_last[:-1] = last[1:] & ~last[:-1]
+    return last, second_last
+
+
+def held(mask, for_bars=None, within_bars=None, bars_ago=None):
+    """A condition's timing: true on each of the last N bars, on any of them, or N bars ago."""
+    if for_bars:
+        return mask.astype(float).rolling(for_bars, min_periods=for_bars).sum().eq(for_bars)
+    if within_bars:
+        return mask.astype(float).rolling(within_bars, min_periods=1).sum().gt(0)
+    if bars_ago:
+        return mask.shift(bars_ago, fill_value=False)
+    return mask
 '''
 
 _PRICE_VARS = {"open": "open_", "high": "high", "low": "low", "close": "close", "volume": "volume"}
 
 
+def _python(value):
+    """A literal for the script: numpy scalars become plain Python (np.int64(50) would print as such)."""
+    return value.item() if isinstance(value, np.generic) else value
+
+
 def _feature_code(spec_features):
-    """The body of compute_features(open_, high, low, close, volume) -> dict."""
-    lines = []
-    produced = []
+    """The body of compute_features(open_, high, low, close, volume) -> dict of frames."""
+    lines = ["P = {'open': open_, 'high': high, 'low': low, 'close': close, 'volume': volume}", "F = {}"]
     for name in feature_order(spec_features):
         feature = spec_features[name]
-        block = BLOCKS[feature["block"]]
-        params = _merged_params(feature)
-        fields = {"name": name}
-        for key, value in params.items():
-            # Plain Python literals in the script (a numpy int would print as np.int64(50)).
-            kind = block["params"][key]["type"]
-            if kind == "int":
-                value = int(value)
-            elif kind == "float":
-                value = float(value)
-            elif kind == "bool":
-                value = bool(value)
-            fields[key] = repr(value)
-        if "source" in block["params"]:
-            source = params["source"]
-            if isinstance(source, dict):
-                fields["src"] = f"{source['feature']}__{_output_name(spec_features, source)}"
+        item = indicators.entry(feature["indicator"])
+        params = {key: _python(value) for key, value in indicators.call_params(feature).items()}
+        inputs = []
+        for input_name in item["inputs"]:
+            ref = _input_ref(feature, input_name)
+            if isinstance(ref, dict):
+                inputs.append(f"F[{(ref['feature'] + '__' + _output_name(spec_features, ref))!r}]")
             else:
-                fields["src"] = _PRICE_VARS[source]
-        if feature["block"] == "pattern":
-            # The detector's own "name" parameter would clash with the feature name.
-            fields = {"name": name, "module": repr(params["module"]), "detector": repr(params["name"]),
-                      "keywords": repr(dict(params["params"]))}
-        elif feature["block"] == "python":
-            fields = {"name": name, "code": textwrap.indent(params["code"], "    ")}
-        lines.append(block["export"].format(**fields))
-        produced += [f"{name}__{output}" for output in block["outputs"]]
-    lines.append("return {" + ", ".join(f"{var!r}: {var}" for var in produced) + "}")
+                inputs.append(_PRICE_VARS[ref])
+        listed = "[" + ", ".join(inputs) + "]"
+        if item["source"] in ("talib", "pandas_ta"):
+            call = (f"run_library_indicator({item['source']!r}, {item['function']!r}, {item['inputs']!r}, {listed}, "
+                    f"{params!r}, {item['outputs']!r})")
+        elif item["source"] == "pattern":
+            module, detector = item["function"].split(":")
+            call = (f"{{'signal': run_pattern({module!r}, {detector!r}, {params!r}, open_, high, low, close, "
+                    f"volume)}}")
+        else:
+            call = f"run_studio({item['function']!r}, {params!r}, {listed}, P)"
+        lines.append(f"for _output, _frame in {call}.items():")
+        lines.append(f"    F[{name!r} + '__' + _output] = _frame")
+    lines.append("return F")
     return lines
 
 
@@ -485,24 +644,26 @@ def _ref_code(ref, spec_features, frames="P", feats="F"):
         code = f"{frames}[{ref['price']!r}]"
     else:
         return repr(float(ref["const"]))
-    shift = int(ref.get("shift", 0))
+    shift = int(ref.get("shift", 0) or 0)
     return f"{code}.shift({shift})" if shift else code
 
 
-def _rule_code(node, spec_features, frames="P", feats="F"):
-    """Python source for one rule tree, mirroring evaluate_rule exactly."""
+def _timed_code(code, node):
+    """`code` wrapped in the script's held() when the condition has a timing, as compile.held does."""
+    timing = {key: int(node[key]) for key in TIMING_KEYS if node.get(key)}
+    if not timing:
+        return code
+    return f"held({code}, " + ", ".join(f"{key}={value}" for key, value in timing.items()) + ")"
+
+
+def _condition_code(node, spec_features, frames="P", feats="F"):
+    """Python source for one condition, mirroring evaluate_condition exactly."""
     close = f"{frames}['close']"
-    if "all" in node or "any" in node:
-        joiner = " & " if "all" in node else " | "
-        parts = [_rule_code(child, spec_features, frames, feats) for child in node["all" if "all" in node else "any"]]
-        return "(" + joiner.join(parts) + ")"
-    if "not" in node:
-        return "(~" + _rule_code(node["not"], spec_features, frames, feats) + ")"
     if "pattern" in node:
-        call = (f"pattern_signal({frames}['open'], {frames}['high'], {frames}['low'], {close}, {frames}['volume'], "
-                f"{node.get('module', 'candle')!r}, {node['pattern']!r}, {dict(node.get('params') or {})!r})")
+        signal = f"{feats}[{(node['pattern'] + '__signal')!r}]"
         side = node.get("side", "either")
-        return f"({call} {'== 1' if side == 'bullish' else '== -1' if side == 'bearish' else '!= 0'})"
+        return _timed_code(f"({signal} {'== 1' if side == 'bullish' else '== -1' if side == 'bearish' else '!= 0'})",
+                           node)
     if "filter" in node:
         kind = node["filter"]
         if kind == "session":
@@ -511,10 +672,11 @@ def _rule_code(node, spec_features, frames="P", feats="F"):
             return f"mask_frame({close}.index.day_of_week.isin({list(node['days'])!r}), {close})"
         if kind == "month":
             return f"mask_frame({close}.index.month.isin({list(node['months'])!r}), {close})"
-        condition = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars", "shift")
-                     if key in node}
+        # The timing rides on the comparison, counting higher bars (as in evaluate_condition).
+        comparison = {key: node[key] for key in ("left", "op", "right", "lower", "upper", "bars", *TIMING_KEYS)
+                      if key in node}
         rule = RESAMPLE_RULE[node["timeframe"]]
-        inner = _rule_code(condition, spec_features, "PH", "FH")
+        inner = _condition_code(comparison, spec_features, "PH", "FH")
         return (f"(lambda PH: (lambda FH: higher_timeframe({inner}, {close}.index))"
                 f"(compute_features(PH['open'], PH['high'], PH['low'], PH['close'], PH['volume'])))"
                 f"(resample({frames}, {rule!r}))")
@@ -534,9 +696,23 @@ def _rule_code(node, spec_features, frames="P", feats="F"):
     else:
         right = _ref_code(node["right"], spec_features, frames, feats)
         code = f"(full({left}, {close}) {op} {right})"
-    code = f"as_bool({code})"
-    shift = int(node.get("shift", 0))
-    return f"{code}.shift({shift}, fill_value=False)" if shift else code
+    return _timed_code(f"as_bool({code})", node)
+
+
+def _logic_code(tree, codes):
+    """The logic line as Python operators on the conditions' masks, mirroring evaluate_logic."""
+    if isinstance(tree, str):
+        return codes[tree]
+    if "not" in tree:
+        return f"(~{_logic_code(tree['not'], codes)})"
+    joiner = {"and": " & ", "nand": " & ", "or": " | ", "nor": " | ", "xor": " ^ ", "xnor": " ^ "}[tree["op"]]
+    text = "(" + joiner.join(_logic_code(arg, codes) for arg in tree["args"]) + ")"
+    return f"(~{text})" if tree["op"] in ("nand", "nor", "xnor") else text
+
+
+def _rule_code(rule, spec_features):
+    codes = {letter: _condition_code(condition, spec_features) for letter, condition in rule["conditions"].items()}
+    return _logic_code(parse_logic(rule["logic"]), codes)
 
 
 def _portfolio_code(spec):
@@ -577,16 +753,21 @@ def _portfolio_code(spec):
     else:
         lines += ["total = raw.sum(axis=1)", "weights = raw.div(total.where(total > 0), axis=0).fillna(0.0)"]
     schedule = spec["schedule"]
-    calendar = schedule.get("calendar")
-    if calendar:
+    if schedule["rebalance"] == "never":
+        lines += ["# Buy and hold: the target weights are bought once, on the first bar with any weight.",
+                  "invested = weights.sum(axis=1) > 0",
+                  "schedule = pd.Series(False, index=weights.index)",
+                  "schedule.loc[invested.idxmax() if invested.any() else weights.index[0]] = True"]
+    elif schedule["rebalance"] == "every_bar":
+        lines.append("schedule = vbt.x.always_schedule(close.index)")
+    else:
+        calendar = schedule["calendar"]
         lines.append(f"schedule = vbt.x.calendar_schedule(close.index, freq={calendar['freq']!r}, "
                      f"on={calendar.get('on', 'first')!r})")
         if schedule.get("threshold") is not None:
             lines.append("drifted = vbt.x.drifted_weights(weights, close, schedule=schedule)   # schedule= is essential")
             lines.append(f"breached = vbt.x.threshold_schedule(drifted, weights, tolerance={float(schedule['threshold'])!r})")
             lines.append(f"schedule = schedule {'&' if schedule.get('combine', 'and') == 'and' else '|'} breached")
-    else:
-        lines.append("schedule = vbt.x.always_schedule(close.index)")
     return lines
 
 
@@ -602,25 +783,27 @@ def export_script(spec, data_dir=None):
         "",
         "Exported from OpenStrategy Studio. It reproduces the Studio's backtest with",
         "plain vectorbtX calls; run it directly to backtest the stored data again.",
+        "Indicators come from TA-Lib and pandas-ta-classic, patterns from ta_patterns,",
+        "called one symbol at a time exactly as the Studio calls them.",
         '"""',
         "",
         "from pathlib import Path",
         "",
         "import numpy as np",
         "import pandas as pd",
-        "import vectorbt                  # indicators and the .vbt pandas accessors",
+        "import vectorbt                  # the .vbt pandas accessors (crossings)",
         "import vectorbtx as vbt          # lower-case import name; vbt.x holds the front doors",
         "",
         _SCRIPT_HELPERS.strip("\n"),
         "",
         "",
-        "def compute_features(open_, high, low, close, volume):",
-        "    def flat(values, like=close):",
-        "        # vectorbt outputs carry a parameter column level; rebuild with close's labels.",
-        "        return pd.DataFrame(np.asarray(values, dtype=float).reshape(like.shape), index=like.index, columns=like.columns)",
+        "# --- The Studio's feature functions, copied from openstrategy_studio.indicators ---",
+        indicators.export_source(),
         "",
+        "",
+        "def compute_features(open_, high, low, close, volume):",
     ]
-    lines += ["    " + line for code in _feature_code(spec_features) for line in code.splitlines()]
+    lines += ["    " + line for line in _feature_code(spec_features)]
     if "adjust_sl_func_nb" in plan["args"]:
         from . import exit_rules
         lines += ["", "", "# --- Extra exits: fixed numba templates (time stop, breakeven, step trailing) ---",
@@ -628,11 +811,13 @@ def export_script(spec, data_dir=None):
     lines += ["", "", "def run(open_, high, low, close, volume, fx=None):",
               "    P = {'open': open_, 'high': high, 'low': low, 'close': close, 'volume': volume}"]
     body = []
-    if account.get("fx") and account.get("base_currency"):
-        body += ["# Convert open, high, low AND close with the same FX table BEFORE any signal.",
-                 f"universe = {engine.universe_code(spec, data_dir)}",
+    quotes = engine.conversion_quotes(spec, data_dir) if account.get("fx") and account.get("base_currency") else None
+    if quotes is not None:
+        body += ["# Convert open, high, low AND close with the same FX table BEFORE any signal. A spread bet",
+                 "# keeps its own price (its stake is money per point), so it is given the account currency.",
+                 f"quotes = {quotes!r}",
                  "for _field in ('open', 'high', 'low', 'close'):",
-                 f"    P[_field] = vbt.x.to_base_currency(P[_field], base={account['base_currency']!r}, fx=fx, instruments=universe)",
+                 f"    P[_field] = vbt.x.to_base_currency(P[_field], base={account['base_currency']!r}, fx=fx, quote_currency=quotes)",
                  "open_, high, low, close = P['open'], P['high'], P['low'], P['close']"]
     body.append("F = compute_features(open_, high, low, close, volume)")
     if kind == "signals":
@@ -644,6 +829,18 @@ def export_script(spec, data_dir=None):
                 body.append(f"{names[slot]} = {_rule_code(rules[slot], spec_features)}")
             else:
                 body.append(f"{names[slot]} = pd.DataFrame(False, index=close.index, columns=close.columns)")
+        orders = (spec.get("risk") or {}).get("orders") or {}
+        if orders.get("good_for_day") or orders.get("flat_by_day_end"):
+            body += ["# Order timing, on the signal bar (see the Studio's compile_signals).",
+                     "_last, _second_last = day_boundaries(close.index)",
+                     "_blocked = _last.copy()"]
+            if orders.get("flat_by_day_end"):
+                body += ["_blocked = _blocked | _second_last",
+                         "exits = exits | mask_frame(_second_last, close)",
+                         "short_exits = short_exits | mask_frame(_second_last, close)"]
+            body += ["entries = entries & mask_frame(~_blocked, close)",
+                     "short_entries = short_entries & mask_frame(~_blocked, close)"]
+        body += stop_line_code(spec, spec_features, data_dir)
         if plan["args"].get("entry_priority") == ("var", "entry_priority"):
             priority = account["entry_priority"]
             sign = "" if priority.get("highest_first", True) else "-"
@@ -659,7 +856,9 @@ def export_script(spec, data_dir=None):
     if plan["single"]:
         symbol = spec["data"]["symbols"][0]
         body.append("# SingleBacktest takes Series and flat instrument keywords.")
-        for var in ("close", "open_", "high", "low", "volume", "entries", "exits", "short_entries", "short_exits"):
+        lines_used = [value for how, value in plan["args"].values() if how == "var" and value in engine.STOP_ARGS]
+        for var in ("close", "open_", "high", "low", "volume", "entries", "exits", "short_entries", "short_exits",
+                    *lines_used):
             if var in ("close", "open_", "high", "low", "volume") or kind == "signals":
                 body.append(f"{var} = {var}[{symbol!r}]")
     if "adjust_sl_func_nb" in plan["args"]:
@@ -693,7 +892,7 @@ def export_script(spec, data_dir=None):
               f"    DATA_DIR = Path({str(data_dir) if data_dir else '.'!r})",
               f"    SYMBOLS, TIMEFRAME = {list(data['symbols'])!r}, {data['timeframe']!r}",
               f"    START, END = {data['start']!r}, {data['end']!r}",
-              f"    ADJUSTED = {engine.adjusted_symbols(spec)!r}   # equity symbols read adj_close",
+              f"    ADJUSTED = {engine.adjusted_symbols(spec)!r}   # symbols bought outright read adj_close",
               "    frames = {}",
               "    for symbol in SYMBOLS:",
               "        safe = ''.join('_' if ch in '\\\\/:*?\"<>|' else ch for ch in symbol)",
@@ -719,4 +918,3 @@ def export_script(spec, data_dir=None):
     lines += ["    pf = run(fields['open'], fields['high'], fields['low'], fields['close'], fields['volume'], fx=fx)",
               "    print(pf.stats())", ""]
     return "\n".join(lines)
-

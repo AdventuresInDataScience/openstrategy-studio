@@ -18,7 +18,7 @@ def test_eligibility(ma_spec, momentum_spec, shared_spec):
     ok, reason = engine.vectorisable(shared_spec, O.build_space(shared_spec))
     assert not ok and "shared account" in reason
     risky = copy.deepcopy(ma_spec)
-    risky["risk"]["stop"]["points"] = {"value": 60, "opt": {"min": 20, "max": 100, "int": True}}
+    risky["optimise"]["variables"]["risk.stop.points"] = {"start": 20, "stop": 100, "step": 10}
     ok, reason = engine.vectorisable(risky, O.build_space(risky))
     assert not ok and "risk.stop.points" in reason
     search = load_template("structure_search")
@@ -29,15 +29,43 @@ def test_eligibility(ma_spec, momentum_spec, shared_spec):
 def test_vectorised_equals_one_by_one(ma_spec, ohlcv):
     pytest.importorskip("vectorbtx")
     space = O.build_space(ma_spec)
-    params_list = [{"features.fast.window": fast, "features.slow.window": slow}
+    params_list = [{"features.fast.params.timeperiod": fast, "features.slow.params.timeperiod": slow}
                    for fast in (10, 30, 50) for slow in (100, 200)]
     trials = engine.run_vectorised(ma_spec, ohlcv, params_list)
     assert len(trials) == len(params_list)
     job = {"metric": "sharpe", "constraints": {}}
-    for params, pf in zip(params_list, trials):
-        alone = engine.run_backtest(ma_spec, ohlcv, params=params)["pf"]
-        together = O.score(pf, job, params)
+    for params, trial in zip(params_list, trials):
+        alone = engine.run_backtest(ma_spec, ohlcv, params=params)
+        together = O.score(trial["pf"], job, params, notes=trial["warnings"])
+        single = O.score(alone["pf"], job, params, notes=alone["warnings"])
+        for key in ("objective", "total_return", "n_trades", "max_drawdown"):
+            assert together[key] == pytest.approx(single[key], nan_ok=True), (params, key)
+        # vectorbtX's words about the trial, said with the symbol's name, as the run alone says them.
+        assert together["notes"] == single["notes"], params
+    assert np.isfinite(O.grid_size(space))
+
+
+def test_vectorised_equals_one_by_one_when_the_structure_varies(ma_spec, ohlcv):
+    """A rule's comparison and a moving average's type are text, not numbers; trials that
+    differ only in them must still match the same trials run one by one."""
+    pytest.importorskip("vectorbtx")
+    spec = copy.deepcopy(ma_spec)
+    spec["features"]["fast"] = {"indicator": "talib:MA", "inputs": {"close": "close"},
+                                "params": {"timeperiod": 30, "matype": "SMA"}}
+    op = "rules.long_entry.conditions.A.op"
+    kind = "features.fast.params.matype"
+    spec["optimise"]["variables"] = {op: {"values": ["crosses_above", ">"]}, kind: {"values": ["SMA", "EMA"]}}
+    space = O.build_space(spec)
+    assert engine.vectorisable(spec, space) == (True, "")
+    params_list = [{op: comparison, kind: average} for comparison in ("crosses_above", ">") for average in ("SMA", "EMA")]
+    trials = engine.run_vectorised(spec, ohlcv, params_list)
+    job = {"metric": "sharpe", "constraints": {}}
+    seen = set()
+    for params, trial in zip(params_list, trials):
+        alone = engine.run_backtest(spec, ohlcv, params=params)["pf"]
+        together = O.score(trial["pf"], job, params)
         single = O.score(alone, job, params)
         for key in ("objective", "total_return", "n_trades", "max_drawdown"):
             assert together[key] == pytest.approx(single[key], nan_ok=True), (params, key)
-    assert np.isfinite(O.grid_size(space))
+        seen.add((single["n_trades"], round(single["total_return"], 9)))
+    assert len(seen) > 1          # the swaps do change the trades

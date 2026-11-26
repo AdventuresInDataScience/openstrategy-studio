@@ -460,6 +460,644 @@ def check_financing_field_says_it_is_unused():
         "financing=0.10 is accepted in silence and never read"
 
 
+# ---------------------------------------------------------------------------
+# 21. min_trade never skips a trade
+# ---------------------------------------------------------------------------
+
+def check_min_trade_skips_small_trades():
+    # A rises 1% a bar and B is flat; a fixed 60/40 book of fractional shares, rebalanced every
+    # 5th bar. Each rebalance only trims the drift, about 1% of the account, so min_trade=0.5
+    # ("skip any trade under half the account") should leave the opening purchase alone.
+    n = 21
+    index = pd.bdate_range("2024-01-01", periods=n)
+    close = pd.DataFrame({"A": 100 * 1.01 ** np.arange(n), "B": np.full(n, 100.0)}, index=index)
+    instrument = dict(EQUITY, point_size=0.01, allow_fractional=True)
+    weights = pd.DataFrame({"A": 0.6, "B": 0.4}, index=index)
+    schedule = pd.Series(np.arange(n) % 5 == 0, index=index)
+    counts = {}
+    for min_trade in (None, 0.5):
+        pf = vbt.x.PortfolioBacktest(close=close, open=close, high=close + 0.5, low=close - 0.5,
+                                     instruments={"A": instrument, "B": instrument}, weights=weights,
+                                     schedule=schedule, min_trade=min_trade, init_cash=10_000, freq="D")
+        orders = pf.orders.records_readable
+        value = pd.Series(np.asarray(pf.value()).ravel(), index=index).reindex(orders["Timestamp"]).to_numpy()
+        share = (orders["Size"] * orders["Price"]).abs().to_numpy() / value
+        later = share[(orders["Timestamp"] > orders["Timestamp"].min()).to_numpy()]
+        counts[min_trade] = (len(orders), later)
+    total, later = counts[0.5]
+    present = bool((later < 0.5).any())
+    return present, f"60/40 rebalanced every 5th bar: {counts[None][0]} orders with no min_trade, {total} with " \
+                    f"min_trade=0.5, of which {len(later)} after the opening purchase, each at most " \
+                    f"{later.max() if len(later) else 0:.2%} of the account (should be none)"
+
+
+# ---------------------------------------------------------------------------
+# 22. The sizing warnings measure every bar, not the bars an order is placed on
+# ---------------------------------------------------------------------------
+
+def check_sizing_warnings_measure_order_bars():
+    # One entry, filled at 100; the price then rises to 1000 and nothing more is traded. A stake
+    # of 300 a point is worth 30,000 at the fill, inside 5x leverage on 10,000 (50,000), so the
+    # trade fills in full and the buying-power warning has nothing to say. A notional of 500 buys
+    # 5 shares at 100, so the minimum-size warning has nothing to say either.
+    n = 10
+    opens = [100.0] * 5 + [1000.0] * 5
+    o, h, l, c = frames(opens)
+    entries = mask(c.index, ["X"], [("X", 1)])
+    exits = mask(c.index, ["X"], [("X", 3)])
+    said = []
+    runs = (dict(mode="spreadbet", point_size=1.0, spread_points=0.0, leverage=5.0, stake=300.0),
+            dict(EQUITY, notional=500.0))
+    sizes = []
+    for terms in runs:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=exits,
+                                         init_cash=10_000, freq="D", **terms)
+        said += [str(item.message) for item in caught if "buying power" in str(item.message)
+                 or "minimum tradeable size" in str(item.message)]
+        sizes.append(float(pf.orders.records_readable["Size"].iloc[0]))
+    present = bool(said)
+    return present, (f"orders filled in full (sizes {sizes[0]:g} and {sizes[1]:g}), yet {len(said)} warning(s): "
+                     + " | ".join(text[:90] for text in said) if said else
+                     f"orders filled in full (sizes {sizes[0]:g} and {sizes[1]:g}) and no warning")
+
+
+# ---------------------------------------------------------------------------
+# 23. Risk sizing from the balance or the equity (a required feature)
+# ---------------------------------------------------------------------------
+
+def check_risk_sizing_from_equity():
+    # Risk 1% over a 10-point stop. The first trade is stopped out for a loss of 100, leaving
+    # 9,900. Sized from the equity (or the balance: no position is open in between), the second
+    # trade risks 1% of 9,900, so 9.9 units, not the 10 that 1% of the starting cash gives.
+    opens = [100.0] * 10
+    lows = [value - 0.5 for value in opens]
+    lows[3] = 89.0                                               # the first trade's stop (90) is hit
+    o, h, l, c = frames(opens, lows=lows)
+    entries = mask(c.index, ["X"], [("X", 1), ("X", 5)])
+    none = mask(c.index, ["X"], [])
+    terms = dict(EQUITY, allow_fractional=True)
+    sizes = {}
+    for basis in ("equity", "balance"):
+        try:
+            pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none, risk_pct=0.01,
+                                         stop_points=10, init_cash=10_000, freq="D", risk_of=basis, **terms)
+        except Exception as error:                                       # noqa: BLE001
+            return True, f"risk_of={basis!r} is not accepted ({type(error).__name__}: {str(error)[:80]})"
+        buys = pf.orders.records_readable
+        buys = buys[buys["Side"] == "Buy"]
+        sizes[basis] = [round(float(size), 4) for size in buys["Size"]]
+    present = any(found != [10.0, 9.9] for found in sizes.values())
+    return present, f"buy sizes {sizes} (should be [10.0, 9.9] for both)"
+
+
+# ---------------------------------------------------------------------------
+# 24. Bought outright and FX spot default to 2x leverage
+# ---------------------------------------------------------------------------
+
+def check_unlevered_defaults():
+    from vectorbtx.instruments.defaults import max_leverage
+
+    found = {mode: max_leverage(mode) for mode in ("equity", "fx_spot")}
+    limits = {f"{mode}/{asset}": max_leverage(mode, asset) for mode in ("spreadbet", "cfd")
+              for asset in ("fx", "index", "commodities", "stocks")}
+    wanted = {"spreadbet/fx": 30, "spreadbet/index": 10, "spreadbet/commodities": 10, "spreadbet/stocks": 5}
+    wanted.update({key.replace("spreadbet", "cfd"): value for key, value in wanted.items()})
+    present = any(value != 1.0 for value in found.values()) or limits != wanted
+    return present, f"defaults {found} (should be 1x, no borrowing); spread bets and CFDs {limits}"
+
+
+# ---------------------------------------------------------------------------
+# 25. Point sizes: an index's point, and a share priced in pence
+# ---------------------------------------------------------------------------
+
+def check_point_size_defaults():
+    found = {}
+    for label, terms in (("spreadbet index", dict(mode="spreadbet", asset_class="index")),
+                         ("cfd index", dict(mode="cfd", asset_class="index", contract_size=1.0)),
+                         ("spreadbet GBp share", dict(mode="spreadbet", asset_class="stocks", quote_currency="GBp")),
+                         ("spreadbet EURUSD", dict(mode="spreadbet", asset_class="fx", base_currency="EUR",
+                                                   quote_currency="USD")),
+                         ("spreadbet USDJPY", dict(mode="spreadbet", asset_class="fx", base_currency="USD",
+                                                   quote_currency="JPY"))):
+        try:
+            found[label] = vbt.x.Instrument(**terms).filled().point_size
+        except Exception as error:                                       # noqa: BLE001
+            found[label] = f"{type(error).__name__}"
+    wanted = {"spreadbet index": 1.0, "cfd index": 1.0, "spreadbet GBp share": 1.0, "spreadbet EURUSD": 0.0001,
+              "spreadbet USDJPY": 0.01}
+    return found != wanted, f"point sizes {found} (should be {wanted})"
+
+
+# ---------------------------------------------------------------------------
+# 26. Stops and targets as a vector: per symbol and per bar from the signal bar, with risk
+# sizing from them (a required feature). A stop in % of the price is vectorbt's own sl_stop,
+# which works already; what is missing is a value per column or per bar, shifted with the
+# signals, and risk sizing from any distance but a fixed one in points. The API names are the
+# ones UPSTREAM.md suggests; rename with them.
+# ---------------------------------------------------------------------------
+
+def check_stops_that_vary():
+    # Every entry is signalled at bar 1 and filled at bar 2's open, 100. Bar 3's low is 97.5 and
+    # bar 4's is 94.5, so a stop at 98 is hit on bar 3, and one at 97 or 95 on bar 4.
+    opens = [100.0] * 8
+    lows = [99.5, 99.5, 99.5, 97.5, 94.5, 99.5, 99.5, 99.5]
+    index = pd.bdate_range("2024-01-01", periods=8)
+
+    def per_bar(values):
+        return pd.DataFrame({"X": [float(value) for value in values]}, index=index)
+
+    def outcome(columns=("X",), **kwargs):
+        """{column: (bought, (exit bar, exit price))}, or the error's name."""
+        o, h, l, c = frames(opens, lows=lows, columns=columns)
+        entries = mask(c.index, columns, [(column, 1) for column in columns])
+        none = mask(c.index, columns, [])
+        try:
+            pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none,
+                                         instruments={column: EQUITY for column in columns}, init_cash=10_000,
+                                         freq="D", **kwargs)
+        except Exception as error:                                       # noqa: BLE001
+            return type(error).__name__
+        rows = pf.orders.records_readable
+        found = {}
+        for column in columns:
+            mine = rows[rows["Column"] == column]
+            buys, sells = mine[mine["Side"] == "Buy"], mine[mine["Side"] == "Sell"]
+            bought = round(float(buys["Size"].iloc[0]), 4) if len(buys) else None
+            sold = (c.index.get_loc(sells["Timestamp"].iloc[0]), round(float(sells["Price"].iloc[0]), 2)) \
+                if len(sells) else None
+            found[column] = (bought, sold)
+        return found
+
+    cases = {
+        # One distance per symbol: 2 points on X, 5 on Y.
+        "one stop per column": (dict(columns=("X", "Y"), size=1, stop_points={"X": 2, "Y": 5}),
+                                {"X": (1.0, (3, 98.0)), "Y": (1.0, (4, 95.0))}),
+        # ⚠️ Aligned with the signals and shifted with them: 2 at the signal bar is the stop, not the
+        # 5 at the fill bar. (A native per-bar sl_stop is read at the fill bar today: lookahead for
+        # a stop worked out from the signal bar's ATR.)
+        "a stop per bar, from the signal bar": (dict(size=1, stop_points=per_bar([9, 2, 5, 9, 9, 9, 9, 9])),
+                                                {"X": (1.0, (3, 98.0))}),
+        # The same for vectorbt's own fractions given per bar: 2% at the signal bar, not 5% at the fill bar.
+        "a % stop per bar, from the signal bar": (dict(size=1, sl_stop=per_bar([0.09, 0.02, 0.05, 0.09, 0.09, 0.09,
+                                                                                0.09, 0.09])),
+                                                  {"X": (1.0, (3, 98.0))}),
+        # Risk sizing from whichever distance is given: 100 at risk over 2 (2% of 100, or 2 points) is 50.
+        "risk sized from a % stop": (dict(risk_amount=100, sl_stop=0.02), {"X": (50.0, (3, 98.0))}),
+        "risk sized from a stop per bar": (dict(risk_amount=100, stop_points=per_bar([9, 2, 5, 9, 9, 9, 9, 9])),
+                                           {"X": (50.0, (3, 98.0))}),
+        "risk sized from a trailing stop": (dict(risk_amount=100, trail_points=2), {"X": (50.0, None)}),
+    }
+    wrong = {}
+    for name, (kwargs, wanted) in cases.items():
+        found = outcome(**kwargs)
+        if name == "risk sized from a trailing stop" and isinstance(found, dict):
+            found = {"X": (found["X"][0], None)}                   # the trail moves the exit; the size is the point
+        if found != wanted:
+            wrong[name] = found
+    detail = "; ".join(f"{name}: {found}" for name, found in wrong.items()) or "every case as wanted"
+    return bool(wrong), f"{len(wrong)} of {len(cases)} cases not as wanted ({detail})"
+
+
+# ---------------------------------------------------------------------------
+# 27. A trailing stop in points widens as the price rises
+# ---------------------------------------------------------------------------
+
+def check_trailing_points_stay_a_distance():
+    # Filled at 120 (bar 2's open), trail 2 points. The high reaches 200.01 on bar 6 and bar 7 dips
+    # to 190, so the stop should fill 2 points behind the peak, at 198.01. A fraction of the fill
+    # price (2 / 120) applied to the peak puts it at 196.68 instead.
+    opens = [100.0, 100.0, 120.0, 140.0, 160.0, 180.0, 200.0, 199.0, 199.0]
+    highs = [value + 0.01 for value in opens]
+    lows = [value - 0.01 for value in opens]
+    lows[7] = 190.0
+    o, h, l, c = frames(opens, highs, lows, opens)
+    entries = mask(c.index, ["X"], [("X", 1)])
+    none = mask(c.index, ["X"], [])
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none,
+                                 instruments={"X": EQUITY}, size=1, trail_points=2, init_cash=10_000, freq="D")
+    sells = pf.orders.records_readable
+    sells = sells[sells["Side"] == "Sell"]
+    price = float(sells["Price"].iloc[0]) if len(sells) else float("nan")
+    present = not abs(price - 198.01) < 1e-6
+    return present, f"the trailing stop fills at {price:.2f}, {200.01 - price:.2f} points behind the peak of 200.01 " \
+                    f"(should be 198.01, 2 points behind)"
+
+
+# ---------------------------------------------------------------------------
+# 28. Risk sizing without a stop: sized from the leverage
+# ---------------------------------------------------------------------------
+
+def check_risk_sizing_without_a_stop():
+    # Risk 1% of 10,000 (100) with no stop. The rule asked for: the stop is the move that takes
+    # the trade's whole margin, 1 / leverage of the price, so the position is worth the risk times
+    # the leverage. Bought outright at 1x that is 100 of stock (the price must fall to zero to
+    # lose it); at 5x it is 500 (a 20% fall loses the 100).
+    opens = [100.0] * 6
+    o, h, l, c = frames(opens)
+    entries = mask(c.index, ["X"], [("X", 1)])
+    none = mask(c.index, ["X"], [])
+    values = {}
+    for leverage in (1.0, 5.0):
+        terms = dict(EQUITY, allow_fractional=True, leverage=leverage)
+        try:
+            pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none, risk_pct=0.01,
+                                         init_cash=10_000, freq="D", **terms)
+        except Exception as error:                                       # noqa: BLE001
+            return True, f"risk_pct with no stop raises ({type(error).__name__}: {str(error)[:90]})"
+        buys = pf.orders.records_readable
+        buys = buys[buys["Side"] == "Buy"]
+        values[leverage] = round(float((buys["Size"] * buys["Price"]).sum()), 2)
+    present = values != {1.0: 100.0, 5.0: 500.0}
+    return present, f"position values {values} (should be 100 at 1x and 500 at 5x)"
+
+
+# ---------------------------------------------------------------------------
+# 29. Points on a price converted to the account currency
+# ---------------------------------------------------------------------------
+
+def check_points_on_converted_prices():
+    # A USD share at 100, converted to a GBP account at 0.8 (80 pounds). A point is a cent,
+    # so a 50-point stop is 50 cents (99.50 dollars, 79.60 pounds), 100 pounds at risk over
+    # it is 250 shares (40 pence a share), and a 1-point spread buys at 100.005 dollars
+    # (80.004 pounds). Points applied to the converted price make the stop 50 pence instead.
+    index = pd.bdate_range("2024-01-01", periods=8)
+    native = pd.DataFrame({"X": [100.0] * 8}, index=index)
+    low = native * 0.9975
+    low.iloc[3] = 99.0
+    terms = {"mode": "equity", "point_size": 0.01, "quote_currency": "USD", "spread_points": 0.0,
+             "leverage": 1.0, "allow_fractional": True}
+    universe = vbt.x.load_universe({"X": vbt.x.Instrument(**terms)})
+    fx = pd.Series(0.8, index=index, name="USDGBP")
+    o, h, l, c = [vbt.x.to_base_currency(f, base="GBP", fx=fx, instruments=universe, fx_markup=0.0)
+                  for f in (native, native * 1.0025, low, native)]
+    entries = mask(index, ["X"], [("X", 0)])
+    none = mask(index, ["X"], [])
+    common = dict(close=c, open=o, high=h, low=l, entries=entries, exits=none, account_currency="GBP",
+                  fx=fx, freq="D")
+    pf = vbt.x.PortfolioBacktest(instruments={"X": terms}, size=10, stop_points=50, init_cash=10_000, **common)
+    stop = float(pf.orders.records_readable["Price"].iloc[1])
+    pf = vbt.x.PortfolioBacktest(instruments={"X": terms}, risk_amount=100, stop_points=50, init_cash=100_000,
+                                 **common)
+    risked = float(pf.orders.records_readable["Size"].iloc[0])
+    pf = vbt.x.PortfolioBacktest(instruments={"X": dict(terms, spread_points=1.0)}, size=1, init_cash=10_000,
+                                 **common)
+    spread = float(pf.orders.records_readable["Price"].iloc[0])
+    present = abs(stop - 79.6) > 1e-6 or abs(risked - 250) > 1e-6 or abs(spread - 80.004) > 1e-6
+    return present, f"USD share at 100 in a GBP account at 0.8: 50-point stop fills at {stop:.4f} (should be " \
+                    f"79.60), 100 at risk over it buys {risked:g} (should be 250), a 1-point spread buys at " \
+                    f"{spread:.4f} (should be 80.004)"
+
+
+# ---------------------------------------------------------------------------
+# 30. notional_pct: a position worth a share of the account (issue 23's optional rule)
+# ---------------------------------------------------------------------------
+
+def check_notional_pct():
+    # Half the account each time. The first trade (50 shares at 100) is stopped out at 90
+    # for a loss of 500, so from the equity the second is half of 9,500: 47.5 shares.
+    lows = [99.5] * 10
+    lows[3] = 89.0
+    o, h, l, c = frames([100.0] * 10, lows=lows)
+    entries = mask(c.index, ["X"], [("X", 1), ("X", 5)])
+    none = mask(c.index, ["X"], [])
+    try:
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=none, notional_pct=0.5,
+                                     stop_points=10, risk_of="equity", init_cash=10_000, freq="D",
+                                     **dict(EQUITY, allow_fractional=True))
+    except Exception as error:                                           # noqa: BLE001
+        return True, f"notional_pct= is not accepted ({type(error).__name__}: {str(error)[:80]})"
+    buys = pf.orders.records_readable
+    sizes = [round(float(size), 4) for size in buys[buys["Side"] == "Buy"]["Size"]]
+    return sizes != [50.0, 47.5], f"buy sizes {sizes} (should be [50.0, 47.5])"
+
+
+# ---------------------------------------------------------------------------
+# 31. Stops at a price level (issue 26's optional item 4)
+# ---------------------------------------------------------------------------
+
+def check_stop_levels():
+    # The signal bar closes at 101 with its EMA at 97.3; the next bar opens at 100. The stop
+    # should sit on the EMA (97.3), not 3.7 below the fill (96.3, a distance taken at the
+    # close). A long whose stop level is above its fill is rejected. A trailing level moves
+    # up with each completed bar and never back.
+    index = pd.bdate_range("2024-01-01", periods=8)
+    closes = [100.0, 101.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+    o, h, l, c = frames([100.0] * 8, [101.5] * 8, [99.5, 99.5, 99.5, 97.0, 96.0, 99.5, 99.5, 99.5], closes)
+    entries = mask(index, ["X"], [("X", 1)])
+    none = mask(index, ["X"], [])
+    common = dict(close=c, open=o, high=h, low=l, entries=entries, exits=none, instruments={"X": EQUITY},
+                  size=1, init_cash=10_000, freq="D")
+    failures = []
+    try:
+        level = pd.DataFrame({"X": [90.0, 97.3, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0]}, index=index)
+        pf = vbt.x.PortfolioBacktest(stop_price=level, **common)
+        sells = pf.orders.records_readable.query("Side == 'Sell'")
+        stop = float(sells["Price"].iloc[0]) if len(sells) else None
+        if stop != 97.3:
+            failures.append(f"stop at the signal bar's EMA: sold at {stop}, should be 97.3")
+        pf = vbt.x.PortfolioBacktest(stop_price=101.0, **common)
+        if len(pf.orders.records):
+            failures.append("a long with its stop level above the fill was placed; it should be rejected")
+        opens = [100.0, 100.0, 102.0, 104.0, 106.0, 108.0, 107.0, 105.0, 103.0, 101.0]
+        to, th, tl, tc = frames(opens, [v + 0.5 for v in opens], [v - 0.5 for v in opens])
+        trail = pd.DataFrame({"X": [v - 3 for v in opens]}, index=tc.index)
+        trail.iloc[6] = 104.6                                     # a dip that must not loosen it
+        pf = vbt.x.PortfolioBacktest(close=tc, open=to, high=th, low=tl, entries=mask(tc.index, ["X"], [("X", 1)]),
+                                     exits=mask(tc.index, ["X"], []), instruments={"X": EQUITY}, size=1,
+                                     trail_price=trail, init_cash=10_000, freq="D")
+        sells = pf.orders.records_readable.query("Side == 'Sell'")
+        exit_price = float(sells["Price"].iloc[0]) if len(sells) else None
+        if exit_price != 105.0:
+            failures.append(f"trailing level: sold at {exit_price}, should be 105 (the stop never loosens)")
+    except Exception as error:                                           # noqa: BLE001
+        return True, f"stop_price= / trail_price= not accepted ({type(error).__name__}: {str(error)[:80]})"
+    return bool(failures), "; ".join(failures) or "on the level across the gap; wrong side rejected; trail ratchets"
+
+
+# ---------------------------------------------------------------------------
+# 32, 33 and 34. The leverage cap (max_size): closes, the starting cash, the increment
+# ---------------------------------------------------------------------------
+
+def _orders(pf):
+    """[(bar, side, size)] for a one-column portfolio."""
+    records = pf.orders.records_readable
+    return [(int(pf.wrapper.index.get_loc(stamp)), side, round(float(size), 4))
+            for stamp, side, size in zip(records["Timestamp"], records["Side"], records["Size"])]
+
+
+def _held_at_end(pf):
+    return round(float(np.asarray(pf.assets()).ravel()[-1]), 4)
+
+
+def check_cap_cuts_closing_orders():
+    # 100 shares bought at 100 (a notional of 10,000 at 1x). The exit fills at 100.5, where
+    # 1 x 10,000 buys 99.50 shares: the exit must still sell all 100, and the second round trip
+    # must happen. Then a weights book: a target of 1.0 bought at 100, cut to 0 at 150, must
+    # sell everything, not the 66.67 shares 10,000 buys at 150.
+    opens = [100, 100, 100, 100.5, 100.5, 100.5, 100, 100, 100, 100]
+    o, h, l, c = frames(opens)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": EQUITY},
+                                 entries=mask(c.index, ["X"], [("X", 0), ("X", 6)]),
+                                 exits=mask(c.index, ["X"], [("X", 2), ("X", 8)]),
+                                 notional=10_000, init_cash=10_000, freq="D")
+    rule_orders = _orders(pf)
+    rule_held = _held_at_end(pf)
+    opens = [100, 100, 120, 140, 150, 150, 150, 150]
+    o, h, l, c = frames(opens)
+    weights = pd.DataFrame({"X": [1.0] * 5 + [0.0] * 3}, index=c.index)
+    schedule = pd.Series([True, False, False, False, False, True, False, False], index=c.index)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l,
+                                 instruments={"X": dict(EQUITY, allow_fractional=True)},
+                                 weights=weights, schedule=schedule, leverage_budget=False,
+                                 init_cash=10_000, freq="D")
+    book_held = _held_at_end(pf)
+    want = [(1, "Buy", 100.0), (3, "Sell", 100.0), (7, "Buy", 100.0), (9, "Sell", 100.0)]
+    present = rule_orders != want or rule_held != 0 or book_held != 0
+    return present, (f"rule strategy: orders {rule_orders}, {rule_held} held at the end "
+                     f"(should be {want}, flat); weights cut to 0: {book_held} held (should be 0)")
+
+
+def check_cap_from_the_account():
+    # A short from 100 covered at 80 leaves equity of 12,000. The long that follows, at 80, is
+    # worth the whole equity (notional_pct=1.0, risk_of="equity"): 150 shares, inside 1x of
+    # 12,000. A cap of 1 x the starting cash (10,000 / 80) allows only 125.
+    opens = [100, 100, 90, 80, 80, 80, 80, 80]
+    o, h, l, c = frames(opens)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": EQUITY},
+                                 entries=mask(c.index, ["X"], [("X", 4)]), exits=mask(c.index, ["X"], []),
+                                 short_entries=mask(c.index, ["X"], [("X", 0)]),
+                                 short_exits=mask(c.index, ["X"], [("X", 2)]),
+                                 notional_pct=1.0, risk_of="equity", init_cash=10_000, freq="D")
+    equity = round(float(np.asarray(pf.value()).ravel()[4]), 2)
+    buys = [size for bar, side, size in _orders(pf) if side == "Buy" and bar == 5]
+    return buys != [150.0], f"equity {equity} at the signal bar; the long bought {buys} (should be [150.0])"
+
+
+def check_cut_orders_on_the_increment():
+    # 100 whole shares asked for at 150 with 10,000 of cash, cut down to what is funded
+    # (when_cash_short="partial"): 66 shares, a whole number, not 66.67.
+    o, h, l, c = frames([150.0] * 6)
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": EQUITY},
+                                 entries=mask(c.index, ["X"], [("X", 0)]), exits=mask(c.index, ["X"], []),
+                                 size=100, when_cash_short="partial", init_cash=10_000, freq="D")
+    bought = [size for _, side, size in _orders(pf) if side == "Buy"]
+    return bought != [66.0], f"bought {bought} shares (should be [66.0]: the increment is one share)"
+
+
+# ---------------------------------------------------------------------------
+# 35. The re-sizing loop re-issues the warnings of the run before the one it returns
+# ---------------------------------------------------------------------------
+
+def check_warnings_describe_the_returned_run():
+    # A spread bet with 20% slippage at 5x, each entry worth twice the balance at its signal bar,
+    # three round trips on a flat 100, a minimum stake of 10. The first run sizes every entry from
+    # the starting cash (200 a point), and each trade loses 40 x 200, so its balance at the third
+    # entry is -6,000. The returned run trades 200 and then 40 a point: its balance there is 400, so
+    # the third entry asks for 8 a point, below the minimum, and is not placed. Its warnings must
+    # say that (a size below the minimum) and must not name a buying power the returned run never
+    # had (5 x -6,000 = -30,000: it is 5 x 400 = 2,000, and 800 fits in it).
+    o, h, l, c = frames([100.0] * 30)
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "leverage": 5.0, "min_size": 10.0, "slippage": 0.2}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", 0), ("X", 10), ("X", 20)]),
+                                     exits=mask(c.index, ["X"], [("X", 5), ("X", 15), ("X", 25)]),
+                                     notional_pct=2.0, risk_of="balance", init_cash=10_000, freq="D")
+    said = [str(item.message) for item in caught]
+    balance = round(float(np.asarray(pf.value()).ravel()[20]), 2)
+    negative = [text.split("but its ")[1].split(")")[0] for text in said if "funds only -" in text]
+    below_minimum = any("minimum tradeable size" in text for text in said)
+    present = bool(negative) or not below_minimum
+    return present, (f"the returned run's balance at the third entry is {balance}; warnings name "
+                     f"{negative or 'no negative buying power'}; a size below the minimum is "
+                     f"{'said' if below_minimum else 'not said'} (should be: no negative figure, and said)")
+
+
+# ---------------------------------------------------------------------------
+# 36. The re-sizing loop gives up when many entries are cut to the cash
+# ---------------------------------------------------------------------------
+
+def check_cut_entries_settle():
+    # A 5x spread bet that wins every trade (the price rises 1% a bar), six round trips, each entry
+    # worth 4.8 times the equity at its signal bar: inside 5x, but a levered account's loan is fixed
+    # at the start (40,000), so once the equity passes about 11,400 each entry is more than cash and
+    # loan can pay for, and vectorbt cuts it to the cash. Each such entry takes two of the loop's runs
+    # (asked afresh and cut, then asked at that ceiling), and the loop allows one per entry bar plus
+    # two. It must settle: twelve orders, not RuntimeError.
+    o, h, l, c = frames([100.0 * 1.01 ** k for k in range(35)])
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "leverage": 5.0, "min_size": 1.0, "increment": 1.0}
+    try:
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", bar) for bar in range(0, 30, 5)]),
+                                     exits=mask(c.index, ["X"], [("X", bar) for bar in range(3, 30, 5)]),
+                                     notional_pct=4.8, risk_of="equity", init_cash=10_000, freq="D")
+    except RuntimeError as error:
+        return True, f"raised RuntimeError: {str(error)[:60]}... (should settle: twelve orders)"
+    orders = len(pf.orders.records)
+    return orders != 12, f"{orders} orders (should be 12: six round trips)"
+
+
+# ---------------------------------------------------------------------------
+# 37. A run with entries cut to the cash rebuilds the whole run for each cut entry, ~30 ms of Python each
+# ---------------------------------------------------------------------------
+
+def check_cut_entries_build_the_run_once():
+    # Check 36's account over forty round trips: a 5x spread bet that wins every trade, each entry worth
+    # 4.8 times the equity at its signal bar, so once the account has grown every entry is cut to the
+    # cash, and the re-sizing loop makes one pass per cut entry. vectorbt's simulation of these 205 bars
+    # takes about a millisecond; a pass used to prepare the run twice and build a whole Portfolio around
+    # it, about 30 ms. The whole run should be built a fixed few times (the first run and the one it
+    # settles on), whatever the passes. Counted on Portfolio.from_signals, which builds every one; the
+    # kernel replays of the fix (vectorbtx.frontend.replay) are counted beside them, for the record.
+    import time
+    import vectorbtx.core.portfolio as module
+
+    o, h, l, c = frames([100.0 * 1.01 ** k for k in range(205)])
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "leverage": 5.0, "min_size": 1.0, "increment": 1.0}
+    keywords = dict(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                    entries=mask(c.index, ["X"], [("X", bar) for bar in range(0, 200, 5)]),
+                    exits=mask(c.index, ["X"], [("X", bar) for bar in range(3, 200, 5)]),
+                    notional_pct=4.8, risk_of="equity", init_cash=10_000, freq="D")
+    vbt.x.PortfolioBacktest(**keywords)                 # numba compiles on the first run
+    original = module.Portfolio.from_signals.__func__
+    built, replayed = [], []
+
+    def counted(cls, *args, **kwargs):
+        built.append(1)
+        return original(cls, *args, **kwargs)
+
+    try:
+        import vectorbtx.frontend.replay as replay
+    except ImportError:
+        replay = None
+    real_replay = getattr(replay, "replay", None)
+    module.Portfolio.from_signals = classmethod(counted)
+    if real_replay is not None:
+        replay.replay = lambda *args: replayed.append(1) or real_replay(*args)
+    try:
+        start = time.perf_counter()
+        vbt.x.PortfolioBacktest(**keywords)
+        whole = time.perf_counter() - start
+    finally:
+        module.Portfolio.from_signals = classmethod(original)
+        if real_replay is not None:
+            replay.replay = real_replay
+    return len(built) > 3, (f"the whole run built {len(built)} times for 40 entries, {len(replayed)} kernel "
+                            f"replays, {whole:.2f} s in all (should be built at most 3 times)")
+
+
+# ---------------------------------------------------------------------------
+# 38. A minimum commission on an exit is worked out from another order's size
+# ---------------------------------------------------------------------------
+
+def check_exit_commission_from_its_own_size():
+    # An unlevered share, a commission of 0.1% with a minimum of 5, half the starting cash per trade
+    # (notional_pct, so 49 shares at 100, 44 at 110.5...). Each order should pay max(0.1% of its own
+    # value, 5). The minimum is worked out before the run from the sizes frame (resolve_costs), whose
+    # value at an exit's bar is what an ENTRY there would be (fewer shares as the price rises), not the
+    # position the exit closes; so an exit of 49 shares at 105.1 pays 5.00, not 5.20.
+    # The same with a minimum of zero (which OpenStrategy Studio fills a blank with): the minimum
+    # path made every exit pay the 0.1% of the entry an exit's bar would have, 4.99 for 5.20.
+    o, h, l, c = frames([100.0 * 1.01 ** k for k in range(40)])
+    said = []
+    wrong_total = 0
+    for minimum in (0.0, 5.0):
+        instrument = {"mode": "equity", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                      "leverage": 1.0, "commission_pct": 0.001, "commission_min": minimum}
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", 0), ("X", 10), ("X", 20)]),
+                                     exits=mask(c.index, ["X"], [("X", 5), ("X", 15), ("X", 25)]),
+                                     notional_pct=0.5, init_cash=10_000, freq="D")
+        records = pf.orders.values
+        own = np.maximum(0.001 * records["size"] * records["price"], minimum)
+        wrong = int(np.sum(~np.isclose(records["fees"], own, rtol=1e-9, atol=1e-9)))
+        wrong_total += wrong
+        said.append(f"minimum {minimum:g}: {wrong} of {len(records)} orders pay another order's commission "
+                    f"(paid {np.round(records['fees'], 2).tolist()}, own {np.round(own, 2).tolist()})")
+    return wrong_total > 0, "; ".join(said)
+
+
+# ---------------------------------------------------------------------------
+# 39. A run that never trades has a Sharpe and a Sortino ratio of +inf
+# ---------------------------------------------------------------------------
+
+def check_flat_account_ratios():
+    # No entry, so the account never moves: its returns are all 0, and 0 / 0 has no value. vectorbt's
+    # sharpe_ratio_1d_nb and sortino_ratio_1d_nb return +inf whenever the spread is 0, whatever the mean.
+    o, h, l, c = frames([100.0 + 0.5 * k for k in range(60)])
+    none = mask(c.index, ["X"], [])
+    pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": EQUITY}, entries=none, exits=none,
+                                 init_cash=10_000, freq="D")
+    sharpe = float(np.asarray(pf.sharpe_ratio()).ravel()[0])
+    sortino = float(np.asarray(pf.sortino_ratio()).ravel()[0])
+    trades = int(np.asarray(pf.trades.count()).ravel()[0])
+    present = np.isinf(sharpe) or np.isinf(sortino)
+    return present, f"{trades} trades; sharpe_ratio() {sharpe}, sortino_ratio() {sortino} (expected NaN for both)"
+
+
+# ---------------------------------------------------------------------------
+# 40. A share of a balance below zero is a negative size, and vectorbt raises ValueError
+# ---------------------------------------------------------------------------
+
+def check_share_of_a_negative_balance():
+    # A 5x spread bet, each entry worth 4.8 times the balance at its signal bar. The first trade gaps
+    # down 30% (bars 1 to 3) and loses about 144% of the account: its balance is -4,400 from then on,
+    # so the second entry (bar 5) should not be placed. But the re-sizing loop's first run sizes every
+    # entry from the starting cash, so in that run the second trade is open and rises 5% a bar. The
+    # next pass sizes from that run's account: at the exit's bar the balance is -4,400 while the
+    # equity is well above zero, so 4.8 x the balance is a negative size, the leverage cap (from the
+    # positive equity) leaves it, and vectorbt raises "Negative size is not allowed" on the exit's bar.
+    # It should settle: one round trip (two orders), the account below zero, no second entry.
+    o, h, l, c = frames([100.0, 100.0, 100.0, 70.0, 70.0, 70.0] + [70.0 * 1.05 ** k for k in range(1, 12)])
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "leverage": 5.0, "min_size": 1.0, "increment": 1.0}
+    try:
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", 0), ("X", 5)]),
+                                     exits=mask(c.index, ["X"], [("X", 3), ("X", 15)]),
+                                     notional_pct=4.8, risk_of="balance", init_cash=10_000, freq="D")
+    except ValueError as error:
+        return True, f"raised ValueError: {str(error)[:60]} (should settle: two orders, no second entry)"
+    orders = len(pf.orders.records)
+    return orders != 2, f"{orders} orders (should be 2: the first round trip only)"
+
+
+# ---------------------------------------------------------------------------
+# 41. A levered account's buying power is a loan fixed at the start, so a grown account cannot use its leverage
+# ---------------------------------------------------------------------------
+
+def check_grown_account_funds_its_leverage():
+    # A 10x spread bet on 10,000, each entry worth 5x the equity at its signal bar. The engine is handed
+    # init_cash x leverage = 100,000 of cash, a loan of 90,000 fixed for the whole run. The first entry
+    # (5 x 10,000 = 50,000, 500 a point at 100) doubles the price, so the account is worth 60,000. The
+    # second entry should be 5 x 60,000 = 300,000 (1,500 a point at 200), well inside the 10x limit
+    # (600,000); but the engine's cash is the loan plus the account, 150,000, so vectorbt cuts it to 750
+    # a point (2.5x), with no warning. Holding costs are left out here (no rates); the engine's cash does
+    # not see them either, since they are charged after the simulation.
+    o, h, l, c = frames([100.0, 100.0] + [100.0 + 25.0 * k for k in range(1, 5)] + [200.0] * 6)
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "slippage": 0.0, "leverage": 10.0, "min_size": 1.0, "increment": 1.0}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", 0), ("X", 7)]),
+                                     exits=mask(c.index, ["X"], [("X", 5), ("X", 10)]),
+                                     notional_pct=5.0, risk_of="equity", init_cash=10_000, freq="D")
+    records = pf.orders.records
+    sizes = [float(size) for size in records["size"]]
+    said = [str(item.message)[:80] for item in caught if "cash" in str(item.message).lower()]
+    second = sizes[2] if len(sizes) > 2 else float("nan")
+    return (abs(second - 1500.0) > 1e-6,
+            f"order sizes {sizes} (the second entry should be 1500: 5 x an equity of 60,000 at 200); "
+            f"warnings about the cash: {said or 'none'}")
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -479,6 +1117,34 @@ CHECKS = [
     (17, "Borrowing counted without a loan; the replay path funds no leverage", check_borrowing_without_a_loan),
     (18, "The borrow fee on a direct short (feature)", check_borrow_fee),
     (19, "A per-instrument financing value is ignored in silence", check_financing_field_says_it_is_unused),
+    (21, "min_trade never skips a trade: it compares targets, not holdings", check_min_trade_skips_small_trades),
+    (22, "The sizing warnings measure every bar, not the bars an order is placed on",
+     check_sizing_warnings_measure_order_bars),
+    (23, "Risk sizing from the balance or the equity (required feature)", check_risk_sizing_from_equity),
+    (24, "Bought outright and FX spot default to 2x leverage", check_unlevered_defaults),
+    (25, "An index's point size defaults to 0.01; a share priced in pence is not recognised",
+     check_point_size_defaults),
+    (26, "Stops and targets as a vector (per symbol, per bar), and risk sized from them (required feature)",
+     check_stops_that_vary),
+    (27, "A trailing stop in points widens as the price rises", check_trailing_points_stay_a_distance),
+    (28, "Risk sizing without a stop, from the leverage (required feature)", check_risk_sizing_without_a_stop),
+    (29, "Points on a converted price are applied in the account currency", check_points_on_converted_prices),
+    (30, "notional_pct: a position worth a share of the account (issue 23, optional)", check_notional_pct),
+    (31, "Stops and targets at a price level (issue 26, item 4)", check_stop_levels),
+    (32, "The leverage cap (max_size) cuts the orders that close a position", check_cap_cuts_closing_orders),
+    (33, "The leverage cap is leverage x the starting cash, not the account", check_cap_from_the_account),
+    (34, "An order cut down to what is funded is not rounded to the increment", check_cut_orders_on_the_increment),
+    (35, "The re-sizing loop re-issues the warnings of the run before the one it returns",
+     check_warnings_describe_the_returned_run),
+    (36, "The re-sizing loop gives up (RuntimeError) when many entries are cut to the cash", check_cut_entries_settle),
+    (37, "A run with entries cut to the cash rebuilds the whole run for each cut entry, ~30 ms of Python each",
+     check_cut_entries_build_the_run_once),
+    (38, "A minimum commission on an exit is worked out from another order's size", check_exit_commission_from_its_own_size),
+    (39, "A run that never trades has a Sharpe and a Sortino ratio of +inf", check_flat_account_ratios),
+    (40, "A share of a balance below zero is a negative size, and vectorbt raises ValueError",
+     check_share_of_a_negative_balance),
+    (41, "A levered account's buying power is a loan fixed at the start, so a grown account cannot use its leverage",
+     check_grown_account_funds_its_leverage),
 ]
 
 

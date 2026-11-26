@@ -22,7 +22,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import plotly_themes      # registers its themes in plotly's template registry on import
 
-from . import engine, store
+from . import engine, store, style
 from .compile import compile_features
 from .optimise import periods_per_year
 from .spec import spec_hash
@@ -31,17 +31,72 @@ from .spec import spec_hash
 # Themes
 # ---------------------------------------------------------------------------
 
+# The chart theme that matches the page theme (style.py): "Match the page theme" in the
+# pickers, and the default. It is a template in plotly's registry like any other, so
+# finish() and the figure caches treat it as just another name.
+PAGE_THEME = "page"
 PLAIN_THEMES = ["plotly_white", "plotly_dark"]
 SOBER_THEMES = ["financial_times", "tableau", "nord", "dracula", "nasa", "blueprint", "powerbi"]
 GLOW_THEMES = ["star_wars", "cyberpunk", "synthwave"]
 
 
 def theme_groups():
-    """The selector's three groups, read from the registry at runtime."""
+    """The selector's groups, read from the registry at runtime."""
     registered = list(plotly_themes.registered_themes())
-    return {"Plain": PLAIN_THEMES,
+    return {"Page": [PAGE_THEME],
+            "Plain": PLAIN_THEMES,
             "Sober": [name for name in SOBER_THEMES if name in registered],
             "Playful": [name for name in registered if name not in SOBER_THEMES]}
+
+
+def page_template(look):
+    """The "page" chart theme for a page theme (style.load_theme).
+
+    The page theme's own chart theme when it names one (paper uses financial_times,
+    whose paper colour is the page's). Otherwise one drawn from its colours and fonts on
+    plotly's plain light or dark template, with a transparent background so the chart
+    shows the card the stylesheet draws round it.
+    """
+    table, studio = look["theme"], look["studio"]
+    if studio["chart_theme"] != PAGE_THEME:
+        return pio.templates[studio["chart_theme"]]
+    template = go.layout.Template(pio.templates["plotly_dark" if table["base"] == "dark" else "plotly_white"])
+    axis = {"gridcolor": table["borderColor"], "linecolor": table["borderColor"], "zerolinecolor": table["borderColor"],
+            "tickfont": {"color": studio["muted"]}}
+    template.layout.update(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": table.get("font", "sans-serif"), "color": table["textColor"]},
+        title={"font": {"family": table.get("headingFont", table.get("font", "sans-serif"))}},
+        xaxis=axis, yaxis=axis,
+        legend={"bgcolor": "rgba(0,0,0,0)"},
+        hoverlabel={"bgcolor": studio["surface"], "bordercolor": table["borderColor"],
+                    "font": {"color": table["textColor"]}},
+        # Losses in the negative colour, gains in the positive one (the monthly heatmap).
+        colorscale={"diverging": [[0, studio["negative"]], [0.5, table["backgroundColor"]], [1, studio["positive"]]]},
+    )
+    if table.get("chartCategoricalColors"):
+        template.layout.colorway = table["chartCategoricalColors"]
+    return template
+
+
+# The page theme the "page" chart theme was last built from.
+_PAGE_LOOK = {"look": None}
+
+
+def use_page_theme(look):
+    """Point the "page" chart theme at a page theme. ui.boot calls it on every run with the page's own.
+
+    Rebuilt only when the page theme changes: building a template takes about 40 ms, which
+    every widget interaction would otherwise pay.
+    """
+    if look != _PAGE_LOOK["look"]:
+        pio.templates[PAGE_THEME] = page_template(look)
+        _PAGE_LOOK["look"] = look
+
+
+# Registered at import from the packaged default, so a caller outside the app (selfcheck,
+# tests, a script) can draw with "page" too. In the app ui.boot replaces it.
+use_page_theme(style.load_theme(style.default_file()))
 
 
 def font_css():
@@ -59,6 +114,18 @@ def finish(fig, theme, glow=False):
                       legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0})
     if glow:
         plotly_themes.add_glow(fig)
+    return fig
+
+
+def log_scale(fig):
+    """The figure's value axis on a log scale, so equal percentage moves are the same height: a fall from
+    2,000,000 to 1,000,000 looks as big as one from 2,000 to 1,000, which a long history needs to be read.
+
+    Only the main y axis (a second one, such as the rolling figure's volatility, keeps its own). ⚠️ A log
+    axis cannot show zero or less: plotly leaves such points out, so an account that went below zero shows
+    a gap there. The page says so beside the checkbox.
+    """
+    fig.update_layout(yaxis_type="log")
     return fig
 
 
@@ -106,7 +173,12 @@ def _jsonable(value):
 
 
 def stats_tables(pf):
-    """{"portfolio", "trades", "returns"} x {"all", "mt5", "vectorbtx"} as {label: value} dicts.
+    """{"portfolio", "trades", "returns"} x {"all"} as {label: value} dicts.
+
+    Every metric, untagged: the MT5 and vectorbtX tags each picked a subset of these, and the
+    Backtest results page shows them all (the owner's call, 19 November 2026), so they are no
+    longer computed (six fewer stats calls a run). The "all" level stays: saved runs and the
+    comparison table read results["stats"][table]["all"].
 
     ⚠️ absolute_drawdown and recovery_factor need a RESOLVED init_cash: pass
     pf.get_init_cash(), not the raw argument. Benchmark-relative statistics (beta,
@@ -123,18 +195,12 @@ def stats_tables(pf):
         pf = pf.regroup(True)
     settings = {"init_cash": pf.get_init_cash()}
     out = {}
-    for tag in ("all", "mt5", "vectorbtx"):
-        keywords = {} if tag == "all" else {"tags": tag}
-        tables = {"portfolio": pf.stats(settings=settings, **keywords),
-                  "trades": pf.trades.stats(**keywords),
-                  "returns": pf.returns_stats(**keywords)}
-        for name, table in tables.items():
-            # A tag that no metric carries gives None, not an empty table: vectorbt 1.1.0's
-            # returns_stats has no MT5 metrics, so returns_stats(tags="mt5") is None.
-            values = {}
-            if table is not None:
-                values = {str(label): _jsonable(value) for label, value in table.items()}
-            out.setdefault(name, {})[tag] = values
+    tables = {"portfolio": pf.stats(settings=settings), "trades": pf.trades.stats(), "returns": pf.returns_stats()}
+    for name, table in tables.items():
+        values = {}
+        if table is not None:
+            values = {str(label): _jsonable(value) for label, value in table.items()}
+        out[name] = {"all": values}
     return out
 
 
@@ -262,6 +328,45 @@ def extract_results(run, benchmark=False):
     return results
 
 
+# What to change in the Studio for each warning vectorbtX gives, by a phrase the warning
+# contains. vectorbtX names its own arguments (raise_reject=, leverage=), which the Studio
+# sets on its own pages or not at all, so its advice alone leaves a Studio user stuck.
+# ⚠️ Matched on vectorbtX's wording: tests/test_engine.py checks the first two against a
+# real run, so a reworded warning fails a test instead of losing its hint.
+WARNING_HINTS = {
+    "funded buying power": "In the Studio: the Build page's Risk tab shows the largest trade against what the "
+                           "account funds (cash times leverage). Raise the leverage there, lower the risk or the "
+                           "amount, or widen the stop. To skip such trades instead of cutting them down, choose "
+                           "Skip the trade under 'When a trade is bigger than the account can fund'.",
+    "minimum tradeable size": "In the Studio: raise the risk or the amount on the Build page's Risk tab, tighten the "
+                              "stop, or set min_size in the instrument grid (Setup tab) to your broker's.",
+    # vectorbtX's words for an entry sized as a share of an account that has lost everything (docs/UPSTREAM.md 40).
+    "account at or below zero": "In the Studio: a trade before these lost more than the account, so the strategy "
+                                "stopped trading. Lower the risk or the share on the Build page's Risk tab, widen "
+                                "the stop, or lower the leverage in the instrument grid (Setup tab).",
+    "borrowed the securities for free": "In the Studio: set borrow_rate in the instrument grid (Build page, Setup "
+                                        "tab), or 0 if the borrow really is free.",
+    "Carry skipped": "In the Studio: name both base_currency and quote_currency in the instrument grid (Build page, "
+                     "Setup tab).",
+    # vectorbtX's leverage warning says "usual maximum" since 1de5744 (bought outright and FX spot default to 1x).
+    "usual maximum": "In the Studio: each instrument's leverage is set in the leverage column of the instrument grid "
+                     "(Build page, Setup tab).",
+    "do not bracket close": "In the Studio: the Data page's check on import lists the bars whose high or low is "
+                            "inside the open or close.",
+    "pip convention": "In the Studio: set point_size in the instrument grid (Build page, Setup tab).",
+    "have no FX rate": "In the Studio: store the FX dataset over the whole backtest period (Data page).",
+}
+
+
+def warning_hints(notes):
+    """[(vectorbtX's warning, the Studio's hint or None)] for the Backtest results page."""
+    out = []
+    for note in notes:
+        hint = next((text for phrase, text in WARNING_HINTS.items() if phrase in note), None)
+        out.append((note, hint))
+    return out
+
+
 def save_run(data_dir, results, spec, settings, fingerprint):
     """Write results under runs/<run_id>/ and index them. Returns the run folder."""
     stamp = datetime.now(timezone.utc)
@@ -298,12 +403,14 @@ def load_results(run_dir):
     return results
 
 
-def stats_frame(results, table, tag="all"):
-    """One stats table as a two-column frame of strings, ready to display."""
+def stats_frame(results, table):
+    """One stats table, every metric, as a two-column frame of strings, ready to display."""
     rows = []
-    for label, value in results["stats"][table][tag].items():
+    for label, value in results["stats"][table]["all"].items():
         if isinstance(value, float):
-            text = f"{value:,.4g}" if abs(value) < 1e6 else f"{value:,.0f}"
+            # Money and counts whole, with separators (10,000, not the 1e+04 that ".4g" gave); the rest to 4 figures.
+            whole = abs(value) >= 1e4 or (value.is_integer() and abs(value) < 1e15)
+            text = f"{value:,.0f}" if whole else f"{value:,.4g}"
         else:
             text = "" if value is None else str(value)
         rows.append({"Metric": label, "Value": text})
@@ -565,27 +672,35 @@ def _has_trades(results):
     return len(results.get("trades", [])) > 0
 
 
-# name: label, function, whether it is a line figure (glow applies), and when it is available.
+# name: label, function, whether it is a line figure (glow applies), when it is available, whether it
+# runs along the dates (so fig_split can mark where an optimisation's held-back history starts), and
+# whether it can be drawn on a log scale (log_scale: a value or a price that stays above zero, not a
+# drawdown, a return or a count).
 FIGURES = {
-    "equity": {"label": "Equity vs benchmark", "fn": fig_equity, "lines": True, "when": lambda r: True},
-    "drawdown": {"label": "Underwater drawdown", "fn": fig_drawdown, "lines": True, "when": lambda r: True},
+    "equity": {"label": "Equity vs benchmark", "fn": fig_equity, "lines": True, "when": lambda r: True,
+               "dates": True, "log": True},
+    "drawdown": {"label": "Underwater drawdown", "fn": fig_drawdown, "lines": True, "when": lambda r: True,
+                 "dates": True},
     "monthly": {"label": "Monthly returns", "fn": fig_monthly, "lines": False, "when": lambda r: True},
-    "rolling": {"label": "Rolling metrics", "fn": fig_rolling, "lines": True, "when": lambda r: True},
-    "price": {"label": "Price chart with trades", "fn": fig_price, "lines": False, "when": lambda r: True},
-    "trades": {"label": "Trade PnL", "fn": fig_trades, "lines": False, "when": _has_trades},
+    "rolling": {"label": "Rolling metrics", "fn": fig_rolling, "lines": True, "when": lambda r: True,
+                "dates": True},
+    "price": {"label": "Price chart with trades", "fn": fig_price, "lines": False, "when": lambda r: True,
+              "dates": True, "log": True},
+    "trades": {"label": "Trade PnL", "fn": fig_trades, "lines": False, "when": _has_trades, "dates": True},
     "distribution": {"label": "Return distribution", "fn": fig_distribution, "lines": False, "when": _has_trades},
     "mae_mfe": {"label": "MAE and MFE", "fn": fig_mae_mfe, "lines": False, "when": _has_trades},
     "monte_carlo": {"label": "Monte Carlo fan", "fn": fig_monte_carlo, "lines": False,
-                    "when": lambda r: len(r.get("trades", [])) > 1},
+                    "when": lambda r: len(r.get("trades", [])) > 1, "log": True},
     "exposure": {"label": "Exposure and leverage", "fn": fig_exposure, "lines": True,
-                 "when": lambda r: "exposure" in r},
+                 "when": lambda r: "exposure" in r, "dates": True},
     "holding_costs": {"label": "Holding costs", "fn": fig_holding_costs, "lines": True,
-                      "when": lambda r: "holding_costs" in r},
+                      "when": lambda r: "holding_costs" in r, "dates": True},
     "weights": {"label": "Portfolio weights", "fn": fig_weights, "lines": False,
-                "when": lambda r: "asset_value" in r},
+                "when": lambda r: "asset_value" in r, "dates": True},
     "contribution": {"label": "Per-asset return and correlation", "fn": fig_contribution, "lines": False,
                      "when": lambda r: "column_returns" in r},
-    "drift": {"label": "Drift report", "fn": fig_drift, "lines": True, "when": lambda r: "drift" in r},
+    "drift": {"label": "Drift report", "fn": fig_drift, "lines": True, "when": lambda r: "drift" in r,
+              "dates": True},
 }
 
 
@@ -712,6 +827,266 @@ def fig_walk_forward(returns, theme, glow=False):
     return finish(fig, theme, glow)
 
 
+# The parts of a best trial's backtest, as the Optimiser results page names them.
+IN_SAMPLE = "In sample (searched)"
+OUT_OF_SAMPLE = "Out of sample (held back)"
+WHOLE_PERIOD = "Whole period"
+CONTINUING = "Held back, inside the whole run"
+# What split_backtest returns: a saved backtest of another version is run again (the page checks).
+SPLIT_BACKTEST_VERSION = 2
+
+
+def shown_number(value, how):
+    """One number of a backtest for a table: "—" when there is none (a run with no trades has no Sharpe ratio).
+
+    ⚠️ vectorbt 1.1.0 gives a Sharpe and a Sortino ratio of +inf whenever the returns do not vary, so a run
+    that never traded (a flat account: 0 / 0) reads as infinitely good (docs/UPSTREAM.md, issue 39). A
+    profit factor is +inf when no trade lost, which is a real answer, and says so.
+    """
+    if value is None or not np.isfinite(value):
+        if how == "factor" and value is not None and value > 0:
+            return "no losing trades"
+        return "—"
+    return {"pct": f"{value:.1%}", "count": f"{int(value):,}", "money": f"{value:,.0f}"}.get(how, f"{value:.4g}")
+
+
+def _numbers(extras, objective, metric, start, end, start_value):
+    """One column of split_backtest's table, formatted: the dates, the starting value and the usual numbers.
+
+    The objective is marked on its own row; when it is one of the usual numbers, that row is the marked one,
+    rather than the number twice.
+    """
+    numbers = {"Total return": shown_number(extras["total_return"], "pct"),
+               "Max drawdown": shown_number(extras["max_drawdown"], "pct"),
+               "Sharpe ratio": shown_number(extras["sharpe"], "ratio"),
+               "Trades": shown_number(extras["n_trades"], "count"),
+               "Profit factor": shown_number(extras["profit_factor"], "factor")}
+    values = {"From": str(start)[:10], "To": str(end)[:10], "Starting value": shown_number(start_value, "money")}
+    if metric is not None and metric["label"] in numbers:
+        numbers = {(f"{name} (the objective)" if name == metric["label"] else name): value
+                   for name, value in numbers.items()}
+    elif metric is not None:
+        values[f"{metric['label']} (the objective)"] = shown_number(objective, "ratio")
+    values.update(numbers)
+    return values
+
+
+def continuing_extras(pf, split):
+    """trial_extras for the held-back part of a run over the whole history, as that one account lived it.
+
+    It starts from what the account was worth at the last bar before `split` (which the in-sample years
+    grew or shrank), so its trades are the ones the whole-history chart draws there; the out-of-sample
+    column starts again from the starting cash, as the job tested it. The two can differ a great deal:
+    a risk-sized account that has grown places entries a new one could not (the owner's JMA jobs of 25
+    November 2026, below the minimum stake from 10,000 after 2021, but not from the 57,000 the run had by
+    then). Returns are the account's value from bar to bar, as vectorbt measures them, and the Sharpe
+    ratio is vectorbt's own, on the same frequency; a trade counts here when it was entered on or after
+    `split`.
+    """
+    value = _total(pf.value())
+    position = int(value.index.get_indexer([split])[0])
+    start_value = float(value.iloc[position - 1]) if position > 0 else float(np.sum(pf.get_init_cash()))
+    part = value.iloc[position:]
+    returns = part.pct_change()
+    returns.iloc[0] = part.iloc[0] / start_value - 1
+    path = pd.concat([pd.Series([start_value]), part.reset_index(drop=True)])
+    records = pf.trades.records
+    entered = records[records["entry_idx"] >= position]
+    pnl = np.asarray(entered["pnl"], dtype=float)
+    losses = -pnl[pnl < 0].sum()
+    return {"total_return": float(part.iloc[-1] / start_value - 1),
+            "max_drawdown": float(-(path / path.cummax() - 1).min()),
+            "sharpe": float(returns.vbt.returns(freq=pf.wrapper.freq).sharpe_ratio()),
+            "n_trades": int(len(entered)),
+            "profit_factor": float(pnl[pnl > 0].sum() / losses) if losses > 0 else (np.inf if len(pnl) else np.nan),
+            "start_value": start_value}
+
+
+def split_backtest(job, frames, params, settings):
+    """An optimisation's best trial as a backtest: the whole history, and its numbers in sample,
+    out of sample and over the whole period, each with its own tear sheet.
+
+    In sample and out of sample are runs of their own on each window, each starting from the
+    starting cash, exactly as the optimiser scored the search and the held-back check (window=
+    slices the run after compiling on the full history, so indicators are warm and nothing looks
+    ahead): their numbers match the job's. The whole period is one account from the first bar to
+    the last. A job with nothing held back has the whole period only.
+
+    The table has a fourth column when something was held back: the held-back part of the whole
+    run (continuing_extras), which is what the whole-history chart draws to the right of the split.
+    ⚠️ Without it the chart and the table disagreed with no word why (the owner, 25 November 2026):
+    the chart traded in the held-back years while the out-of-sample column made no trade at all,
+    because a new account of 10,000 sized every entry below the minimum stake there.
+
+    Returns {"version", "results": extract_results of the whole run (with buy and hold),
+    "windows": {part: extract_results of that part's own run}, "split": the first held-back bar
+    or None, "table": the numbers by part, formatted for the page}. Each part's vectorbtX
+    warnings are in its results' meta, as a backtest's are.
+    """
+    from .optimise import METRICS, split_window, trial_extras
+
+    keywords = {"data_dir": job.get("data_dir"), "offline": bool(settings.get("offline")),
+                "static_rate": (settings.get("vectorbtx") or {}).get("static_rate")}
+    whole = engine.run_backtest(job["spec"], frames, params=params, **keywords)
+    windows = {WHOLE_PERIOD: None}
+    split = None
+    if job.get("split"):
+        train, test = split_window(frames["close"].index, float(job["split"]["train_fraction"]))
+        windows = {IN_SAMPLE: train, OUT_OF_SAMPLE: test, WHOLE_PERIOD: None}
+        split = test[0]
+    metric = METRICS.get(job["metric"])
+    columns = {}
+    shown = {}
+    for label, window in windows.items():
+        run = whole if window is None else engine.run_backtest(job["spec"], frames, params=params, window=window,
+                                                               **keywords)
+        pf = run["pf"]
+        index = pf.wrapper.index
+        objective = metric["fn"](pf) if metric is not None else None
+        columns[label] = _numbers(trial_extras(pf), objective, metric, index[0], index[-1],
+                                  float(np.sum(pf.get_init_cash())))
+        shown[label] = extract_results(run, benchmark=True)
+    if split is not None:
+        extras = continuing_extras(whole["pf"], split)
+        # The objective of a part of a run is known only when it is one of the usual numbers.
+        objective = extras.get(job["metric"]) if job["metric"] in extras else None
+        columns[CONTINUING] = _numbers(extras, objective, metric, split, frames["close"].index[-1],
+                                       extras["start_value"])
+    return {"version": SPLIT_BACKTEST_VERSION, "results": shown[WHOLE_PERIOD], "windows": shown, "split": split,
+            "table": pd.DataFrame(columns)}
+
+
+def random_periods(job, frames, params, settings, count=20, length=0.4, within="whole", seed=0, progress=None):
+    """The best settings run on `count` periods drawn at random, each from the starting cash, as a trial is.
+
+    Each period is `length` of the history it is drawn from (`within`: "whole", "searched" or "held_back",
+    the job's own split), and starts at a bar drawn at random, so periods may overlap. As in the search,
+    the signals are compiled on the whole history and only the run is sliced (window=), so indicators are
+    warm and nothing looks ahead. Each period is scored as a trial is (optimise.score: the objective, the
+    usual numbers, the constraints and vectorbtX's notes), plus its annualised return, which compares
+    across lengths where a total return does not. `progress(done, count)` is called after each.
+
+    Returns {"periods": a DataFrame, one row per period ("period", "from", "to", "annualised_return" and
+    score's keys), "whole": the same numbers for the whole history in one run, "bars": each period's length}.
+    """
+    from .optimise import _scalar, score, split_window
+
+    index = frames["close"].index
+    low, high = 0, len(index)
+    if within != "whole" and job.get("split"):
+        cut = int(index.get_indexer([split_window(index, float(job["split"]["train_fraction"]))[1][0]])[0])
+        low, high = (0, cut) if within == "searched" else (cut, len(index))
+    bars = min(high - low, max(2, int(round(length * (high - low)))))
+    rng = np.random.default_rng(seed)
+    starts = sorted(int(start) for start in rng.integers(low, high - bars + 1, size=count))
+    keywords = {"data_dir": job.get("data_dir"), "offline": bool(settings.get("offline")),
+                "static_rate": (settings.get("vectorbtx") or {}).get("static_rate")}
+    run = engine.run_backtest(job["spec"], frames, params=params, **keywords)
+    whole = {key: value for key, value in score(run["pf"], job, params).items() if key != "params"}
+    whole["annualised_return"] = _scalar(run["pf"].annualized_return(group_by=True))
+    rows = []
+    for number, start in enumerate(starts):
+        window = (index[start], index[start + bars - 1])
+        row = {"period": number + 1, "from": window[0], "to": window[1]}
+        try:
+            run = engine.run_backtest(job["spec"], frames, params=params, window=window, **keywords)
+        except engine.backtest_error() as error:
+            # As the search records a trial vectorbtX rejects: no numbers, and why.
+            row.update(objective=np.nan, error=f"could not run: {error}")
+        else:
+            found = score(run["pf"], job, params, notes=run["warnings"])
+            row.update({key: value for key, value in found.items() if key != "params"})
+            row["annualised_return"] = _scalar(run["pf"].annualized_return(group_by=True))
+        rows.append(row)
+        if progress is not None:
+            progress(number + 1, count)
+    return {"periods": pd.DataFrame(rows), "whole": whole, "bars": bars}
+
+
+# The numbers fig_periods draws, one panel each: (column, label, format). The annualised return, not the
+# total: every period has the same length, but the whole history's total return is over a longer one.
+PERIOD_NUMBERS = [("annualised_return", "Annualised return", "pct"), ("max_drawdown", "Max drawdown", "pct"),
+                  ("sharpe", "Sharpe ratio", "ratio"), ("n_trades", "Trades", "count")]
+
+
+def fig_periods(periods, reference, theme, metric=None):
+    """A box per number over the random periods (random_periods), every period a point beside it.
+
+    One panel per number, each on its own axis (a drawdown and a trade count share no scale). `reference`:
+    {column: value} for the whole history, drawn as a dashed line where it compares (not the trade count,
+    which grows with the length). `metric`: (column, label, format) of the objective, a panel of its own
+    first. Periods with no trade are left out of the boxes: their drawdown of 0 and their missing Sharpe
+    ratio describe no trading, not the strategy (the page counts them).
+    """
+    from plotly.subplots import make_subplots
+
+    numbers = list(PERIOD_NUMBERS)
+    if metric is not None:
+        numbers.insert(0, tuple(metric))
+    traded = periods[periods["n_trades"].fillna(0) > 0] if "n_trades" in periods else periods.iloc[0:0]
+    fig = make_subplots(rows=1, cols=len(numbers), subplot_titles=[label for _, label, _ in numbers],
+                        horizontal_spacing=0.06)
+    template = pio.templates[theme] if theme in pio.templates else None
+    muted = (template.layout.font.color if template is not None and template.layout.font.color else None) or "#888888"
+    # One series, so one colour in every panel: the theme's first (it would otherwise give each panel its next).
+    colour = (list(template.layout.colorway or []) if template is not None else []) or ["#636efa"]
+    for number, (column, label, how) in enumerate(numbers, start=1):
+        values = traded[column].astype(float) if column in traded else pd.Series(dtype=float)
+        values = values[np.isfinite(values)]
+        hover = [f"Period {int(period)}: {str(start)[:10]} to {str(end)[:10]}" for period, start, end in
+                 zip(traded.loc[values.index, "period"], traded.loc[values.index, "from"],
+                     traded.loc[values.index, "to"])]
+        fig.add_trace(go.Box(y=values, name=label, boxpoints="all", jitter=0.4, pointpos=-1.6,
+                             marker={"size": 8, "opacity": 0.75, "color": colour[0]},
+                             line={"width": 2, "color": colour[0]}, text=hover,
+                             hovertemplate="%{text}<br>" + label + ": %{y" + (":.1%" if how == "pct" else ":.3g")
+                                           + "}<extra></extra>", showlegend=False),
+                      row=1, col=number)
+        if how == "pct":
+            fig.update_yaxes(tickformat=".0%", row=1, col=number)
+        fig.update_xaxes(showticklabels=False, row=1, col=number)
+        value = (reference or {}).get(column)
+        if column != "n_trades" and value is not None and np.isfinite(value):
+            fig.add_hline(y=value, line_dash="dash", line_width=1.5, line_color=muted, row=1, col=number)
+            fig.add_annotation(text="Whole history", x=0.5, xref=f"x{'' if number == 1 else number} domain",
+                               y=value, yref=f"y{'' if number == 1 else number}", yanchor="bottom",
+                               showarrow=False, font={"color": muted, "size": 11})
+    fig.update_layout(title=f"The best settings over {len(periods)} random periods", height=420)
+    return finish(fig, theme)
+
+
+def mark_split(fig, split, end, theme):
+    """A dashed line where the held-back data starts, that part shaded and both sides labelled.
+
+    The colour is the chart theme's own text colour, so it reads on any theme. ⚠️ No annotation on
+    add_vline / add_vrect: plotly averages the two ends to place one, which fails on dates.
+    """
+    template = pio.templates[theme] if theme in pio.templates else None
+    colour = (template.layout.font.color if template is not None and template.layout.font.color else None) or "#888888"
+    fig.add_vrect(x0=split, x1=end, fillcolor=colour, opacity=0.06, line_width=0, layer="below")
+    fig.add_vline(x=split, line_dash="dash", line_width=1.5, line_color=colour)
+    for text, anchor in (("In sample ◂ ", "right"), (" ▸ Out of sample (held back)", "left")):
+        fig.add_annotation(x=split, y=1, yref="paper", yanchor="top", xanchor=anchor, text=text, showarrow=False,
+                           font={"color": colour, "size": 12})
+    return fig
+
+
+def fig_split(results, split, theme, glow=False, view="equity", log=False, **options):
+    """A tear-sheet figure (FIGURES) with the held-back part marked (mark_split) when it runs along the dates,
+    and on a log scale when `log` and the figure can be (FIGURES[view]["log"]; any other ignores it).
+
+    A figure across trades or returns (the distribution, MAE and MFE, Monte Carlo) has no dates to mark,
+    and neither has a run with nothing held back (split None).
+    """
+    fig = FIGURES[view]["fn"](results, theme, glow and FIGURES[view]["lines"], **options)
+    for item in fig if isinstance(fig, tuple) else (fig,):
+        if split is not None and FIGURES[view].get("dates"):
+            mark_split(item, split, results["series"].index[-1], theme)
+        if log and FIGURES[view].get("log"):
+            log_scale(item)
+    return fig
+
+
 def fig_compare(curves, theme, glow=False):
     """Equity curves of several saved runs, each rebased to 1."""
     fig = go.Figure()
@@ -726,6 +1101,8 @@ def fig_compare_backends(trials, direction, theme):
     from .optimise import best_so_far
 
     search = trials[trials["phase"] == "search"]
+    from .optimise import search_label
+
     fig = go.Figure()
     for backend, runs in search.groupby("backend", sort=False):
         curves = [best_so_far(run.sort_values("run_trial")["objective"], direction).reset_index(drop=True)
@@ -736,9 +1113,9 @@ def fig_compare_backends(trials, direction, theme):
                                  legendgroup=backend))
         fig.add_trace(go.Scatter(x=x, y=table.min(axis=1), mode="lines", line={"width": 0}, fill="tonexty",
                                  opacity=0.2, showlegend=False, legendgroup=backend))
-        fig.add_trace(go.Scatter(x=x, y=table.median(axis=1), mode="lines", name=f"{backend} (median of {table.shape[1]})",
-                                 legendgroup=backend))
-    fig.update_layout(title="Best value so far, by backend", xaxis_title="Trial", yaxis_title="Best objective")
+        fig.add_trace(go.Scatter(x=x, y=table.median(axis=1), mode="lines",
+                                 name=f"{search_label(backend)} (median of {table.shape[1]})", legendgroup=backend))
+    fig.update_layout(title="Best value so far, by search", xaxis_title="Trial", yaxis_title="Best objective")
     return finish(fig, theme)
 
 
@@ -764,56 +1141,55 @@ def _dot(text):
     return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
-def _rule_references(node, found):
-    """Every feature, price, pattern and filter a rule tree reads."""
-    if not isinstance(node, dict):
-        return found
-    for key in ("all", "any"):
-        for child in node.get(key, []):
-            _rule_references(child, found)
-    if "not" in node:
-        _rule_references(node["not"], found)
-    if "pattern" in node:
-        found.add(("pattern", f"{node['pattern']} ({node.get('side', 'either')})"))
-    if "filter" in node:
-        found.add(("filter", node["filter"].replace("_", " ")))
-    for side in ("left", "right", "lower", "upper"):
-        ref = node.get(side)
-        if isinstance(ref, dict):
-            if "feature" in ref:
-                found.add(("feature", ref["feature"]))
-            elif "price" in ref:
-                found.add(("price", ref["price"]))
+def _rule_references(rule, found):
+    """Every feature, price and filter a rule's conditions read (a pattern is a feature)."""
+    for condition in (rule.get("conditions") or {}).values():
+        if "pattern" in condition:
+            found.add(("feature", condition["pattern"]))
+        if "filter" in condition:
+            found.add(("filter", condition["filter"].replace("_", " ")))
+        for side in ("left", "right", "lower", "upper"):
+            ref = condition.get(side)
+            if isinstance(ref, dict):
+                if "feature" in ref:
+                    found.add(("feature", ref["feature"]))
+                elif "price" in ref:
+                    found.add(("price", ref["price"]))
     return found
 
 
-def pipeline_dot(spec):
+# The pipeline diagram's colours when no page theme is given; the Build page passes
+# style.pipeline_palette(the page theme) instead.
+PIPELINE_PALETTE = {"font": "Helvetica", "background": "white", "node": "white", "border": "black", "text": "black",
+                    "edge": "#666666", "rule": "#eef3ff", "risk": "#fff6e8", "account": "#f2f2f2"}
+
+
+def pipeline_dot(spec, palette=None):
     """The strategy as a Graphviz diagram: data, features, rules or portfolio, risk, the front door.
 
     Alternatives (structure search) are drawn as they are currently chosen.
     """
-    from .blocks import BLOCKS
     from .engine import call_plan
-    from .spec import apply_params, collect_choices, strategy_kind
+    from .indicators import catalogue, describe
+    from .spec import apply_params, collect_choices, ref_feature, strategy_kind
 
+    colours = palette or PIPELINE_PALETTE
     choices = collect_choices(spec)
     resolved = apply_params(spec)
     kind = strategy_kind(resolved)
     data = resolved["data"]
-    lines = ["digraph pipeline {", "  rankdir=LR;", '  node [shape=box, style="rounded,filled", fillcolor="white", '
-             'fontname="Helvetica", fontsize=11];', '  edge [color="#666666"];']
+    lines = ["digraph pipeline {", "  rankdir=LR;", f'  bgcolor="{colours["background"]}";',
+             f'  node [shape=box, style="rounded,filled", fillcolor="{colours["node"]}", color="{colours["border"]}", '
+             f'fontcolor="{colours["text"]}", fontname="{colours["font"]}", fontsize=11];',
+             f'  edge [color="{colours["edge"]}", fontcolor="{colours["text"]}"];']
     lines.append(f"  data [label={_dot('Data' + chr(10) + ', '.join(data['symbols']) + chr(10) + data['timeframe'] + ' bars')}, "
                  "shape=cylinder];")
     for name, feature in (resolved.get("features") or {}).items():
-        block = BLOCKS[feature["block"]]
-        settings = ", ".join(f"{key}={value}" for key, value in feature.items()
-                             if key not in ("block", "source", "code", "params"))
-        if feature["block"] == "pattern":
-            settings = f"{feature.get('name')} ({feature.get('module', 'candle')})"
-        lines.append(f"  feature_{name} [label={_dot(name + chr(10) + block['label'] + (chr(10) + settings if settings else ''))}];")
-        source = feature.get("source")
-        upstream = f"feature_{source['feature']}" if isinstance(source, dict) else "data"
-        lines.append(f"  {upstream} -> feature_{name};")
+        item = catalogue()[feature["indicator"]]
+        lines.append(f"  feature_{name} [label={_dot(name + chr(10) + item['label'] + chr(10) + describe(feature))}];")
+        upstream = sorted({ref_feature(ref) for ref in (feature.get("inputs") or {}).values() if ref_feature(ref)})
+        for source in upstream or ["data"]:
+            lines.append(f"  {'feature_' + source if source != 'data' else 'data'} -> feature_{name};")
     plan = call_plan(resolved)
     door_label = "vbt.x." + plan["front_door"] + chr(10) + "fills at the next open"
     if "cash" in plan["args"]:
@@ -833,8 +1209,9 @@ def pipeline_dot(spec):
             rule = resolved["rules"].get(slot)
             if not rule:
                 continue
-            searched = " (alternatives searched)" if f"rules.{slot}" in choices else ""
-            lines.append(f"  rule_{slot} [label={_dot(label + searched)}, fillcolor=\"#eef3ff\"];")
+            searched = " (versions searched)" if f"rules.{slot}" in choices else ""
+            logic = chr(10) + rule["logic"] if len(rule.get("conditions") or {}) > 1 else ""
+            lines.append(f"  rule_{slot} [label={_dot(label + searched + logic)}, fillcolor=\"{colours['rule']}\"];")
             for kind_name, name in sorted(_rule_references(rule, set())):
                 if kind_name == "feature":
                     lines.append(f"  feature_{name} -> rule_{slot};")
@@ -874,14 +1251,17 @@ def pipeline_dot(spec):
         risk_lines.append(f"{key} {value}")
     stop = risk.get("stop") or {}
     if stop.get("kind") in ("fixed", "trailing"):
-        risk_lines.append(f"{stop['kind']} stop {stop['points']} pts")
-    if risk.get("target"):
-        risk_lines.append(f"target {risk['target']['points']} pts")
+        risk_lines.append(f"{stop['kind']} stop " + (f"{stop['pct']:.2%}" if stop.get("unit") == "pct"
+                                                     else f"{stop['points']} pts"))
+    target = risk.get("target") or {}
+    if target.get("kind") == "fixed":
+        risk_lines.append("target " + (f"{target['pct']:.2%}" if target.get("unit") == "pct"
+                                       else f"{target['points']} pts"))
     for key, value in (risk.get("exits") or {}).items():
         if value is not None:
             risk_lines.append(f"{key.replace('_', ' ')} {value}")
     if risk_lines:
-        lines.append(f"  risk [label={_dot('Risk' + chr(10) + chr(10).join(risk_lines))}, fillcolor=\"#fff6e8\"];")
+        lines.append(f"  risk [label={_dot('Risk' + chr(10) + chr(10).join(risk_lines))}, fillcolor=\"{colours['risk']}\"];")
         lines.append("  risk -> door;")
     account = resolved.get("account") or {}
     account_lines = [f"cash {account.get('init_cash')}", f"freq {account.get('freq')}"]
@@ -889,7 +1269,8 @@ def pipeline_dot(spec):
         account_lines.append(f"report in {account['base_currency']}")
     if account.get("rates"):
         account_lines.append(f"rates: {account['rates']['source']}")
-    lines.append(f"  account [label={_dot('Account' + chr(10) + chr(10).join(account_lines))}, fillcolor=\"#f2f2f2\"];")
+    lines.append(f"  account [label={_dot('Account' + chr(10) + chr(10).join(account_lines))}, "
+                 f"fillcolor=\"{colours['account']}\"];")
     lines.append("  account -> door;")
     lines += sorted(set(extras))
     lines.append("}")

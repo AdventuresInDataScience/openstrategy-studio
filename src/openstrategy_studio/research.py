@@ -17,7 +17,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from .blocks import BLOCKS
+from . import indicators
 
 # Detectors whose cost grows roughly with the square of the pivot count (plan annex D).
 SLOW_PATTERNS = ("abc_correction", "measured_move_up", "measured_move_down", "hs_top", "hs_bottom")
@@ -35,8 +35,19 @@ def forward_returns(data, horizon):
 
 def pattern_signals(data, module, name, params=None):
     """The detector's int8 output (+1 bullish, -1 bearish, 0 none) for every symbol."""
-    settings = {"module": module, "name": name, "params": dict(params or {})}
-    return BLOCKS["pattern"]["compile"](settings, data, None)["signal"]
+    return indicators.run_pattern(module, name, dict(params or {}), data["open"], data["high"], data["low"],
+                                  data["close"], data["volume"])
+
+
+def pattern_rows():
+    """Every pattern in the catalogue, as the study wants them: module, name, direction, family, label."""
+    rows = []
+    for item in indicators.catalogue().values():
+        if item["source"] == "pattern":
+            module, name = item["function"].split(":")
+            rows.append({"module": module, "name": name, "direction": item.get("direction", ""),
+                         "family": item["menu"][1], "label": item["label"], "id": item["id"]})
+    return rows
 
 
 def _signed(values, forward):
@@ -50,7 +61,7 @@ def study(data, patterns, horizons=(1, 5, 10, 20), min_hits=10):
     """One row per pattern: hits, and per horizon the mean signed return, hit rate,
     excess over the baseline and a t-statistic.
 
-    patterns: rows of blocks.pattern_catalogue() (module, name, direction, params).
+    patterns: rows of pattern_rows() (module, name, direction ...).
     """
     forwards = {horizon: forward_returns(data, horizon).to_numpy() for horizon in horizons}
     baseline = {horizon: float(np.nanmean(forward)) for horizon, forward in forwards.items()}
@@ -90,14 +101,22 @@ def event_path(data, module, name, horizon=20, params=None):
 
 
 def add_pattern_to_rule(spec, slot, module, name, side):
-    """Put a pattern leaf into a rule slot, ANDed with whatever is there."""
-    leaf = {"pattern": name, "module": module, "side": side, "params": {}}
+    """Add the pattern as a feature, and a condition on it to a rule slot, joined with "and".
+
+    The feature is named after the pattern (hammer, hammer_2 ...); the condition takes
+    the next free letter and joins the rule's logic line with "and".
+    """
+    from .expressions import append_letter, next_letter
+
+    features = spec.setdefault("features", {})
+    feature_name, number = name, 2
+    while feature_name in features and features[feature_name].get("indicator") != f"pattern:{module}:{name}":
+        feature_name, number = f"{name}_{number}", number + 1
+    features.setdefault(feature_name, indicators.new_feature(f"pattern:{module}:{name}"))
     rules = spec.setdefault("rules", {})
-    current = rules.get(slot)
-    if current is None:
-        rules[slot] = {"all": [leaf]}
-    elif "all" in current:
-        current["all"].append(leaf)
-    else:
-        rules[slot] = {"all": [current, leaf]}
+    rule = rules.get(slot) or {"conditions": {}, "logic": ""}
+    letter = next_letter(set(rule["conditions"]))
+    rule["conditions"][letter] = {"pattern": feature_name, "side": side}
+    rule["logic"] = append_letter(rule.get("logic", ""), letter)
+    rules[slot] = rule
     return spec

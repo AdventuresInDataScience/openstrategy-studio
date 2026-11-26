@@ -1,0 +1,46 @@
+# Paper: salmon newsprint, serif headings, sharp corners. Its charts use the
+# financial_times chart theme, whose paper colour is this page's background.
+# See daylight.toml for what each key does.
+
+[theme]
+base = "light"
+primaryColor = "#0F5499"
+backgroundColor = "#FFF1E5"
+secondaryBackgroundColor = "#FFF8F2"
+textColor = "#33302E"
+borderColor = "#E6D6C8"
+linkColor = "#0F5499"
+font = "'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif"
+headingFont = "Georgia, 'Times New Roman', serif"
+codeFont = "'Cascadia Code', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace"
+baseFontSize = 15
+baseRadius = "0.2rem"
+buttonRadius = "0.2rem"
+paddingTop = "1.5rem"
+headingFontSizes = ["2.5rem", "1.75rem", "1.35rem"]
+headingFontWeights = [700, 600, 600]
+metricValueFontSize = "1.8rem"
+dataframeHeaderBackgroundColor = "#F7E5D6"
+chartCategoricalColors = ["#0F5499", "#990F3D", "#0D7680", "#FF8833", "#593380", "#262A33", "#1E88C7", "#C0392B"]
+
+[theme.sidebar]
+backgroundColor = "#F2DFCE"
+secondaryBackgroundColor = "#FFF1E5"
+textColor = "#33302E"
+borderColor = "#E0CBB9"
+
+[studio]
+label = "Paper"
+description = "Salmon newsprint with serif headings; charts in the financial times theme."
+accent = "#990F3D"
+gradient = "linear-gradient(120deg, #0F5499, #990F3D)"
+title_fill = "linear-gradient(#1A1817, #1A1817)"
+surface = "#FFF8F2"
+muted = "#66605C"
+on_primary = "#FFFFFF"
+shadow = "0 1px 0 rgba(51, 48, 46, 0.06)"
+shadow_hover = "0 2px 12px rgba(51, 48, 46, 0.12)"
+glow = "none"
+positive = "#0D7680"
+negative = "#990F3D"
+chart_theme = "financial_times"

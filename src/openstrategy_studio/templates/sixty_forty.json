@@ -1,6 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "60/40, monthly rebalance",
+  "setup": {
+    "kind": "portfolio",
+    "trading": "equity"
+  },
   "data": {
     "symbols": [
       "SPY",
@@ -12,14 +16,12 @@
   },
   "instruments": {
     "SPY": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
       "commission_pct": 0.0005
     },
     "AGG": {
-      "mode": "equity",
       "point_size": 0.01,
       "quote_currency": "USD",
       "cost_currency": "USD",
@@ -41,7 +43,8 @@
     },
     "threshold": 0.05,
     "combine": "or",
-    "min_trade": 0.005
+    "min_trade": 0.005,
+    "rebalance": "calendar"
   },
   "risk": {},
   "account": {

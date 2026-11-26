@@ -1,4 +1,4 @@
-"""Patterns: which of the 300 detectors were followed by a move, on your data?
+"""Patterns: which of the catalogue's detectors were followed by a move, on your data?
 
 Each hit is judged as a trade from the next bar's open (where a signal fills),
 bearish signals as shorts, against the same trades taken on every bar.
@@ -13,6 +13,7 @@ from openstrategy_studio import analysis, data as data_module, research, ui
 from openstrategy_studio.spec import TIMEFRAMES, strategy_kind
 
 settings, data_dir = ui.boot("Patterns")
+ui.page_help("patterns")
 ui.font_css()
 st.title("Pattern research")
 st.write("See how each candlestick and chart pattern was followed on your data, before building a rule on one.")
@@ -24,31 +25,43 @@ if not stored:
 
 spec = ui.current()
 row = st.columns([3, 1, 1, 1])
-symbols = row[0].multiselect("Symbols", stored, default=[s for s in spec["data"]["symbols"] if s in stored][:5] or stored[:1])
-timeframe = row[1].selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index(spec["data"]["timeframe"]))
+symbols = row[0].multiselect("Symbols", stored, default=[s for s in spec["data"]["symbols"] if s in stored][:5] or stored[:1],
+                             help="The stored symbols to study. Hits are pooled across them.")
+timeframe = row[1].selectbox("Timeframe", TIMEFRAMES, index=TIMEFRAMES.index(spec["data"]["timeframe"]),
+                             help="The bar size the patterns are found on.")
 span = {"min_value": date(1970, 1, 1), "max_value": date(2100, 12, 31)}
-start = row[2].date_input("From", value=date.fromisoformat(str(spec["data"]["start"])[:10]), **span)
-end = row[3].date_input("To", value=date.fromisoformat(str(spec["data"]["end"])[:10]), **span)
+start = row[2].date_input("From", value=date.fromisoformat(str(spec["data"]["start"])[:10]), **span,
+                          help="The first date studied.")
+end = row[3].date_input("To", value=date.fromisoformat(str(spec["data"]["end"])[:10]), **span,
+                        help="The last date studied.")
 
 row = st.columns(4)
 families = row[0].multiselect("Families", ["candle", "chart"], default=["candle", "chart"],
-                              format_func={"candle": "Candlesticks", "chart": "Chart patterns"}.get)
+                              format_func={"candle": "Candlesticks", "chart": "Chart patterns"}.get,
+                              help="Candlesticks span one to a few bars; chart patterns form over many.")
 directions = row[1].multiselect("Directions", ["bullish", "bearish", "directional", "bidirectional", "non_directional"],
                                 default=["bullish", "bearish", "directional", "bidirectional"],
-                                format_func=lambda d: d.replace("_", "-"))
-horizons = row[2].multiselect("Horizons (bars)", [1, 3, 5, 10, 20, 40], default=[1, 5, 10, 20])
-min_hits = row[3].number_input("Ignore patterns with fewer hits than", min_value=2, value=20, step=5)
+                                format_func=lambda d: d.replace("_", "-"),
+                                help="Bullish and bearish point one way. Directional ones point either way, "
+                                     "depending on the hit. Bidirectional chart patterns can break either way. "
+                                     "Non-directional ones (a doji) give no direction, so are judged as longs.")
+horizons = row[2].multiselect("Horizons (bars)", [1, 3, 5, 10, 20, 40], default=[1, 5, 10, 20],
+                              help="Each hit's return runs from the next bar's open (where a trade would fill) to "
+                                   "the close this many bars after the pattern.")
+min_hits = row[3].number_input("Ignore patterns with fewer hits than", min_value=2, value=20, step=5,
+                               help="A pattern seen only a few times says little; below this it is left out of "
+                                    "the table.")
 skip_slow = st.checkbox("Skip the slow head-and-shoulders family", value=True,
                         help="Eight chart detectors scale with the square of the pivot count; they are slow on long histories.")
 
 if st.button("Run the study", type="primary", disabled=not symbols or not horizons):
     def run_study():
         frames = data_module.load_frames(data_dir, symbols, timeframe, start.isoformat(), end.isoformat())
-        catalogue = [item for item in ui.pattern_catalogue() if item["module"] in families
+        catalogue = [item for item in research.pattern_rows() if item["module"] in families
                      and item["direction"] in directions and not (skip_slow and research.is_slow(item["name"]))]
         return frames, research.study(frames, catalogue, horizons=tuple(sorted(horizons)), min_hits=int(min_hits))
 
-    outcome = ui.run_guarded("Scanning every pattern (all 300 take well under a second per symbol)", run_study)
+    outcome = ui.run_guarded("Scanning every pattern (all of them take well under a second per symbol)", run_study)
     if outcome is not None:
         st.session_state["pattern_study"] = {"frames": outcome[0], "table": outcome[1],
                                              "horizons": sorted(horizons), "symbols": symbols}
@@ -58,7 +71,8 @@ if not found:
     st.stop()
 
 table = found["table"]
-horizon = st.selectbox("Rank by horizon", found["horizons"], index=min(2, len(found["horizons"]) - 1))
+horizon = st.selectbox("Rank by horizon", found["horizons"], index=min(2, len(found["horizons"]) - 1),
+                       help="The table is sorted by the excess return at this horizon.")
 column = f"excess {horizon}"
 if column not in table:
     st.write("No pattern had enough hits. Lower the minimum, widen the dates or add symbols.")
@@ -80,7 +94,8 @@ ui.table(shown, height=360)
 
 labels = [f"{row.pattern} ({row.module})" for row in ranked.itertuples()]
 if labels:
-    picked = st.selectbox("Look closer at", range(len(labels)), format_func=labels.__getitem__)
+    picked = st.selectbox("Look closer at", range(len(labels)), format_func=labels.__getitem__,
+                          help="Draws the average path after this pattern, with its spread.")
     chosen = ranked.iloc[picked]
     theme, glow = ui.theme_picker(settings, "patterns")
     path = research.event_path(found["frames"], chosen["module"], chosen["pattern"], horizon=max(found["horizons"]))
@@ -89,9 +104,13 @@ if labels:
     st.markdown("**Use it in the current strategy**")
     row = st.columns([2, 2, 1])
     slot = row[0].selectbox("Add to", ["long_entry", "short_entry", "long_exit", "short_exit"],
-                            format_func=lambda s: s.replace("_", " ").capitalize())
+                            format_func=lambda s: s.replace("_", " ").capitalize(),
+                            help="Which rule of the current strategy gets a condition on this pattern, joined with "
+                                 "and.")
     side = row[1].selectbox("Side", ["bullish", "bearish", "either"],
-                            index=0 if chosen["bullish"] >= chosen["bearish"] else 1)
+                            index=0 if chosen["bullish"] >= chosen["bearish"] else 1,
+                            help="bullish: only when the pattern points up. bearish: only when it points down. "
+                                 "either: whichever way it points.")
     row[2].write("")
     portfolio = strategy_kind(spec) == "portfolio"
     if portfolio:
@@ -99,5 +118,5 @@ if labels:
     if row[2].button("Add rule", disabled=portfolio):
         updated = research.add_pattern_to_rule(ui.spec_copy(), slot, chosen["module"], chosen["pattern"], side)
         ui.replace_spec(updated)
-        st.success(f"Added {chosen['pattern']} ({side}) to the {slot.replace('_', ' ')} rule. Open the Build page "
-                   "to see it in the preview.")
+        st.success(f"Added {chosen['pattern']} as a feature, and a condition on it ({side}) to the "
+                   f"{slot.replace('_', ' ')} rule, joined with and. Open the Build page to see it.")

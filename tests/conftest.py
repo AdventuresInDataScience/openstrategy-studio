@@ -5,6 +5,7 @@ low <= min(open, close) always hold.
 """
 
 import copy
+import os
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,10 @@ import pytest
 from openstrategy_studio import spec as spec_module
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+# The pages start a background warm-up on boot (ui._start_warm_up); in the tests it would run
+# beside every page test and hold engine.RUN_LOCK. tests/test_engine.py runs it directly.
+os.environ["OPENSTRATEGY_STUDIO_WARM_UP"] = "0"
 
 
 def make_ohlcv(n=400, symbols=("AAA",), seed=0, freq="B", start="2020-01-01", base=1.1):
@@ -68,5 +73,5 @@ def momentum_spec():
     spec["data"]["symbols"] = ["AAA", "BBB", "CCC", "DDD"]
     instrument = next(iter(spec["instruments"].values()))
     spec["instruments"] = {symbol: dict(instrument) for symbol in spec["data"]["symbols"]}
-    spec["selection"]["top_n"]["value"] = 2
+    spec["selection"]["top_n"] = 2
     return spec

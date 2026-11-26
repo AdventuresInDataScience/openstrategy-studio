@@ -16,10 +16,12 @@ processes run. It reads the job and its data from module globals set by
 cross a process boundary.
 """
 
+import hashlib
 import itertools
 import json
 import math
 import pickle
+import re
 import time
 import types
 from pathlib import Path
@@ -29,7 +31,6 @@ import pandas as pd
 from scipy import stats
 
 from . import engine
-from .spec import value_of
 
 PENALTY = 1e12          # stands in for NaN where a backend needs a finite number
 
@@ -39,54 +40,66 @@ PENALTY = 1e12          # stands in for NaN where a backend needs a finite numbe
 
 
 def build_space(spec, include=None, conditional=False):
-    """{param path: opt dict} for every optimisable node (or only those in `include`).
+    """{param path: opt dict} in BUTChC's dialect, from the strategy's optimise variables.
 
-    Structural alternatives (choice nodes) are handled two ways:
-    * conditional=False (every backend): the structure is fixed at the current
-      choice, and only parameters inside the chosen options are searched.
-    * conditional=True (BUTChC and Optuna only): each optimisable selector
-      becomes a categorical whose next_level holds the parameters of each
-      option, in BUTChC's dialect. The objective then receives only the
-      parameters on the sampled path, and apply_params keeps the rest at their
-      current values.
+    A variable {"start", "stop", "step"} becomes {"min", "max", "step"}, with "int": true
+    for a whole-number value; {"values": [...]} stays a list. Only variables whose value
+    the strategy still has are searched (validate_spec names the others), and only those
+    in `include` when it is given.
+
+    Rule versions (rules.<slot>.choose) are handled two ways:
+    * conditional=False (every backend): the structure is fixed at the version in use,
+      and only variables inside it (or outside any version) are searched.
+    * conditional=True (BUTChC and Optuna only): a "choose" variable becomes a
+      categorical whose next_level holds each version's own variables. The objective
+      then receives only the values on the sampled path, and apply_params keeps the
+      rest at their current values.
     """
-    from .spec import is_choice, is_opt
+    from .spec import collect_choices, tunable_inputs, variables
 
-    def wanted(path):
-        return include is None or path in include
+    rows = {row["path"]: row for row in tunable_inputs(spec)}
 
-    def walk(node, path, out):
-        if is_opt(node):
-            if wanted(path):
-                out[path] = dict(node["opt"])
-            return
-        if is_choice(node):
-            selector = node["choose"]
-            selector_path = f"{path}.choose" if path else "choose"
-            if conditional and is_opt(selector) and wanted(selector_path):
-                entry = dict(selector["opt"])
-                branches = {}
-                for label in entry["values"]:
-                    branch = {}
-                    walk(node["options"][label], f"{path}.options.{label}", branch)
-                    if branch:
-                        branches[label] = branch
-                if branches:
-                    entry["next_level"] = branches
-                out[selector_path] = entry
-            else:
-                label = value_of(selector)
-                walk(node["options"][label], f"{path}.options.{label}", out)
-            return
-        if isinstance(node, dict):
-            for key, child in node.items():
-                walk(child, f"{path}.{key}" if path else str(key), out)
-        elif isinstance(node, list):
-            for index, child in enumerate(node):
-                walk(child, f"{path}.{index}" if path else str(index), out)
+    def opt_for(path, variable):
+        if "values" in variable:
+            return {"values": list(variable["values"])}
+        out = {"min": variable["start"], "max": variable["stop"]}
+        if rows[path]["type"] == "int":
+            out["int"] = True
+        if variable.get("step"):
+            out["step"] = variable["step"]       # the grid's spacing; stripped before BUTChC sees it
+        return out
 
+    wanted = {path: variable for path, variable in variables(spec).items()
+              if path in rows and (include is None or path in include)}
+    choices = collect_choices(spec)
+    selectors = {f"{owner}.choose": owner for owner in choices}
     space = {}
-    walk(spec, "", space)
+    for path, variable in wanted.items():
+        if path in selectors:
+            continue                     # a version choice: searched only conditionally, below
+        owner = next((owner for owner in choices if path.startswith(f"{owner}.options.")), None)
+        if owner is None:
+            space[path] = opt_for(path, variable)
+            continue
+        label = path[len(owner) + len(".options."):].split(".")[0]
+        if conditional and f"{owner}.choose" in wanted:
+            continue                     # goes into that version's branch
+        if label == choices[owner]["choose"]:
+            space[path] = opt_for(path, variable)
+    if conditional:
+        for selector, owner in selectors.items():
+            if selector not in wanted:
+                continue
+            entry = opt_for(selector, wanted[selector])
+            branches = {}
+            for label in entry["values"]:
+                prefix = f"{owner}.options.{label}."
+                branch = {path: opt_for(path, variable) for path, variable in wanted.items() if path.startswith(prefix)}
+                if branch:
+                    branches[label] = branch
+            if branches:
+                entry["next_level"] = branches
+            space[selector] = entry
     return dict(sorted(space.items()))
 
 
@@ -220,6 +233,14 @@ METRICS = {
 }
 
 
+def objective_label(metric, direction):
+    """What a job searched for, in words: "Sharpe ratio, maximised". For the jobs table and the results."""
+    if metric == "selftest":
+        return "Self-test"
+    label = METRICS.get(metric, {}).get("label", str(metric))
+    return f"{label}, {'minimised' if direction == 'minimize' else 'maximised'}"
+
+
 def trial_extras(pf):
     """Numbers recorded for every trial whatever the objective, for constraints,
     the stability check and the deflated Sharpe ratio."""
@@ -279,14 +300,29 @@ def evaluate_trial(task):
                                   static_rate=job["settings"]["vectorbtx"].get("static_rate"))
     except engine.backtest_error() as error:
         return {"params": params, "objective": float("nan"), "error": str(error)}
-    return score(run["pf"], job, params, want_returns=task.get("want_returns"))
+    return score(run["pf"], job, params, want_returns=task.get("want_returns"), notes=run["warnings"])
 
 
-def score(pf, job, params, want_returns=False):
-    """The objective, the extras and the constraints for one trial's portfolio."""
+def score(pf, job, params, want_returns=False, notes=()):
+    """The objective, the extras and the constraints for one trial's portfolio.
+
+    `notes`: vectorbtX's warnings about the trial's run. The first sentence of each is kept, one
+    per line, as "notes": what happened (entries below the minimum size were not placed, entries
+    were cut to the leverage), which is the reason behind "only 4 trades" that the trade count
+    alone cannot give (the owner's MA job, 20 November 2026). Only the first sentence, because the
+    whole trials table is rewritten after every batch; the rest is vectorbtX's advice in its own
+    arguments, which the results page replaces with the Studio's (analysis.WARNING_HINTS).
+    """
     extras = trial_extras(pf)
     value = METRICS[job["metric"]]["fn"](pf)
-    result = {"params": params, "objective": value, "metric": value, **extras, "error": None}
+    said = []
+    for note in notes or ():
+        # A sentence ends at ". " before a capital: "1.0 £/point" and "2013-12-09" do not end one.
+        first = re.split(r"(?<=[.!?])\s+(?=[A-Z])", str(note).strip(), maxsplit=1)[0]
+        if first not in said:
+            said.append(first)
+    result = {"params": params, "objective": value, "metric": value, **extras, "error": None,
+              "notes": "\n".join(said) or None}
     constraints = job.get("constraints") or {}
     if constraints.get("min_trades") and extras["n_trades"] < constraints["min_trades"]:
         # Without a trade-count floor, optimisers reliably find parameters that
@@ -319,7 +355,7 @@ def evaluate_chunk(tasks):
                                        static_rate=job["settings"]["vectorbtx"].get("static_rate"))
     except engine.backtest_error():
         return [evaluate_trial(task) for task in tasks]
-    return [score(pf, job, params) for params, pf in zip(params_list, trials)]
+    return [score(trial["pf"], job, params, notes=trial["warnings"]) for params, trial in zip(params_list, trials)]
 
 
 def selftest_objective(space, params):
@@ -415,7 +451,7 @@ def run_optuna(space, evaluate_batch, budget, direction, seed, options):
         "qmc": lambda: optuna.samplers.QMCSampler(seed=seed),
     }
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction=direction, sampler=samplers[options.get("sampler", "tpe")](),
+    study = optuna.create_study(direction=direction, sampler=samplers[method_of("optuna", options)](),
                                 storage=options.get("storage"), study_name=options.get("study_name", "job"),
                                 load_if_exists=True)
     batch = max(1, int(options.get("batch", 8)))
@@ -433,13 +469,21 @@ def run_optuna(space, evaluate_batch, budget, direction, seed, options):
 
 
 def run_scipy(space, evaluate_batch, budget, direction, seed, options):
-    """differential_evolution (parallel through `workers`) or dual_annealing.
+    """differential_evolution (parallel through `workers`), dual_annealing or direct (one trial at a time).
 
     scipy minimises, so the objective is negated when maximising. Categoricals
-    are an integer index; log ranges are searched in log space.
+    are an integer index; log ranges are searched in log space. A setting rounded
+    to a whole number or a list's index often lands on a point already tried
+    (DIRECT samples the centres of thirds, and 3.5 and 3.9 are both 4), so each
+    point is run once and its score reused: the budget caps scipy's calls, and the
+    backtests run can be fewer.
+
+    DIRECT (scipy.optimize.direct, its locally biased form): divides the box of
+    ranges into thirds, again and again, where the scores are best or the boxes
+    are largest. Deterministic, so the seed does nothing.
     """
     _require_flat(space, "scipy")
-    from scipy.optimize import differential_evolution, dual_annealing
+    from scipy.optimize import differential_evolution, direct, dual_annealing
 
     names = list(space)
     bounds = []
@@ -471,12 +515,35 @@ def run_scipy(space, evaluate_batch, budget, direction, seed, options):
                 params[name] = float(value)
         return params
 
-    def values_for(xs):
-        values = evaluate_batch([decode(x) for x in xs])
-        return [sign * value if np.isfinite(value) else PENALTY for value in values]
+    scores = {}             # each point's score, by its params, so a repeat is not run again
+    ran = 0                 # backtests run, which the budget caps
 
-    if options.get("method", "differential_evolution") == "dual_annealing":
+    def values_for(xs):
+        nonlocal ran
+        points = [decode(x) for x in xs]
+        texts = [json.dumps(params, sort_keys=True, default=str) for params in points]
+        new = {}                    # the points not scored yet, each once
+        for text, params in zip(texts, points):
+            if text not in scores:
+                new.setdefault(text, params)
+        # ⚠️ DIRECT treats maxfun as a soft limit and ends its iteration past it (13 trials on a budget of 12,
+        # found 25 November 2026), which the job counted as "13 of 12". A point past the budget is not run: it
+        # scores the penalty, which no best is ever chosen from.
+        allowed = dict(list(new.items())[:max(0, budget - ran)])
+        if allowed:
+            for text, value in zip(allowed, evaluate_batch(list(allowed.values()))):
+                scores[text] = sign * value if np.isfinite(value) else PENALTY
+            ran += len(allowed)
+        return [scores.get(text, PENALTY) for text in texts]
+
+    method = method_of("scipy", options)
+    if method == "dual_annealing":
         dual_annealing(lambda x: values_for([x])[0], bounds, rng=seed, maxfun=budget, no_local_search=True)
+        return {}
+    if method == "direct":
+        # maxiter as large as the budget, so the budget is what stops it (or DIRECT's own tolerances,
+        # once its boxes are smaller than any step that could change a trade).
+        direct(lambda x: values_for([x])[0], bounds, maxfun=budget, maxiter=max(1000, budget))
         return {}
     # A population of popsize * d per generation; size both to fit the budget.
     dims = len(names)
@@ -519,6 +586,107 @@ def run_butchc(space, evaluate_batch, budget, direction, seed, options):
     return {"prob_tree": result.get("prob_tree")}
 
 
+# Nevergrad's optimisers offered, by their name in its registry, with what each does in Nevergrad's own
+# words (its docstrings, 1.0.12). ⚠️ Not NGOpt, its chooser, nor anything built on its metamodels: on
+# numpy 2.5 they raise TypeError ("only 0-dimensional arrays can be converted to Python scalars", from
+# float() of a one-element array in nevergrad/optimization/metamodel.py). tests/test_optimise.py runs
+# every one listed here, so a library change that breaks one fails there.
+NEVERGRAD_OPTIMISERS = {
+    "TwoPointsDE": {"label": "Differential evolution, two-point crossover",
+                    "help": "Mixes members of a population, mutating along the differences between them, with a "
+                            "genetic two-point crossover. Copes well with many trials at once."},
+    "PSO": {"label": "Particle swarm",
+            "help": "A swarm of settings, each moving with its own inertia towards its own best and the swarm's "
+                    "best. Robust, and copes well with many trials at once."},
+    "CMA": {"label": "CMA-ES",
+            "help": "An evolution strategy: samples from a bell curve that it reshapes towards the best "
+                    "directions. Best on number settings with a budget large against their count."},
+    "PortfolioDiscreteOnePlusOne": {"label": "(1+1), mixed mutations",
+                                    "help": "Mutates the best settings so far, with a mix of mutation sizes. "
+                                            "Suits whole numbers and lists of values, where a small step does "
+                                            "not matter."},
+    "OnePlusOne": {"label": "(1+1) evolution strategy",
+                   "help": "Mutates the best settings so far by a step it adapts. Simple and robust on number "
+                           "settings, best with fewer than about eight trials at once."},
+    "TBPSA": {"label": "TBPSA, for noisy scores",
+              "help": "An evolution strategy that adapts its population size, among the best in many noisy "
+                      "problems. A backtest's score is not noisy (the same settings score the same), but it can "
+                      "jump from one setting to the next."},
+}
+
+
+def run_nevergrad(space, evaluate_batch, budget, direction, seed, options):
+    """Nevergrad 1.0.12, by ask and tell in batches, so a batch runs on the job's worker processes.
+
+    Flat spaces only. A whole number is searched as a count of its steps from the start (as Optuna keeps
+    it on its step), a list as a Choice, a log range as Log; a setting with one value is fixed. Nevergrad
+    minimises, so the objective is negated when maximising, and an invalid trial is told PENALTY (under
+    the 5e20 above which Nevergrad clips and warns). Each search is told it may have `batch` trials out
+    at once (num_workers), which some of its optimisers size their populations by.
+    """
+    _require_flat(space, "nevergrad")
+    import nevergrad as ng
+
+    # Positional names: a setting's path has dots, which Nevergrad's names are not promised to allow.
+    parts = {}
+    fixed = {}
+    for number, (name, opt) in enumerate(space.items()):
+        label = f"p{number}"
+        if "values" in opt:
+            if len(opt["values"]) == 1:
+                fixed[name] = opt["values"][0]
+            else:
+                parts[label] = ng.p.Choice(list(opt["values"]))
+        elif opt.get("int"):
+            steps = (int(opt["max"]) - int(opt["min"])) // int(opt.get("step") or 1)
+            if steps <= 0:
+                fixed[name] = int(opt["min"])
+            else:
+                parts[label] = ng.p.Scalar(lower=0, upper=steps).set_integer_casting()
+        elif float(opt["max"]) <= float(opt["min"]):
+            fixed[name] = float(opt["min"])
+        elif opt.get("log"):
+            parts[label] = ng.p.Log(lower=float(opt["min"]), upper=float(opt["max"]))
+        else:
+            parts[label] = ng.p.Scalar(lower=float(opt["min"]), upper=float(opt["max"]))
+    names = {f"p{number}": name for number, name in enumerate(space)}
+
+    def decode(value):
+        params = dict(fixed)
+        for label, chosen in value.items():
+            name = names[label]
+            opt = space[name]
+            if "values" in opt:
+                params[name] = chosen
+            elif opt.get("int"):
+                params[name] = int(opt["min"]) + int(chosen) * int(opt.get("step") or 1)
+            else:
+                params[name] = float(chosen)
+        return params
+
+    batch = max(1, int(options.get("batch", 8)))
+    sign = -1.0 if direction == "maximize" else 1.0
+    if not parts:
+        evaluate_batch([dict(fixed)])           # nothing to search: the one point there is
+        return {}
+    parametrization = ng.p.Dict(**parts)
+    parametrization.random_state = np.random.RandomState(seed)
+    name = method_of("nevergrad", options)
+    if name == "CMA" and parametrization.dimension == 1:
+        # ⚠️ On one dimension Nevergrad's CMA-ES switches to the fcmaes package, which is not installed (a
+        # compiled one): (1+1) instead. The Optimise page says so beside the choice.
+        name = "OnePlusOne"
+    optimiser = ng.optimizers.registry[name](parametrization=parametrization, budget=budget, num_workers=batch)
+    done = 0
+    while done < budget:
+        candidates = [optimiser.ask() for _ in range(min(batch, budget - done))]
+        values = evaluate_batch([decode(candidate.value) for candidate in candidates])
+        for candidate, value in zip(candidates, values):
+            optimiser.tell(candidate, sign * value if np.isfinite(value) else PENALTY)
+        done += len(candidates)
+    return {}
+
+
 def run_marsopt(space, evaluate_batch, budget, direction, seed, options):
     """marsopt 0.2.0: sequential, flat spaces, string categories only."""
     _require_flat(space, "marsopt")
@@ -549,22 +717,115 @@ def run_marsopt(space, evaluate_batch, budget, direction, seed, options):
     return {}
 
 
+# Labels: a library by its own name as its project writes it (Optuna, SciPy, BUTChC, marsopt), a search
+# that is no library's by what it does, in sentence case.
 BACKENDS = {
-    "optuna": {"label": "Optuna (default)", "fn": run_optuna},
-    "grid": {"label": "Grid", "fn": run_grid},
-    # The same points as "grid", evaluated many per backtest call (worker.py routes
-    # its batches through evaluate_chunk). Eligibility: engine.vectorisable.
-    "grid_vectorised": {"label": "Grid, many trials per call", "fn": run_grid},
-    "random": {"label": "Random (Sobol)", "fn": run_random},
-    "scipy": {"label": "scipy", "fn": run_scipy},
+    "optuna": {"label": "Optuna", "fn": run_optuna},
+    # Two methods: every point in order, one backtest each, or the same points many per backtest call
+    # (worker.py routes the batches of the "vectorised" method through evaluate_chunk; eligibility:
+    # engine.vectorisable).
+    "grid": {"label": "Grid search", "fn": run_grid},
+    "random": {"label": "Random search", "fn": run_random},
+    "scipy": {"label": "SciPy", "fn": run_scipy},
     "butchc": {"label": "BUTChC", "fn": run_butchc},
-    "marsopt": {"label": "marsopt (optional extra)", "fn": run_marsopt},
+    "nevergrad": {"label": "Nevergrad", "fn": run_nevergrad},
+    "marsopt": {"label": "marsopt", "fn": run_marsopt},
 }
+
+
+# Each backend's methods, the first its default: {backend: {method: {"label", "help"}}}. The Optimise page
+# asks the same two things for every backend, which backend and which of its methods (the owner, 25 November
+# 2026: Optuna asked for a sampler, SciPy for a method and Nevergrad for an optimiser), and a backend with one
+# method shows it, fixed. A job keeps the choice as backend_options["method"], which each backend reads
+# through method_of. Optuna's, SciPy's and Nevergrad's methods are their library's own names for them.
+METHODS = {
+    "optuna": {
+        "tpe": {"label": "TPE", "help": "Tree-structured Parzen estimator: learns from the trials so far where "
+                                        "the good settings are, and tries more there. The default."},
+        "cmaes": {"label": "CMA-ES", "help": "Evolves a cloud of points over the number settings, reshaping it "
+                                             "towards the best; a list of values is drawn at random."},
+        "nsga2": {"label": "NSGA-II", "help": "A genetic algorithm: breeds new settings from the best so far."},
+        "random": {"label": "Random", "help": "Every trial drawn at random: no learning."},
+        "qmc": {"label": "Quasi-random", "help": "Trials spread evenly over the ranges (a Sobol sequence): no "
+                                                 "learning."},
+    },
+    "grid": {
+        "loop": {"label": "One trial per backtest", "help": "Every combination in order, one backtest each."},
+        "vectorised": {"label": "Many trials per backtest", "help": "The same points, run many at once as "
+                                                                    "columns of one vectorbtX call: faster, for "
+                                                                    "settings that change only the signals."},
+    },
+    "random": {"sobol": {"label": "Sobol sequence", "help": "Scrambled Sobol points, spread evenly over the ranges "
+                                                            "with no learning: the baseline any other search "
+                                                            "should beat."}},
+    "scipy": {
+        "differential_evolution": {"label": "Differential evolution",
+                                   "help": "Improves a population of settings by mixing them, a whole population "
+                                           "side by side."},
+        "dual_annealing": {"label": "Dual annealing",
+                           "help": "Wanders widely at first, then settles near the best it has found (its local "
+                                   "searches are off: they would spend the budget on steps too small to change a "
+                                   "trade). One trial at a time."},
+        "direct": {"label": "DIRECT", "help": "Divides the ranges into thirds, again and again, where the scores are "
+                                              "best or the untried part is largest. One trial at a time, and it "
+                                              "uses no seed."},
+    },
+    "butchc": {"tree": {"label": "Bayesian update tree",
+                        "help": "Learns how good each value of each setting is, separately, from every trial so far, "
+                                "and draws the next trials from that. Searches the versions of a rule too."}},
+    "nevergrad": {name: {"label": item["label"], "help": item["help"]} for name, item in NEVERGRAD_OPTIMISERS.items()},
+    "marsopt": {"mars": {"label": "Mixed adaptive random search",
+                         "help": "Tries settings near the best ones so far, nearer as the search goes on. One trial "
+                                 "at a time."}},
+}
+
+
+def method_of(backend, options):
+    """The method `backend` runs: options["method"] when it is one of the backend's own, else its default.
+
+    A comparison runs several backends on one job's options, so a method named for one backend means
+    nothing to the next, which then runs its own default.
+    """
+    methods = METHODS[backend]
+    method = (options or {}).get("method")
+    return method if method in methods else next(iter(methods))
+
+
+def search_label(backend, options=None):
+    """A backend and its method in words, "Optuna · TPE": for job names, the jobs table and the results.
+
+    `backend` may be "backend:method", as a comparison names each search it runs. A job from before 25
+    November 2026 named its method by each library's own word (sampler, optimizer) and ran the grid's
+    many-trials-per-call method as a backend of its own ("grid_vectorised"); those read the same way.
+    """
+    options = dict(options or {})
+    backend, _, method = str(backend).partition(":")
+    if backend == "grid_vectorised":
+        backend, method = "grid", "vectorised"
+    method = method or options.get("method") or options.get("sampler") or options.get("optimizer")
+    if backend not in BACKENDS:
+        return backend
+    return f"{BACKENDS[backend]['label']} · {METHODS[backend][method_of(backend, {'method': method})]['label']}"
 
 
 # ---------------------------------------------------------------------------
 # Robustness tools
 # ---------------------------------------------------------------------------
+
+def setting_names(spec):
+    """{param path: {"label", "labels"}}: each searched setting in words, for the results page.
+
+    The same words the Optimise page lists the variables in (tunable_inputs' label, such as
+    "jma7 › length", and its value labels, such as "crosses above"), so a result reads as the
+    strategy does, not as "param:features.jma7.params.length". The self-test job has no
+    strategy, and a path a strategy no longer holds keeps its path.
+    """
+    from .spec import tunable_inputs
+
+    if not (spec or {}).get("data"):
+        return {}
+    return {row["path"]: {"label": row["label"], "labels": row.get("labels") or {}} for row in tunable_inputs(spec)}
+
 
 def best_trial(trials, direction):
     """The best finite trial from a trials DataFrame, or None."""
@@ -573,6 +834,99 @@ def best_trial(trials, direction):
         return None
     index = finite["objective"].idxmax() if direction == "maximize" else finite["objective"].idxmin()
     return finite.loc[index]
+
+
+RANGE_CHECK_KEPT = 2000        # points the range check's cache keeps, the newest
+
+
+def frames_key(data):
+    """A short hash of a run's data (every field's values, index and columns), for a cache key."""
+    digest = hashlib.sha256()
+    for name in sorted(data):
+        frame = data[name]
+        digest.update(name.encode("utf-8"))
+        if isinstance(frame, (pd.DataFrame, pd.Series)):
+            names = list(frame.columns) if isinstance(frame, pd.DataFrame) else [frame.name]
+            digest.update(str(names).encode("utf-8"))
+            digest.update(pd.util.hash_pandas_object(frame, index=True).to_numpy().tobytes())
+        else:
+            digest.update(repr(frame).encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def range_check(spec, data, space, min_trades, window=None, data_dir=None, offline=False, static_rate=None,
+                cache=None):
+    """Before a job starts: the strategy at its own settings, then each searched setting at both ends of its
+    range, on its step as the searches keep it (Optuna moves a stop of 42 by 3 from 10 to 40), or at each of a
+    list's options (at most eight, else the first and last), the others at their own; on the history the
+    search uses (`window`).
+
+    [{"path" (None: the strategy's own settings), "value", "trades", "enough" (at least `min_trades`),
+      "error", "notes" (what vectorbtX said, as a trial records it), "cached"}]. A setting whose ends fall short
+    may still have valid values between them; a strategy whose own settings and every end fall short is unlikely
+    to have any (the owner's MA job, 20 November 2026: 5,000 trials, none valid, from a slippage of 20% a fill).
+    Only the top level of a conditional space: a nested setting needs its branch chosen.
+
+    `cache`: a JSON file that keeps each point's run (trades, error, notes), keyed by everything that decides
+    it: the strategy less its optimise section, the point's value, the window, the data's own values, the
+    vectorbtX settings in force and the libraries' versions. So a check repeated after a page visit, a restart
+    or a change of backend runs nothing, and a widened range runs only its new end (the owner, 25 November
+    2026: each run of a levered, risk-sized strategy can take 30 s). Whether a point is enough is worked out
+    afresh from `min_trades`, which is not in the key.
+    """
+    from .config import VECTORBTX_KEYS
+    from .jobs import read_json, write_json
+    from .spec import spec_hash
+
+    vbt_settings = engine.vectorbtx().settings["vectorbtx"]
+    # ⚠️ Everything a run reads, or a stale count is shown for a changed strategy. Rates fetched from FRED
+    # while the run prepares are not in it; they move a trade count only through the account's carry.
+    base = {"spec": {key: value for key, value in spec.items() if key != "optimise"},
+            "window": None if window is None else [str(window[0]), str(window[1])], "data": frames_key(data),
+            "offline": bool(offline), "static_rate": static_rate,
+            "vectorbtx": {key: vbt_settings.get(key) for key in VECTORBTX_KEYS}, "versions": engine.versions()}
+    known = read_json(cache, default={}) if cache else {}
+    points = [(None, None)]
+    for path, opt in space.items():
+        if "values" in opt:
+            values = list(opt["values"])
+            ends = values if len(values) <= 8 else [values[0], values[-1]]
+        else:
+            low, high = opt["min"], opt["max"]
+            if opt.get("step"):
+                # 1e-9: (0.2 - 0.01) / 0.01 is 18.999999999999996, which would floor a step short.
+                high = low + math.floor((high - low) / opt["step"] + 1e-9) * opt["step"]
+            ends = [int(round(low)), int(round(high))] if opt.get("int") else [float(low), round(float(high), 12)]
+        for value in ends:
+            points.append((path, value))
+    rows = []
+    ran = False
+    for path, value in points:
+        params = {} if path is None else {path: _python(value)}
+        key = spec_hash({**base, "params": params})
+        found = known.get(key)
+        cached = found is not None
+        if not cached:
+            ran = True
+            try:
+                run = engine.run_backtest(spec, data, params=params, window=window, data_dir=data_dir,
+                                          offline=offline, static_rate=static_rate)
+            except engine.backtest_error() as error:
+                # A point vectorbtX rejects is reported at that point, as a trial records it, rather than
+                # aborting the check. (vectorbtX 5cbe635 raises BacktestError, not RuntimeError, when its
+                # re-sizing loop cannot settle: docs/UPSTREAM.md issue 36.)
+                found = {"trades": None, "error": f"could not run: {error}", "notes": None}
+            else:
+                # The trade count and the notes only: no constraint, and the cheapest metric.
+                result = score(run["pf"], {"metric": "total_return"}, params, notes=run["warnings"])
+                found = {"trades": result["n_trades"], "error": None, "notes": result["notes"]}
+            known[key] = found          # appended, so the oldest points are the ones dropped
+        rows.append({"path": path, "value": value, **found, "cached": cached,
+                     "enough": found["trades"] is not None and (not min_trades or found["trades"] >= min_trades)})
+    if cache and ran:
+        Path(cache).parent.mkdir(parents=True, exist_ok=True)
+        write_json(cache, dict(list(known.items())[-RANGE_CHECK_KEPT:]))
+    return rows
 
 
 def split_window(index, train_fraction):

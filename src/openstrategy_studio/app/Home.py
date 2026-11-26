@@ -6,14 +6,15 @@ import re
 import streamlit as st
 
 from openstrategy_studio import jobs, store, ui
-from openstrategy_studio.spec import (list_templates, load_spec, load_template, strategy_kind,
+from openstrategy_studio.spec import (blank_spec, list_templates, load_spec, load_template, strategy_kind,
                                       validate_spec)
 
 settings, data_dir = ui.boot("Home")
+ui.page_help("home")
 
 st.title("OpenStrategy Studio")
-st.write("Build a trading strategy from forms and rules, backtest it, optimise it and read the tear sheet. "
-         "Everything runs on your machine with vectorbtX.")
+st.write("Build a trading strategy from indicators, patterns and rules, backtest it, optimise it and read "
+         "the tear sheet. Everything runs on your machine with vectorbtX.")
 
 # Session state vanishes on a browser refresh; every edit is also written to a draft.
 draft_path = data_dir / "drafts" / "current.json"
@@ -34,31 +35,40 @@ if draft_path.exists() and not st.session_state.get("draft_offered"):
 left, right = st.columns(2)
 with left:
     st.subheader("Start a strategy")
+    # Each visit starts blank (ui.boot); this starts blank again mid-visit.
+    if st.button("Start blank", help="A new, empty strategy: no symbols, features or rules. It replaces the current "
+                                     "strategy, so save that first if you want to keep it."):
+        ui.replace_spec(blank_spec())
+        st.success("Started a blank strategy. Build it on the Build page.")
     templates = list_templates()
-    chosen = st.selectbox("From a template", list(templates), format_func=templates.get)
+    chosen = st.selectbox("From a template", list(templates), format_func=templates.get,
+                          help="A ready-made strategy to start from. Using one replaces the current strategy.")
     if st.button("Use this template"):
         ui.replace_spec(load_template(chosen))
         st.success(f"Loaded “{templates[chosen]}”. Edit it on the Build page.")
 
     saved = sorted((data_dir / "strategies").glob("*.json"))
     if saved:
-        picked = st.selectbox("A saved strategy", saved, format_func=lambda path: path.stem)
+        picked = st.selectbox("A saved strategy", saved, format_func=lambda path: path.stem,
+                              help="Strategies saved with Save strategy, from the data folder. Opening one replaces "
+                                   "the current strategy.")
         if st.button("Open saved strategy"):
             spec = load_spec(picked)
             ui.replace_spec(spec)
             ui.show_problems(validate_spec(spec), "This file has problems")
             st.success(f"Opened {picked.stem}.")
 
-    upload = st.file_uploader("Or open a strategy file (.json)", type=["json"])
+    upload = st.file_uploader("Or open a strategy file (.json)", type=["json"],
+                              help="A strategy file downloaded from the Build page, from this or another machine.")
     if upload is not None and st.button("Open uploaded file"):
         spec = json.loads(upload.getvalue().decode("utf-8"))
         problems = validate_spec(spec)
         ui.replace_spec(spec)
         if ui.has_python_block(spec):
-            # Imported specs with Python blocks warn before running.
+            # Imported specs with Python code warn before running.
             st.session_state["untrusted_python"] = True
-            st.warning("This file contains Python blocks, which run as code on your machine. Read them on the "
-                       "Build page before running; the Backtest page will ask you to confirm.")
+            st.warning("This file contains Python code, which runs on your machine. Read it on the "
+                       "Build page before running; the Backtest results page will ask you to confirm.")
         ui.show_problems(problems, "This file has problems")
         if not problems:
             st.success(f"Opened {spec['name']}.")
@@ -66,17 +76,21 @@ with left:
 with right:
     st.subheader("Current strategy")
     spec = ui.current()
-    kinds = {"signals": "Entry and exit rules", "portfolio": "Portfolio (weights and schedule)",
-             "hold": "Buy and hold", "conflict": "Rules and a portfolio (pick one)"}
+    from openstrategy_studio.expressions import TRADING_WORDS
+    from openstrategy_studio.spec import trading_mode
+    kinds = {"signals": "Trading on signals", "portfolio": "A portfolio"}
     st.write(f"**{spec.get('name', 'Untitled')}**")
-    st.write(f"{kinds[strategy_kind(spec)]}, {', '.join(spec['data']['symbols'])} on "
+    st.write(f"{kinds.get(strategy_kind(spec), strategy_kind(spec))} ({TRADING_WORDS.get(trading_mode(spec))}), "
+             f"{', '.join(spec['data']['symbols']) or 'no symbols yet'} on "
              f"{spec['data']['timeframe']} bars, {spec['data']['start']} to {spec['data']['end']}.")
     problems = validate_spec(spec)
     if problems:
         ui.show_problems(problems)
     else:
         st.success("Ready to backtest.")
-    name = st.text_input("Save as", value=re.sub(r"[^A-Za-z0-9_-]+", "_", spec.get("name", "strategy")).strip("_"))
+    name = st.text_input("Save as", value=re.sub(r"[^A-Za-z0-9_-]+", "_", spec.get("name", "strategy")).strip("_"),
+                         help="The file name in the data folder's strategies folder. Saving under an existing "
+                              "name replaces that file.")
     if st.button("Save strategy"):
         from openstrategy_studio.spec import save_spec
         save_spec(spec, data_dir / "strategies" / f"{name}.json")
