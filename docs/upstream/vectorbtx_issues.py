@@ -1098,6 +1098,66 @@ def check_grown_account_funds_its_leverage():
             f"warnings about the cash: {said or 'none'}")
 
 
+# ---------------------------------------------------------------------------
+# 42. A backtest over several windows, each its own account, costs one front-door call per window
+# ---------------------------------------------------------------------------
+
+def check_windows_share_one_run():
+    # A 5x spread bet risking 3% of its balance over a 1.5-point stop, on 160 bars, cut into four windows
+    # of 40 (cross-validation folds). Each window alone is one front-door call, and each call pays the
+    # re-sizing loop's fixed work again: preparing the run (`prepare`), simulating it and reading the
+    # account off it. One call with `windows=` should give each window's portfolio exactly as its own call
+    # does (the same orders and value) while preparing the run no more often than one call does.
+    from vectorbtx.frontend import backtest
+
+    n = 160
+    rng = np.random.default_rng(1)
+    opens = list(100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.01, n))))
+    o, h, l, c = frames(opens, highs=[value * 1.01 for value in opens], lows=[value * 0.99 for value in opens])
+    entries = pd.DataFrame(rng.random((n, 1)) < 0.1, index=c.index, columns=["X"])
+    exits = pd.DataFrame(rng.random((n, 1)) < 0.1, index=c.index, columns=["X"])
+    instrument = {"mode": "spreadbet", "point_size": 0.01, "quote_currency": "USD", "spread_points": 2.0,
+                  "slippage": 0.0, "leverage": 5.0}
+    windows = [(c.index[a], c.index[a + 39]) for a in range(0, n, 40)]
+    kwargs = dict(instruments={"X": instrument}, risk_pct=0.03, risk_of="balance", stop_points=150.0,
+                  init_cash=10_000, freq="D")
+    prepared = [0]
+    real = backtest.prepare
+
+    def counting(*args, **kw):
+        prepared[0] += 1
+        return real(*args, **kw)
+
+    backtest.prepare = counting
+    try:
+        separate, alone = 0, []
+        for start, end in windows:
+            prepared[0] = 0
+            alone.append(vbt.x.PortfolioBacktest(close=c.loc[start:end], open=o.loc[start:end], high=h.loc[start:end],
+                                                 low=l.loc[start:end], entries=entries.loc[start:end],
+                                                 exits=exits.loc[start:end], **kwargs))
+            separate += prepared[0]
+        prepared[0] = 0
+        try:
+            together = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, entries=entries, exits=exits,
+                                               windows=windows, **kwargs)
+        except (TypeError, ValueError) as error:
+            return True, f"windows= is not accepted ({type(error).__name__}: {str(error)[:70]}); " \
+                         f"{len(windows)} windows take {len(windows)} calls, {separate} preparations"
+        shared = prepared[0]
+    finally:
+        backtest.prepare = real
+    same = isinstance(together, list) and len(together) == len(alone) and all(
+        np.array_equal(np.asarray(a.value()), np.asarray(b.value()))
+        and len(a.order_records) == len(b.order_records)
+        and all(np.array_equal(a.order_records[name], b.order_records[name]) for name in a.order_records.dtype.names)
+        for a, b in zip(together, alone))
+    most = max(1, separate // len(windows) + 2)
+    return (not same or shared > most,
+            f"{len(windows)} windows: {separate} preparations in {len(windows)} calls, {shared} in one windows= call "
+            f"(at most {most} expected); each window the same as its own call: {same}")
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -1145,6 +1205,8 @@ CHECKS = [
      check_share_of_a_negative_balance),
     (41, "A levered account's buying power is a loan fixed at the start, so a grown account cannot use its leverage",
      check_grown_account_funds_its_leverage),
+    (42, "A backtest over several windows, each its own account, costs one front-door call per window",
+     check_windows_share_one_run),
 ]
 
 

@@ -196,6 +196,10 @@ if best is None and job["kind"] != "walk_forward" and not search.empty and progr
     top = f" Most often: {reasons.index[0]} ({reasons.iloc[0]} of {len(search)} trials)." if len(reasons) else ""
     most = (f" The most trades any trial made was {int(search['n_trades'].max()):,}."
             if "n_trades" in search and search["n_trades"].notna().any() else "")
+    if not most and "entries" in search and search["entries"].notna().any():
+        # Every trial ruled out from its signals (optimise.screen), so none was run and none has a trade count.
+        most = (f" The most entry signals any trial had was {int(search['entries'].max()):,}, and every trade opens "
+                "on one.")
     # Why, in the backtests' own words: what vectorbtX said most often about the trials' runs
     # (entries below the minimum size, cut to the leverage), with one trial's words as the example and
     # the Studio's hint for it. Jobs from before 20 November 2026 kept no notes.
@@ -211,13 +215,27 @@ if best is None and job["kind"] != "walk_forward" and not search.empty and progr
                "reason.")
     if hint:
         st.caption(hint)
+# Trials ruled out from their signals, with no backtest (optimise.screen; jobs from 26 November 2026 on).
+screened = int(search["screened"].fillna(False).astype(bool).sum()) if "screened" in search else 0
+if screened:
+    st.caption(f"{screened:,} of {len(search):,} trials were ruled out from their signals alone, with no backtest: "
+               f"each had fewer entry signals than the {int(min_trades):,} trades required, and every trade opens "
+               "on one. They count against the budget; a warm start with a larger budget, or a lower minimum, "
+               "gives the search more to work with.")
 # Only the search can be shown when there is no best trial (a walk-forward job, or none valid).
 view = SEARCH_VIEW
 if best is not None and job["metric"] != "selftest":
     params = jobs.trial_params(best)
     held = summary.get("held_out") or {}
+    # A job scored across folds (optimise.score_folds): its best trial's score is its folds combined, so the
+    # in-sample numbers beside the held-back test's are its run over the whole searched history (the worker's
+    # "in_sample"), one run each side; the folds have a row of their own below.
+    whole_in = summary.get("in_sample")
+    folded = isinstance(best.get("folds_json"), str)
     # The raw score: the objective is the same number for a valid trial (older jobs record only it).
-    in_sample = float(best.get("metric", best["objective"]))
+    in_sample = float(whole_in["metric"]) if whole_in else float(best.get("metric", best["objective"]))
+    in_trades = whole_in["n_trades"] if whole_in else best["n_trades"]
+    in_return = whole_in["total_return"] if whole_in else best["total_return"]
     with ui.card("best-trial", "entry"):
         ui.card_header("best-trial", "Best trial", meta=f"the best {metric_words} of "
                        f"{int(summary.get('n_trials', len(search))):,} tried, on the part of the history the "
@@ -247,13 +265,44 @@ if best is not None and job["metric"] != "selftest":
                               help="Nothing was held back from this job: set a share to hold back on the Optimise "
                                    "page to test the best settings on history the optimiser never saw.")
         columns[2].metric("Trades, in / out of sample",
-                          f"{int(best['n_trades']):,} / " + ("—" if held.get("n_trades") is None
-                                                             else f"{int(held['n_trades']):,}"),
+                          f"{int(in_trades):,} / " + ("—" if held.get("n_trades") is None
+                                                      else f"{int(held['n_trades']):,}"),
                           help="How many trades the best settings made in each part. A handful is not evidence.")
         columns[3].metric("Total return, in / out of sample",
-                          f"{float(best['total_return']):.1%} / " + ("—" if held.get("total_return") is None
-                                                                     else f"{float(held['total_return']):.1%}"),
+                          f"{float(in_return):.1%} / " + ("—" if held.get("total_return") is None
+                                                          else f"{float(held['total_return']):.1%}"),
                           help="Each part is run from the starting cash on its own, as the optimiser scored it.")
+        if folded:
+            # The folds: what the search scored, each fold's own number, and how far choosing the best was luck.
+            fold = json.loads(best["folds_json"])
+            settings_of_folds = summary.get("folds") or job.get("folds") or {}
+            how = settings_of_folds.get("summary", "mean_less_sd")
+            scale = optimise.FOLD_SCALES.get(job["metric"], {})
+            shown_as = scale.get("format", "ratio")
+            combined_label = scale.get("label", metric_label)
+            row = st.columns(4)
+            row[0].metric(f"{combined_label}, across {len(fold['metrics'])} folds",
+                          analysis.shown_number(float(best.get("metric", np.nan)), shown_as),
+                          help=f"What the search scored: the folds combined by \"{optimise.FOLD_SUMMARIES[how]['label']}\". "
+                               f"{optimise.FOLD_SUMMARIES[how]['help']} Each fold is a run of its own from the "
+                               "starting cash." + (" A fold's return counts as its growth a year." if
+                                                   job["metric"] == "total_return" else ""))
+            overfit = optimise.overfitting_probability(search, how, direction)
+            if overfit is not None:
+                row[1].metric("Probability of backtest overfitting", f"{overfit['probability']:.0%}",
+                              help=f"Over {overfit['splits']} ways of splitting the folds in two: how often the best of "
+                                   f"the {overfit['trials']:,} settings tried on one half ranked below the median on "
+                                   "the other half (Bailey, Borwein, López de Prado and Zhu). Near 0, the best on some "
+                                   "history stays good on the rest; 50% or more, picking the best was no better than "
+                                   "picking at random. From the trials' fold scores: no backtest is run.")
+            else:
+                row[1].metric("Probability of backtest overfitting", "—",
+                              help="Needs an even number of folds, at least 4, and at least 10 valid settings tried.")
+            each = ", ".join(analysis.shown_number(value, "pct" if job["metric"] == "total_return" else "ratio")
+                             for value in fold["metrics"])
+            st.caption(f"Each fold's {metric_words}: {each}. Trades in each: "
+                       f"{', '.join(f'{count:,}' for count in fold['trades'])}. In sample is the best settings over the "
+                       "whole searched history in one run, beside the held-back test's one run.")
         # A held-back test with too few trades says nothing, and why it made so few is the useful part (the
         # owner, 25 November 2026: no trade out of sample, and a Sharpe ratio of inf, looked like a bug). It is
         # run from the starting cash, as every trial is; a risk-sized account that grew in the searched years
@@ -379,6 +428,27 @@ if best is not None and job["metric"] != "selftest":
                            "from what the account was worth there, so a risk-sized account that grew trades "
                            "bigger than a new one could, and may trade where a new one cannot. A blank is a "
                            "number the run does not have, such as a Sharpe ratio with no trades.")
+            folds_shown = backtest.get("folds")
+            if folds_shown is not None:
+                # The spread one in-sample number hides (the owner, 26 November 2026): the best settings on each
+                # fold, as the search scored them, beside the searched history's one run (dashed).
+                rows = folds_shown["rows"]
+                st.markdown(f"**The {len(rows)} folds**",
+                            help="The best settings on each fold of the searched history, each a run of its own from "
+                                 "the starting cash, as the search scored them: a box per number, each fold a point, "
+                                 "and the searched history in one run as the dashed line. A narrow spread is settings "
+                                 "that worked throughout; a wide one, settings that worked in some stretches only.")
+                numbers = [column for column, _, _ in analysis.PERIOD_NUMBERS]
+                objective = None
+                if job["metric"] not in numbers:
+                    objective = ("metric", metric_label, "pct" if job["metric"] == "total_return" else "ratio")
+                idle = int((rows["n_trades"].fillna(0) == 0).sum())
+                if idle:
+                    st.caption(f"{idle} of {len(rows)} folds made no trades, so they are left out of the boxes.")
+                if idle < len(rows):
+                    ui.chart(analysis.fig_periods(rows, folds_shown["reference"], theme, objective,
+                                                  title=f"The best settings on each of the {len(rows)} folds",
+                                                  reference_label="Searched history", item="Fold"))
             parts = list(backtest["windows"])
             part = st.segmented_control("Tear sheet of", parts, key=ui.kept("best_backtest_part",
                                                                           analysis.WHOLE_PERIOD, parts),
@@ -591,7 +661,14 @@ if view == SEARCH_VIEW:
             def importance():
                 import optuna
                 study = optuna.load_study(study_name="job", storage=f"sqlite:///{optuna_db.resolve().as_posix()}")
-                found = optuna.importance.get_param_importances(study)
+                # ⚠️ Only the valid trials: an invalid one is a complete trial told a penalty (optimise.run_optuna,
+                # from 26 November 2026), and Optuna's importance reads every complete trial, so the penalties
+                # would make it say which settings decide validity rather than the score.
+                valid = [trial for trial in study.get_trials(deepcopy=False, states=[optuna.trial.TrialState.COMPLETE])
+                         if not any(value > 0 for value in trial.constraints.values())]
+                scored = optuna.create_study(direction=direction)
+                scored.add_trials(valid)
+                found = optuna.importance.get_param_importances(scored)
                 return {names.get(path, {}).get("label", path): value for path, value in found.items()}
             found = ui.run_guarded("Computing importance", importance)
             if found:
@@ -609,12 +686,20 @@ if view == SEARCH_VIEW:
               + [column for column in ("fold",) if job["kind"] == "walk_forward" and column in ordered]
               + [column for column in ("phase", "error", "notes") if column in ordered])
     table = ordered[wanted].rename(columns={column: column.removeprefix("param:") for column in named_columns})
+    score_label = metric_label
+    if "folds_json" in ordered and ordered["folds_json"].notna().any():
+        # Across folds, a search trial's score is its folds combined: shown on the metric's own scale (a return a
+        # year, not its log growth: optimise.fold_value), in the order the search ranked it.
+        how = (summary.get("folds") or job.get("folds") or {}).get("summary", "mean_less_sd")
+        score_label = (f"{optimise.FOLD_SCALES.get(job['metric'], {}).get('label', metric_label)}, "
+                       f"{optimise.FOLD_SUMMARIES[how]['label'].lower()} of the folds")
+        table["objective"] = ordered["metric"].where(np.isfinite(ordered["objective"].astype(float)))
     if "sharpe" in table and "n_trades" in table:
         # ⚠️ vectorbt's Sharpe ratio of a run with no trades is inf (a flat account): blank, as it has none.
         table["sharpe"] = table["sharpe"].where(table["n_trades"].fillna(0) > 0)
     if "backend" in table:
         table["backend"] = table["backend"].map(optimise.search_label)
-    table = table.rename(columns={"trial": "Trial", "objective": metric_label, "n_trades": "Trades",
+    table = table.rename(columns={"trial": "Trial", "objective": score_label, "n_trades": "Trades",
                                   "total_return": "Total return", "max_drawdown": "Max drawdown",
                                   "sharpe": "Sharpe ratio", "profit_factor": "Profit factor", "backend": "Search",
                                   "seed": "Seed", "fold": "Fold", "phase": "Part", "error": "Why it is not valid",
@@ -626,4 +711,7 @@ if view == SEARCH_VIEW:
     st.caption(f"Best first by {metric_words}. A blank score broke a constraint (Why it is not valid says which) or "
                "could not run. What the backtest said: vectorbtX's notes on the trial's run, such as entries below the "
                "minimum size that were not placed. Part: search trials, the held-back check, and the stability "
-               "re-runs.")
+               "re-runs." + (" Across folds, a search or stability trial's score is its folds combined, and its "
+                             "other numbers are the folds' together (trades summed, returns compounded, the worst "
+                             "fold's drawdown); the held-back check and the in-sample run are one run each."
+                             if score_label != metric_label else ""))

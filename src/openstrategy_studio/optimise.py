@@ -4,11 +4,19 @@ Backends are interchangeable because they all receive the same three things:
 a search space, an evaluation function and a budget.
 
     space            {param path: opt dict} in BUTChC's dialect (plan section 5)
-    evaluate_batch   list of params dicts -> list of objective floats (NaN for an
-                     invalid trial). The job worker supplies it: it fans the batch
-                     out to a process pool, records every trial and raises
-                     RuntimeError("cancelled") when the cancel file appears.
+    evaluate_batch   list of params dicts -> list of results, one per params dict, each
+                     with at least "objective" (NaN for an invalid trial) and "violation"
+                     (how far an invalid trial was from valid, above 0; 0 for a valid one).
+                     The job worker supplies it: it fans the batch out to a process pool,
+                     records every trial and raises RuntimeError("cancelled") when the
+                     cancel file appears.
     budget           number of evaluations
+
+How a search hears of an invalid trial matters as much as that it does (26 November 2026): one that
+learns nothing from it keeps sampling where trials are invalid. Optuna is told the trial is complete
+and infeasible by how much (`trial.set_constraint`); Nevergrad, SciPy and marsopt a penalty that grows
+with the violation (`penalty`), so an invalid region still has a way out; BUTChC gets NaN, which it
+ranks as neutral (docs/UPSTREAM.md, BUTChC); grid and random search learn nothing either way.
 
 `evaluate_trial` is the one top-level, picklable function that worker
 processes run. It reads the job and its data from module globals set by
@@ -32,7 +40,25 @@ from scipy import stats
 
 from . import engine
 
-PENALTY = 1e12          # stands in for NaN where a backend needs a finite number
+PENALTY = 1e12          # stands in for NaN where a backend needs a finite number (see penalty)
+
+
+def violation_of(result):
+    """How far a trial was from valid, above 0 for an invalid one: score's "violation", else 1.0 (as far as a
+    trial can be: no trades, or a run vectorbtX refused)."""
+    value = result.get("violation")
+    if value is not None and np.isfinite(value) and value > 0:
+        return float(value)
+    return 1.0
+
+
+def penalty(result):
+    """An invalid trial's score for a search that needs a number, to MINIMISE: PENALTY, more the further the
+    trial was from valid. A flat PENALTY made every invalid trial tie, so a search inside an invalid region
+    had no direction out of it; this one prefers 28 trades to 4 when 30 are needed. Every one is far worse
+    than any valid score, and the order is all the rank-based searches (CMA-ES, differential evolution,
+    particle swarm) read. Under Nevergrad's 5e20, above which it clips and warns."""
+    return PENALTY * (1.0 + min(violation_of(result), 9.0))
 
 # ---------------------------------------------------------------------------
 # Search space
@@ -293,14 +319,63 @@ def evaluate_trial(task):
         # plumbing (and an install) without running a backtest.
         if job.get("selftest_delay"):
             time.sleep(float(job["selftest_delay"]))      # lets the tests cancel a running job
-        return {"params": params, "objective": selftest_objective(job["space"], params), "error": None}
+        value = selftest_objective(job["space"], params)
+        return {"params": params, "objective": value, "error": None, "violation": 0.0 if np.isfinite(value) else 1.0,
+                "screened": False}
     try:
-        run = engine.run_backtest(job["spec"], CONTEXT["data"], params=params, window=task.get("window"),
-                                  data_dir=job["data_dir"], offline=job["settings"].get("offline", False),
-                                  static_rate=job["settings"]["vectorbtx"].get("static_rate"))
+        prepared = engine.prepare_run(job["spec"], CONTEXT["data"], params=params, window=task.get("window"),
+                                      data_dir=job["data_dir"], offline=job["settings"].get("offline", False),
+                                      static_rate=job["settings"]["vectorbtx"].get("static_rate"))
+        if task.get("screen"):
+            # Across folds too: each fold's trades open on its own entry signals, all inside the window.
+            ruled_out = screen(prepared, job)
+            if ruled_out is not None:
+                return {"params": params, **ruled_out}
+        # "windows": the folds, each its own run from the starting cash, in one vectorbtX call (score_folds).
+        run = engine.run_prepared(prepared, windows=task.get("windows"))
     except engine.backtest_error() as error:
-        return {"params": params, "objective": float("nan"), "error": str(error)}
+        return {"params": params, "objective": float("nan"), "error": str(error), "violation": 1.0, "screened": False}
+    if task.get("windows"):
+        return score_folds(run["pfs"], job, params, notes=run["warnings"])
     return score(run["pf"], job, params, want_returns=task.get("want_returns"), notes=run["warnings"])
+
+
+def screen(prepared, job):
+    """A search trial that cannot reach the minimum trades, found from its signals before its simulation; else None.
+
+    A trade opens on an entry signal (an entry signal while a position is held opens nothing), so a run
+    makes at most as many trades as its entry signals in the window. Held in all 325 of the owner's trials
+    checked (26 November 2026, jobs #26 and #27). Counting them costs next to nothing after compiling, which
+    the run needs anyway, while the simulation is ~97% of a trial: on job #26 (walk-forward, 500-bar windows,
+    a 30-trade minimum) 99% of the trials had fewer entry signals than that. A trial ruled out here is a
+    trial like any other: it counts against the budget (the owner's call: a warm start can add budget once
+    the number ruled out shows), and the searches learn from its violation.
+
+    Entries only on a rule strategy (a portfolio trades on its schedule), and not with vectorbt's
+    `accumulate` in the engine details, where an entry adds to a position and exits can close it in parts.
+    ⚠️ The entry frames are the ones the run reads, after order timing's masks; the last bar's signal can
+    fill nowhere, so the bound is loose by at most one per column, never tight the wrong way.
+
+    Not screened: an entry sized under the minimum size at the starting cash (every one would mean no
+    trades). It cost ~18 ms a trial to size them with vectorbtX, against ~0.2 s for the runs it would
+    save, which were 5% of the owner's 62,700 trials: about even, so not worth the code.
+    """
+    min_trades = (job.get("constraints") or {}).get("min_trades")
+    plan = prepared["plan"]
+    if not min_trades or plan["kind"] != "signals" or "accumulate" in plan["args"]:
+        return None
+    entries = 0
+    for key in ("entries", "short_entries"):
+        frame = prepared["compiled"].get(key)
+        if frame is not None:
+            entries += int(pd.DataFrame(frame).fillna(False).to_numpy(dtype=bool).sum())
+    if entries >= min_trades:
+        return None
+    nan = float("nan")
+    return {"objective": nan, "metric": nan, "sharpe": nan, "total_return": nan, "max_drawdown": nan,
+            "n_trades": nan, "profit_factor": nan, "notes": None, "screened": True, "entries": entries,
+            "error": f"at most {entries} trades: only {entries} entry signals (not run)",
+            "violation": (min_trades - entries) / min_trades}
 
 
 def score(pf, job, params, want_returns=False, notes=()):
@@ -315,28 +390,238 @@ def score(pf, job, params, want_returns=False, notes=()):
     """
     extras = trial_extras(pf)
     value = METRICS[job["metric"]]["fn"](pf)
+    result = {"params": params, "objective": value, "metric": value, **extras, "error": None,
+              "notes": first_sentences(notes), "violation": 0.0, "screened": False}
+    judge(result, job)
+    if want_returns:
+        result["returns"] = pf.returns(group_by=True)
+    return result
+
+
+def first_sentences(notes):
+    """The first sentence of each of vectorbtX's warnings, once each, one per line; None for none."""
     said = []
     for note in notes or ():
         # A sentence ends at ". " before a capital: "1.0 £/point" and "2013-12-09" do not end one.
         first = re.split(r"(?<=[.!?])\s+(?=[A-Z])", str(note).strip(), maxsplit=1)[0]
         if first not in said:
             said.append(first)
-    result = {"params": params, "objective": value, "metric": value, **extras, "error": None,
-              "notes": "\n".join(said) or None}
+    return "\n".join(said) or None
+
+
+def judge(result, job, fold_returns=None):
+    """A trial's constraints, in place: an invalid trial's objective becomes NaN, with the first constraint it broke as
+    its "error" and how far from valid it was as its "violation". `fold_returns`: each fold's total return, for the
+    constraint on profitable folds (score_folds)."""
+    # Each constraint broken, with how far from valid the trial was, from 0 (just valid) to 1 (as far as it
+    # goes: no trades at all, a drawdown of the whole account, no profit at all). The searches are told the
+    # sum (`violation`), so they can tell nearly valid from hopeless; the reason shown is the first broken.
     constraints = job.get("constraints") or {}
-    if constraints.get("min_trades") and extras["n_trades"] < constraints["min_trades"]:
+    broken = []
+    min_trades = constraints.get("min_trades")
+    if min_trades and result["n_trades"] < min_trades:
         # Without a trade-count floor, optimisers reliably find parameters that
         # trade twice and win both.
-        result.update(objective=float("nan"), error=f"only {extras['n_trades']} trades")
-    elif constraints.get("max_drawdown") and extras["max_drawdown"] > constraints["max_drawdown"]:
-        result.update(objective=float("nan"), error=f"drawdown {extras['max_drawdown']:.1%}")
-    elif constraints.get("min_profit_factor") and not extras["profit_factor"] >= constraints["min_profit_factor"]:
-        result.update(objective=float("nan"), error=f"profit factor {extras['profit_factor']:.2f}")
-    if want_returns:
-        result["returns"] = pf.returns(group_by=True)
+        broken.append((f"only {result['n_trades']} trades", (min_trades - result["n_trades"]) / min_trades))
+    most = constraints.get("max_drawdown")
+    if most and result["max_drawdown"] > most:
+        broken.append((f"drawdown {result['max_drawdown']:.1%}",
+                       min(1.0, (result["max_drawdown"] - most) / max(1e-9, 1.0 - most))))
+    least = constraints.get("min_profit_factor")
+    if least and not result["profit_factor"] >= least:
+        short = (least - result["profit_factor"]) / least if np.isfinite(result["profit_factor"]) else 1.0
+        broken.append((f"profit factor {result['profit_factor']:.2f}", min(1.0, short)))
+    needed = (job.get("folds") or {}).get("min_profitable")
+    if needed and fold_returns is not None:
+        profitable = sum(1 for value in fold_returns if value > 0)
+        if profitable < needed:
+            broken.append((f"{profitable} of {len(fold_returns)} folds profitable", (needed - profitable) / needed))
+    if broken:
+        result.update(objective=float("nan"), error=broken[0][0], violation=sum(far for _, far in broken))
     if not np.isfinite(result["objective"]):
         result["objective"] = float("nan")
+        if not broken:
+            # Valid by every constraint, but the metric has no value (a Sharpe ratio of a run with no trades,
+            # docs/UPSTREAM.md issue 39): as far from valid as a trial can be.
+            label = METRICS.get(job["metric"], {}).get("label", str(job["metric"]))
+            result.update(error=f"{label} has no value", violation=1.0)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Cross-validation folds
+# ---------------------------------------------------------------------------
+# The owner (26 November 2026): a train/test split and a stability check leave a search free to pick settings
+# that worked in one stretch of the searched history and not the others. With folds, the searched history is
+# cut into back-to-back windows, each trial is run on every one from the starting cash (as the held-back test
+# is), and its objective is the folds' scores combined. The held-back test stays the final, unseen check.
+#
+# How they are combined is the point:
+# * Each fold's score is first put on a scale where a gain and a loss of the same size weigh the same, and
+#   "no edge" is 0 (fold_score): a return as its log growth a year, so -50% and +50% are -0.69 and +0.41 (and
+#   their average is their compounding); a profit factor as its log, so 0.5 and 2 mirror each other; the
+#   ratios as they are. A fold with no trades scores 0, never vectorbt's +inf (docs/UPSTREAM.md issue 39).
+# * On that scale the folds' average is close to the whole run's own score (back-to-back folds of a return
+#   compound to the whole run's), so an average adds nothing to one run. What folds add is how much the score
+#   varies between them, so the default combines them as the average less one standard deviation, the score
+#   of a fairly bad period (about one fold in six, were they normal). The worst fold is stricter and rests on
+#   one fold; the median ignores one disastrous fold; the plain average is offered for comparison.
+# * ⚠️ With few trades a fold, a fold's score is mostly noise: the owner's job #27 made 4 to 8 trades in each of
+#   five folds. The minimum trades applies to the total, and the Optimise page shows the trades per fold.
+
+FOLD_SUMMARIES = {
+    "mean_less_sd": {"label": "Average less one spread",
+                     "help": "The folds' average less their standard deviation: the score of a fairly bad period. "
+                             "Settings that score well in every fold beat settings that score very well in some and "
+                             "badly in others."},
+    "worst": {"label": "Worst fold", "help": "The lowest fold's score: the strictest, and it rests on one fold."},
+    "median": {"label": "Median fold", "help": "The middle fold's score: not moved by one very good or one "
+                                               "disastrous fold, so it does not punish a fold that loses a lot."},
+    "mean": {"label": "Average", "help": "The folds' average: close to the whole searched history's own score, so "
+                                         "it says little that one run does not. For comparison."},
+}
+
+# How a metric's fold scores are put on a scale where a gain and a loss of a size weigh the same, before they are
+# combined (fold_score), and back (fold_value). Every other metric is combined as it is.
+FOLD_SCALES = {"total_return": {"scale": "log_growth", "label": "Return a year", "format": "pct"},
+               "profit_factor": {"scale": "log", "label": "Profit factor", "format": "factor"}}
+
+
+def fold_windows(index, window, count):
+    """`count` back-to-back windows of (nearly) equal bars over `window` of `index` (all of it for None), as (start,
+    end) labels, each at least two bars."""
+    bars = index if window is None else index[(index >= window[0]) & (index <= window[1])]
+    cuts = np.linspace(0, len(bars), int(count) + 1).round().astype(int)
+    out = []
+    for low, high in zip(cuts[:-1], cuts[1:]):
+        if high - low >= 2:
+            out.append((bars[low], bars[high - 1]))
+    return out
+
+
+def fold_score(metric, value, trades, years):
+    """One fold's score on its fold scale (FOLD_SCALES): 0 is no edge, and a fold with no trades scores 0."""
+    if not trades or value is None or np.isnan(value):
+        return 0.0
+    scale = FOLD_SCALES.get(metric, {}).get("scale")
+    if scale == "log_growth":
+        # ⚠️ A fold that lost everything is ln(0): floored at -99.99%, as bad as a fold can be and still a number.
+        return math.log(max(1.0 + float(value), 1e-4)) / max(float(years), 1 / 365.25)
+    if scale == "log":
+        # ⚠️ No losing trade is an infinite profit factor: capped at 100 (and no winning one floored at 0.01), or
+        # one fold of three winners would outweigh every other.
+        return math.log(min(max(float(value), 0.01), 100.0))
+    # A ratio of a fold with no spread (no losing day, no drawdown) is infinite: scored as no edge, like no trades.
+    return float(value) if np.isfinite(value) else 0.0
+
+
+def fold_value(metric, score):
+    """A fold score, or folds combined, back on the metric's own scale: a return a year, a profit factor."""
+    scale = FOLD_SCALES.get(metric, {}).get("scale")
+    if scale == "log_growth":
+        return math.expm1(score)
+    if scale == "log":
+        return math.exp(score)
+    return score
+
+
+def combine_folds(scores, how, direction):
+    """Fold scores combined (FOLD_SUMMARIES), along the last axis: a float for one trial's, an array for a matrix
+    of trials (overfitting_probability). "Less one spread" and "worst" lean the way the search counts as worse."""
+    scores = np.asarray(scores, dtype=float)
+    worse = -1.0 if direction == "maximize" else 1.0
+    if how == "mean":
+        out = scores.mean(axis=-1)
+    elif how == "median":
+        out = np.median(scores, axis=-1)
+    elif how == "worst":
+        out = scores.min(axis=-1) if direction == "maximize" else scores.max(axis=-1)
+    else:
+        spread = scores.std(axis=-1, ddof=1) if scores.shape[-1] > 1 else np.zeros(scores.shape[:-1])
+        out = scores.mean(axis=-1) + worse * spread
+    return float(out) if np.ndim(out) == 0 else out
+
+
+def score_folds(pfs, job, params, notes=()):
+    """A trial scored across folds: each fold's run (`pfs`, one per window, each from the starting cash) scored by
+    the metric, put on its fold scale and combined (job["folds"]["summary"]) into the objective.
+
+    "metric" is the combination back on the metric's own scale (fold_value), what the results page shows; "folds_json"
+    each fold's score, metric, trades and total return, for the page and the overfitting probability. The other
+    numbers every trial records are the folds' together: trades summed, total returns compounded (a chain of fresh
+    accounts), the worst fold's drawdown, the Sharpe ratio of the folds' returns joined end to end, and the profit
+    factor of all their trades. The constraints are judged on those, the minimum trades on the total.
+    """
+    metric, how = job["metric"], (job.get("folds") or {}).get("summary", "mean_less_sd")
+    scores, values, trades, returns, drawdowns = [], [], [], [], []
+    joined, pnl = [], []
+    for pf in pfs:
+        extras = trial_extras(pf)
+        value = METRICS[metric]["fn"](pf)
+        index = pf.wrapper.index
+        years = (index[-1] - index[0]) / pd.Timedelta(days=365.25)
+        scores.append(fold_score(metric, value, extras["n_trades"], years))
+        values.append(float(value))
+        trades.append(int(extras["n_trades"]))
+        returns.append(float(extras["total_return"]))
+        drawdowns.append(float(extras["max_drawdown"]))
+        joined.append(pf.returns(group_by=True))
+        pnl.append(np.asarray(pf.trades.pnl.values, dtype=float))
+    objective = combine_folds(scores, how, job["direction"])
+    pnl = np.concatenate(pnl) if pnl else np.array([])
+    losses = -pnl[pnl < 0].sum()
+    together = pd.concat(joined)
+    result = {"params": params, "objective": objective, "metric": fold_value(metric, objective),
+              "sharpe": float(together.vbt.returns(freq=pfs[0].wrapper.freq).sharpe_ratio()),
+              "total_return": float(np.prod(1.0 + np.asarray(returns)) - 1.0),
+              "max_drawdown": max(drawdowns), "n_trades": sum(trades),
+              "profit_factor": float(pnl[pnl > 0].sum() / losses) if losses > 0 else (np.inf if len(pnl) else np.nan),
+              "error": None, "notes": first_sentences(notes), "violation": 0.0, "screened": False,
+              "folds_json": json.dumps({"scores": scores, "metrics": values, "trades": trades, "returns": returns})}
+    return judge(result, job, fold_returns=returns)
+
+
+def overfitting_probability(trials, how, direction):
+    """The probability of backtest overfitting (Bailey, Borwein, López de Prado and Zhu, "The probability of backtest
+    overfitting", 2017), by combinatorially symmetric cross-validation over the folds every trial was scored on.
+
+    The folds are split into two halves in every way (6 folds: 20 ways). For each, the trial best on one half (its
+    folds combined as the search combined them) is ranked among all the trials on the other half; overfitting is
+    it ranking below the median there. The probability is the share of splits where it does: near 0 means the best
+    on some history stays good on the rest, 0.5 or more means picking the best is no better than picking at random.
+    No backtest is run: it reads the trials' fold scores. Each distinct setting once (a learning search tries the
+    same one many times), from the valid search trials. An even number of folds, at least 4, and 10 settings.
+
+    {"probability", "splits", "trials", "logits" (one per split: ln(w / (1 - w)), w the relative rank out of
+    sample; below 0 is overfit)}, or None.
+    """
+    from itertools import combinations
+
+    if trials is None or trials.empty or "folds_json" not in trials:
+        return None
+    rows = trials[(trials["phase"] == "search") & np.isfinite(trials["objective"].astype(float))
+                  & trials["folds_json"].notna()]
+    rows = rows.drop_duplicates(subset="params_json")
+    if len(rows) < 10:
+        return None
+    matrix = np.array([json.loads(text)["scores"] for text in rows["folds_json"]], dtype=float)
+    count = matrix.shape[1]
+    if count < 4 or count % 2:
+        return None
+    better = 1.0 if direction == "maximize" else -1.0
+    logits = []
+    for chosen in combinations(range(count), count // 2):
+        rest = [fold for fold in range(count) if fold not in chosen]
+        inside = better * combine_folds(matrix[:, list(chosen)], how, direction)
+        outside = better * combine_folds(matrix[:, rest], how, direction)
+        best = int(np.argmax(inside))
+        # The relative rank out of sample, 1 to N over N + 1, ties sharing the average rank.
+        w = stats.rankdata(outside)[best] / (len(outside) + 1)
+        logits.append(float(math.log(w / (1 - w))))
+    logits = np.asarray(logits)
+    # Exactly at the median (a tie) counts half.
+    probability = float(np.mean(np.where(logits < 0, 1.0, np.where(logits == 0, 0.5, 0.0))))
+    return {"probability": probability, "splits": len(logits), "trials": len(rows), "logits": logits.tolist()}
 
 
 def evaluate_chunk(tasks):
@@ -346,7 +631,9 @@ def evaluate_chunk(tasks):
     trial, so a single invalid trial is isolated instead of failing them all.
     """
     job = CONTEXT["job"]
-    if len(tasks) == 1 or tasks[0].get("want_returns") or job["metric"] == "selftest":
+    # Folds run per trial (each trial's folds are one call of their own): the Optimise page offers no folds with
+    # many trials per call, and a job that has both runs its trials one by one here.
+    if len(tasks) == 1 or tasks[0].get("want_returns") or tasks[0].get("windows") or job["metric"] == "selftest":
         return [evaluate_trial(task) for task in tasks]
     params_list = [{key: _python(value) for key, value in task["params"].items()} for task in tasks]
     try:
@@ -422,9 +709,18 @@ def run_optuna(space, evaluate_batch, budget, direction, seed, options):
     conditional spaces by asking for a branch's parameters only when it is chosen.
 
     Verified on Optuna 5.0.0: ask() with no distributions, trial.suggest_* on the
-    returned trial, tell() with a value or state=FAIL, and SQLite storage holding one
-    study per walk-forward fold in one file. Only the worker's main process asks and
-    tells (the pool only evaluates), so SQLite never sees concurrent writers.
+    returned trial, tell() with a value, and SQLite storage holding one study per
+    walk-forward fold in one file. Only the worker's main process asks and tells (the
+    pool only evaluates), so SQLite never sees concurrent writers.
+
+    ⚠️ An invalid trial is told as COMPLETE and infeasible (`trial.set_constraint`, Optuna 5.0's
+    replacement for the sampler's deprecated `constraints_func`), never state=FAIL. TPE learns from
+    complete and pruned trials only (optuna/samplers/_tpe/sampler.py, `_split_trials`), so a failed
+    trial taught it nothing and it kept sampling where trials were invalid; an infeasible one goes in
+    its "bad" group, ranked by how far it was from valid. NSGA-II reads the constraint too. CMA-ES,
+    random and quasi-random ignore it, so the value told is `penalty`'s, which CMA-ES ranks by. Every
+    trial carries the constraint (0 when valid), so the study is constrained throughout; the results
+    page leaves the infeasible ones out of its parameter importance.
     """
     import optuna
 
@@ -455,15 +751,19 @@ def run_optuna(space, evaluate_batch, budget, direction, seed, options):
                                 storage=options.get("storage"), study_name=options.get("study_name", "job"),
                                 load_if_exists=True)
     batch = max(1, int(options.get("batch", 8)))
+    worst = -1.0 if direction == "maximize" else 1.0       # penalty() is a score to minimise
     done = 0
     while done < budget:
         trials = [study.ask() for _ in range(min(batch, budget - done))]
-        values = evaluate_batch([suggest(trial, space, {}) for trial in trials])
-        for trial, value in zip(trials, values):
+        results = evaluate_batch([suggest(trial, space, {}) for trial in trials])
+        for trial, result in zip(trials, results):
+            value = result["objective"]
             if np.isfinite(value):
+                trial.set_constraint("valid", 0.0)
                 study.tell(trial, value)
             else:
-                study.tell(trial, state=optuna.trial.TrialState.FAIL)
+                trial.set_constraint("valid", violation_of(result))
+                study.tell(trial, worst * penalty(result))
         done += len(trials)
     return {}
 
@@ -531,10 +831,11 @@ def run_scipy(space, evaluate_batch, budget, direction, seed, options):
         # scores the penalty, which no best is ever chosen from.
         allowed = dict(list(new.items())[:max(0, budget - ran)])
         if allowed:
-            for text, value in zip(allowed, evaluate_batch(list(allowed.values()))):
-                scores[text] = sign * value if np.isfinite(value) else PENALTY
+            for text, result in zip(allowed, evaluate_batch(list(allowed.values()))):
+                value = result["objective"]
+                scores[text] = sign * value if np.isfinite(value) else penalty(result)
             ran += len(allowed)
-        return [scores.get(text, PENALTY) for text in texts]
+        return [scores.get(text, penalty({})) for text in texts]
 
     method = method_of("scipy", options)
     if method == "dual_annealing":
@@ -573,7 +874,13 @@ def run_butchc(space, evaluate_batch, budget, direction, seed, options):
 
     # An order-preserving map that BUTChC calls with a batch of configs. It
     # ignores fn and evaluates through evaluate_batch, so the job's pool is used.
-    executor = types.SimpleNamespace(map=lambda fn, configs: evaluate_batch(list(configs)))
+    # ⚠️ An invalid trial reaches BUTChC as NaN, which it ranks as neutral (0.5), not bad, so it neither
+    # seeks nor avoids invalid regions (butchc/optimizer.py; docs/UPSTREAM.md, BUTChC). The owner judges
+    # that choice deliberate and will revisit it last (26 November 2026): no penalty is sent instead.
+    def objectives(configs):
+        return [result["objective"] for result in evaluate_batch(list(configs))]
+
+    executor = types.SimpleNamespace(map=lambda fn, configs: objectives(configs))
     keywords = {"direction": direction, "seed": seed, "batch": max(1, int(options.get("batch", 4))),
                 "executor": executor, "verbose": False}
     if options.get("n_warmup"):
@@ -582,7 +889,7 @@ def run_butchc(space, evaluate_batch, budget, direction, seed, options):
         # ⚠️ The warm-start tree must come from a run with the SAME direction.
         with open(options["warm_start"], "rb") as handle:
             keywords["start_prob_tree"] = pickle.load(handle)
-    result = BUTChC_optimize(butchc_space(space), lambda config: evaluate_batch([config])[0], budget, **keywords)
+    result = BUTChC_optimize(butchc_space(space), lambda config: objectives([config])[0], budget, **keywords)
     return {"prob_tree": result.get("prob_tree")}
 
 
@@ -620,7 +927,7 @@ def run_nevergrad(space, evaluate_batch, budget, direction, seed, options):
 
     Flat spaces only. A whole number is searched as a count of its steps from the start (as Optuna keeps
     it on its step), a list as a Choice, a log range as Log; a setting with one value is fixed. Nevergrad
-    minimises, so the objective is negated when maximising, and an invalid trial is told PENALTY (under
+    minimises, so the objective is negated when maximising, and an invalid trial is told `penalty` (under
     the 5e20 above which Nevergrad clips and warns). Each search is told it may have `batch` trials out
     at once (num_workers), which some of its optimisers size their populations by.
     """
@@ -680,9 +987,10 @@ def run_nevergrad(space, evaluate_batch, budget, direction, seed, options):
     done = 0
     while done < budget:
         candidates = [optimiser.ask() for _ in range(min(batch, budget - done))]
-        values = evaluate_batch([decode(candidate.value) for candidate in candidates])
-        for candidate, value in zip(candidates, values):
-            optimiser.tell(candidate, sign * value if np.isfinite(value) else PENALTY)
+        results = evaluate_batch([decode(candidate.value) for candidate in candidates])
+        for candidate, result in zip(candidates, results):
+            value = result["objective"]
+            optimiser.tell(candidate, sign * value if np.isfinite(value) else penalty(result))
         done += len(candidates)
     return {}
 
@@ -706,11 +1014,11 @@ def run_marsopt(space, evaluate_batch, budget, direction, seed, options):
             else:
                 params[name] = float(trial.suggest_float(name, float(opt["min"]), float(opt["max"]),
                                                          log=bool(opt.get("log"))))
-        value = evaluate_batch([params])[0]
-        # NaN handling is not documented, so return a large penalty instead.
-        if np.isfinite(value):
-            return value
-        return -PENALTY if direction == "maximize" else PENALTY
+        result = evaluate_batch([params])[0]
+        # NaN handling is not documented, so return a large penalty instead, graded like the others.
+        if np.isfinite(result["objective"]):
+            return result["objective"]
+        return -penalty(result) if direction == "maximize" else penalty(result)
 
     study = Study(direction=direction, random_state=seed, verbose=False)
     study.optimize(objective, n_trials=budget)
@@ -827,6 +1135,58 @@ def setting_names(spec):
     return {row["path"]: {"label": row["label"], "labels": row.get("labels") or {}} for row in tunable_inputs(spec)}
 
 
+def leverage_cap(spec):
+    """How much of the search asks for trades worth more than the leverage allows, where sizing makes a trade's
+    worth a fixed multiple of the account: {"share" (0 to 1), "leverage", "skip", "what" ("risk" or
+    "notional")}, or None.
+
+    With a stop in % of the price and risk sized as a share of the account (risk_pct), a trade is worth
+    risk ÷ stop times the account, whatever the price (vectorbtX sizes it to lose the risk at the stop): job
+    #27's best, 0.195 over 0.0325, is 6x. Above the leverage, vectorbtX cuts the entry to `leverage x` the equity
+    at its signal bar (or skips it, under when_cash_short "skip"), so in that part of the search the risk makes
+    no difference (or costs trades). A share of the account per trade (notional_pct) above the leverage is the
+    same thing directly. With a stop in points or from a line each trade has a worth of its own, so no share of
+    the search can be named, and None. Only when the sizing or the stop is searched: the Risk tab's trade-size
+    check covers a strategy's own settings. The strictest leverage of the strategy's symbols.
+    """
+    from .spec import variables, when_cash_short
+
+    risk = spec.get("risk") or {}
+    sizing = risk.get("sizing") or {}
+    stop = risk.get("stop") or {}
+    searched = variables(spec)
+    if not spec.get("data", {}).get("symbols") or not searched:
+        return None
+    leverage = min(engine.default_leverage(spec).values(), default=None)
+    if not leverage:
+        return None
+
+    def values(path, current):
+        # Every value the search may try: the list, or the range in fine steps (any searcher may pick between).
+        variable = searched.get(path)
+        if variable is None:
+            return np.array([float(current)])
+        if "values" in variable:
+            return np.array(variable["values"], dtype=float)
+        return np.linspace(float(variable["start"]), float(variable["stop"]), 201)
+
+    if "notional_pct" in sizing and "risk.sizing.notional_pct" in searched:
+        what, worth = "notional", values("risk.sizing.notional_pct", sizing["notional_pct"])
+    elif ("risk_pct" in sizing and stop.get("kind") in ("fixed", "trailing") and stop.get("unit") == "pct"
+          and stop.get("pct") and ({"risk.sizing.risk_pct", "risk.stop.pct"} & set(searched))
+          and not ({"risk.stop.kind", "risk.stop.unit"} & set(searched))):
+        risks = values("risk.sizing.risk_pct", sizing["risk_pct"])
+        stops = values("risk.stop.pct", stop["pct"])
+        with np.errstate(divide="ignore"):
+            what, worth = "risk", (risks[:, None] / stops[None, :]).ravel()      # every pair the search may try
+    else:
+        return None
+    share = float(np.mean(worth > leverage * (1 + 1e-9)))
+    if share == 0:
+        return None
+    return {"share": share, "leverage": float(leverage), "skip": when_cash_short(spec) == "skip", "what": what}
+
+
 def best_trial(trials, direction):
     """The best finite trial from a trials DataFrame, or None."""
     finite = trials[np.isfinite(trials["objective"].astype(float))]
@@ -855,7 +1215,7 @@ def frames_key(data):
 
 
 def range_check(spec, data, space, min_trades, window=None, data_dir=None, offline=False, static_rate=None,
-                cache=None):
+                cache=None, folds=None):
     """Before a job starts: the strategy at its own settings, then each searched setting at both ends of its
     range, on its step as the searches keep it (Optuna moves a stop of 42 by 3 from 10 to 40), or at each of a
     list's options (at most eight, else the first and last), the others at their own; on the history the
@@ -873,6 +1233,10 @@ def range_check(spec, data, space, min_trades, window=None, data_dir=None, offli
     or a change of backend runs nothing, and a widened range runs only its new end (the owner, 25 November
     2026: each run of a levered, risk-sized strategy can take 30 s). Whether a point is enough is worked out
     afresh from `min_trades`, which is not in the key.
+
+    `folds`: a number of folds, when the job scores trials across them (score_folds). The strategy's own
+    settings then also say how many trades each fold makes ("fold_trades"), which is what decides whether a
+    fold's score means anything: a fold of five trades is mostly noise.
     """
     from .config import VECTORBTX_KEYS
     from .jobs import read_json, write_json
@@ -903,7 +1267,8 @@ def range_check(spec, data, space, min_trades, window=None, data_dir=None, offli
     ran = False
     for path, value in points:
         params = {} if path is None else {path: _python(value)}
-        key = spec_hash({**base, "params": params})
+        # The folds are in the own settings' key only: no other point counts its trades per fold.
+        key = spec_hash({**base, "params": params, **({"folds": int(folds)} if folds and path is None else {})})
         found = known.get(key)
         cached = found is not None
         if not cached:
@@ -920,6 +1285,12 @@ def range_check(spec, data, space, min_trades, window=None, data_dir=None, offli
                 # The trade count and the notes only: no constraint, and the cheapest metric.
                 result = score(run["pf"], {"metric": "total_return"}, params, notes=run["warnings"])
                 found = {"trades": result["n_trades"], "error": None, "notes": result["notes"]}
+                if folds and path is None:
+                    cuts = fold_windows(data["close"].index, window, int(folds))
+                    split = engine.run_prepared(engine.prepare_run(spec, data, params=params, window=window,
+                                                                   data_dir=data_dir, offline=offline,
+                                                                   static_rate=static_rate), windows=cuts)
+                    found["fold_trades"] = [trial_extras(pf)["n_trades"] for pf in split["pfs"]]
             known[key] = found          # appended, so the oldest points are the ones dropped
         rows.append({"path": path, "value": value, **found, "cached": cached,
                      "enough": found["trades"] is not None and (not min_trades or found["trades"] >= min_trades)})

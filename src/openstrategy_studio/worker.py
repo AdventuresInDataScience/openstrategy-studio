@@ -42,9 +42,12 @@ def main(job_dir):
     # and the stability re-runs are extra). `stage` says in words what is happening now.
     progress = {"status": "running", "done": 0, "budget": job["budget"], "best_value": None,
                 "best_params": None, "pid": os.getpid(), "started_at": jobs.now(),
-                "stage": "Loading the data and the backtest engine", "searching_since": None}
+                "stage": "Loading the data and the backtest engine", "searching_since": None, "screened": 0}
     summary = {}
     pool = None
+    # The folds each search and stability trial is scored across (optimise.score_folds), or None: back-to-back
+    # windows of the searched history, set below once the data is loaded.
+    folds = None
     # The heartbeat: touched every few seconds from a thread of its own, whatever the search is
     # doing, so a stale one means the process has gone (jobs.read_progress checks).
     beating = threading.Event()
@@ -80,6 +83,8 @@ def main(job_dir):
         if progress["searching_since"] is None:
             progress["searching_since"] = jobs.now()
         progress["stage"] = "Searching"
+        if result.get("screened"):
+            progress["screened"] += 1           # ruled out from its signals, with no backtest (optimise.screen)
         value = result["objective"]
         if np.isfinite(value):
             best = progress["best_value"]
@@ -92,7 +97,13 @@ def main(job_dir):
         """Run a batch through the pool, record every trial, return the full results."""
         if (job_dir / "cancel").exists():
             raise RuntimeError("cancelled")
-        tasks = [{"params": params, "window": window, "want_returns": want_returns} for params in params_list]
+        # Only a search trial is screened (optimise.screen): the held-back test, the stability check and a
+        # walk-forward fold's test are run whatever their signals, as their numbers are reported. With folds,
+        # the search and stability trials are scored across them, so the stability check scores its
+        # neighbours as the search scored the best; the held-back test is one run, as ever.
+        windows = folds if phase in ("search", "stability") else None
+        tasks = [{"params": params, "window": window, "want_returns": want_returns, "screen": phase == "search",
+                  "windows": windows} for params in params_list]
         if current["backend"] == "grid" and optimise.method_of("grid", current["options"]) == "vectorised":
             # Many trials per backtest call: one contiguous chunk per worker process.
             size = max(1, -(-len(tasks) // max(1, int(job.get("workers", 1)))))
@@ -148,8 +159,7 @@ def main(job_dir):
             options["study_name"] = label or "job"
         start = len(rows)
         extra = optimise.BACKENDS[current["backend"]]["fn"](
-            space, lambda params_list: [r["objective"] for r in evaluate(params_list, window, "search")],
-            budget, direction, seed, options)
+            space, lambda params_list: evaluate(params_list, window, "search"), budget, direction, seed, options)
         if extra.get("prob_tree") is not None:
             with open(job_dir / f"prob_tree{'' if label is None else '_' + label}.pkl", "wb") as handle:
                 pickle.dump(extra["prob_tree"], handle)
@@ -177,6 +187,10 @@ def main(job_dir):
         train = test = None
         if job.get("split"):
             train, test = optimise.split_window(index, float(job["split"]["train_fraction"]))
+        if job.get("folds") and job["kind"] != "walk_forward":
+            # Over the searched history only: the held-back part stays unseen.
+            folds = optimise.fold_windows(index, train, int(job["folds"]["count"]))
+            summary["folds"] = {**job["folds"], "windows": [[str(start), str(end)] for start, end in folds]}
 
         if job["kind"] == "walk_forward":
             settings = job["walk_forward"]
@@ -233,6 +247,15 @@ def main(job_dir):
                 params = json.loads(best["params_json"])
                 summary["best_params"] = params
                 summary["best_value"] = float(best["objective"])
+                if folds:
+                    # The best trial's score is its folds combined; the whole searched history in one run, from
+                    # the starting cash, is the number to set beside the held-back test's (the results page).
+                    progress["stage"] = "Running the best settings on the whole searched history"
+                    write_progress()
+                    whole = evaluate([params], train, "in_sample")[0]
+                    summary["in_sample"] = {key: whole.get(key) for key in
+                                            ("metric", "sharpe", "total_return", "max_drawdown", "n_trades", "notes",
+                                             "error")}
                 if test is not None:
                     progress["stage"] = "Testing the best settings on the held-back history"
                     write_progress()

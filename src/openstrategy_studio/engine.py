@@ -909,6 +909,21 @@ def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=Fa
     indicators are warmed up and nothing looks ahead (walk-forward and train/test
     splits rely on this). Returns {"pf", "spec", "data", "compiled", "plan",
     "warnings"}: "warnings" is vectorbtX's notes about this run, in plain text.
+
+    Two steps, prepare_run and run_prepared, which the optimiser also calls apart: it looks at a
+    trial's signals between them, and rules out a trial that cannot reach the minimum trades
+    before paying for its simulation (optimise.screen).
+    """
+    return run_prepared(prepare_run(spec, data, params=params, window=window, data_dir=data_dir,
+                                    offline=offline, static_rate=static_rate))
+
+
+def prepare_run(spec, data, params=None, window=None, data_dir=None, offline=False, static_rate=None):
+    """Everything run_backtest does before the vectorbtX call: {"spec", "data", "compiled", "plan",
+    "kwargs"}, where "kwargs" are the front door's keyword arguments, ready to pass.
+
+    Compiling is a small part of a trial (0.03 s of 1.0 s on the owner's job #27, 26 November 2026):
+    the simulation is the rest.
     """
     from .compile import compile_signals, compile_weights   # compile imports this module
 
@@ -948,7 +963,22 @@ def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=Fa
     kwargs = {}
     for keyword, (how, value) in plan["args"].items():
         kwargs[keyword] = runtime[value] if how == "var" else value
-    front_door = getattr(vectorbtx().x, plan["front_door"])
+    return {"spec": spec, "data": prepared, "compiled": compiled, "plan": plan, "kwargs": kwargs}
+
+
+def run_prepared(prepared, windows=None):
+    """The one vectorbtX call of a run prepare_run made: run_backtest's result.
+
+    `windows`: [(start, end), ...] inside the prepared run's history, both ends included. Each is then a run
+    of its own from the starting cash, exactly as the same call on that window alone, all in one vectorbtX
+    call (`windows=`, vectorbtX issue 42 in docs/UPSTREAM.md), so the re-sizing loop's work is paid once
+    rather than per window. The result's "pfs" holds one portfolio per window, in order, and "pf" is None.
+    A warning about one window's run names its column as "<symbol> (window k)", k from 1.
+    """
+    kwargs = dict(prepared["kwargs"])
+    if windows is not None:
+        kwargs["windows"] = [(start, end) for start, end in windows]
+    front_door = getattr(vectorbtx().x, prepared["plan"]["front_door"])
     # ⚠️ vectorbtX reports what it could not price as WARNINGS, not errors: a short held
     # with no borrow_rate (borrowed for free), a carry leg with no currency, high/low that
     # do not bracket the close. Python sends warnings to the console, which a Studio user
@@ -963,7 +993,11 @@ def run_backtest(spec, data, params=None, window=None, data_dir=None, offline=Fa
         message = str(warning.message)
         if issubclass(warning.category, UserWarning) and message not in notes:
             notes.append(message)
-    return {"pf": pf, "spec": spec, "data": prepared, "compiled": compiled, "plan": plan, "warnings": notes}
+    out = {"pf": pf, "spec": prepared["spec"], "data": prepared["data"], "compiled": prepared["compiled"],
+           "plan": prepared["plan"], "warnings": notes}
+    if windows is not None:
+        out.update(pf=None, pfs=list(pf))
+    return out
 
 
 # ---------------------------------------------------------------------------

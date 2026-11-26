@@ -111,7 +111,7 @@ def test_optuna_searches_a_conditional_space():
 
     def evaluate_batch(batch):
         seen.extend(batch)
-        return [conditional_objective(params) for params in batch]
+        return [{"objective": conditional_objective(params), "violation": 0.0} for params in batch]
 
     O.run_optuna(CONDITIONAL, evaluate_batch, 60, "maximize", 0, {"batch": 4})
     assert all(("x" in p) != ("y" in p) for p in seen), "only the chosen branch's parameters are sampled"
@@ -125,7 +125,7 @@ def test_butchc_searches_a_conditional_space():
 
     def evaluate_batch(batch):
         seen.extend(batch)
-        return [conditional_objective(params) for params in batch]
+        return [{"objective": conditional_objective(params), "violation": 0.0} for params in batch]
 
     O.run_butchc(CONDITIONAL, evaluate_batch, 80, "maximize", 0, {"batch": 4})
     assert max(seen, key=conditional_objective)["family"] == "b"

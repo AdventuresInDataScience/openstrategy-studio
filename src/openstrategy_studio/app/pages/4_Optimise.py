@@ -13,8 +13,8 @@ import pandas as pd
 import streamlit as st
 
 from openstrategy_studio import analysis, data as data_module, engine, jobs, optimise, ui
-from openstrategy_studio.spec import (collect_choices, default_variable, spec_hash, tunable_inputs, validate_spec,
-                                      variable_values, variables)
+from openstrategy_studio.spec import (collect_choices, default_variable, spec_hash, strategy_kind, tunable_inputs,
+                                      validate_spec, variable_values, variables)
 
 settings, data_dir = ui.boot("Optimise")
 ui.page_help("optimise")
@@ -160,6 +160,24 @@ with ui.section(f"Variables to optimise ({len(found)})" if found else "Variables
             st.caption(f"{size} value{'s' if size != 1 else ''} on the grid.")
     if counts:
         st.caption(f"{math.prod(counts):,} combinations in a full grid.")
+    # Part of the search that asks for more than the leverage funds (optimise.leverage_cap): there each entry is
+    # cut to the leverage, so the risk setting makes no difference, or skipped, so trials lose trades.
+    capped = optimise.leverage_cap(spec)
+    if capped:
+        leverage = f"{capped['leverage']:g}x"
+        happens = ("skipped (a trade too big to fund is skipped, on the Risk tab), so those trials lose trades"
+                   if capped["skip"] else "cut to the leverage, so there the risk makes no difference")
+        if capped["what"] == "risk":
+            st.warning(f"In {capped['share']:.0%} of the risk and stop combinations searched, a trade is worth more "
+                       f"than the {leverage} leverage allows. With a stop in % of the price, a trade risking r over a "
+                       f"stop of s is worth r ÷ s times the account (0.20 over 0.04 is 5x), and each such entry is "
+                       f"{happens}. A share of the account per trade (Position size, on the Build page's Risk tab), "
+                       f"searched up to {capped['leverage']:g} beside the stop, covers the same trades with every one "
+                       "funded: the risk is then the share times the stop.", icon=":material/warning:")
+        else:
+            st.warning(f"In {capped['share']:.0%} of the range searched, a position is worth more than the {leverage} "
+                       f"leverage allows, and each such entry is {happens}. A range up to {capped['leverage']:g} "
+                       "searches only what can be funded.", icon=":material/warning:")
 
     searchable = [path for path in collect_choices(spec) if f"{path}.choose" in variables(spec)]
     structure = False
@@ -346,11 +364,58 @@ with ui.section("Robustness", "risk", "opt-robustness"):
                             key=ui.kept("holdout", 30),
                             help="The optimiser never sees it; the best trial is then run on it once, from the "
                                  "starting cash, as each search trial is.") / 100
+    # Cross-validation folds (optimise.score_folds): one search or a comparison; a walk-forward fold is one window
+    # already. Kept for each way of running, like the stability check. A rule strategy only: vectorbtX runs a
+    # call's windows for signals, and refuses weights (a portfolio's cash fit and leverage budget span every
+    # column of a bar), so a portfolio's every trial would fail (docs/UPSTREAM.md issue 42).
+    fold_settings = None
+    folds_allowed = not walk and strategy_kind(spec) == "signals"
+    use_folds = st.toggle("Score each trial across folds", disabled=not folds_allowed,
+                          key=ui.kept(f"folds:{mode}", False),
+                          help="Cuts the searched history into back-to-back folds and runs each trial on every one, "
+                               "from the starting cash, then combines the folds' scores into the trial's score. "
+                               "Settings that worked in one stretch of the history and not the others then score "
+                               "lower. The held-back history stays unseen, the final test. Entry and exit rule "
+                               "strategies only, and not with walk-forward, whose folds are windows already.")
+    if not walk and not folds_allowed:
+        st.caption("Folds score entry and exit rule strategies only, for now: vectorbtX does not yet run a "
+                   "portfolio's weights over windows.")
+    if use_folds and folds_allowed:
+        row = st.columns(3)
+        fold_count = int(row[0].number_input("Folds", min_value=2, max_value=20, step=1, key=ui.kept("fold_count", 6),
+                                             help="How many back-to-back parts the searched history is cut into, of "
+                                                  "equal bars. More folds show more of the spread, with fewer trades "
+                                                  "in each. An even number also gives the probability of backtest "
+                                                  "overfitting on the results page."))
+        summaries = list(optimise.FOLD_SUMMARIES)
+        fold_summary = row[1].selectbox("Combine the folds by", summaries,
+                                        key=ui.kept("fold_summary", "mean_less_sd", summaries),
+                                        format_func=lambda name: optimise.FOLD_SUMMARIES[name]["label"],
+                                        help=" ".join(f"{item['label']}: {item['help']}"
+                                                      for item in optimise.FOLD_SUMMARIES.values()))
+        least = int(row[2].number_input("Folds that must be profitable (0 = off)", min_value=0, step=1,
+                                        key=ui.kept("fold_min_profitable", 0),
+                                        help="A trial with fewer folds that made money than this counts as invalid: "
+                                             "consistency as a rule, beside the score."))
+        if least > fold_count:
+            st.warning(f"No trial can have {least} profitable folds out of {fold_count}: lower it, or add folds.")
+        fold_settings = {"count": fold_count, "summary": fold_summary, "min_profitable": least or None}
+        scale = optimise.FOLD_SCALES.get(metric)
+        st.caption(optimise.FOLD_SUMMARIES[fold_summary]["help"]
+                   + (" Each fold's return counts as its growth a year (its log), so a fold that halved weighs as much "
+                      "as one that doubled." if metric == "total_return" else
+                      " Each fold's profit factor counts as its log, so 0.5 and 2 weigh the same." if scale else "")
+                   + " A fold with no trades scores as no edge. The minimum trades applies to the folds' total. Each "
+                     "trial runs every fold in one backtest call.")
+        if backend == "grid" and method == "vectorised" and mode != "compare":
+            st.warning("Many trials per backtest cannot score across folds: pick one trial per backtest, or turn the "
+                       "folds off.", icon=":material/warning:")
     # Kept for each way of running, as it only applies to one search: off and greyed out for the others.
     stability = st.checkbox("Check parameter stability (re-run ±10% around the best)", disabled=mode != "optimise",
                             key=ui.kept(f"stability:{mode}", mode == "optimise"),
                             help="Re-runs settings near the best one. Good neighbours mean a broad, real edge; poor "
-                                 "ones mean a lucky spike. One search only.")
+                                 "ones mean a lucky spike. One search only. With folds, each neighbour is scored "
+                                 "across them, as the search scored the best.")
 
 # --- start ---------------------------------------------------------------------------------
 row = st.columns([2, 1])
@@ -366,6 +431,9 @@ if backend == "grid" and method == "vectorised" and mode != "compare" and not en
     blocked = True
 if mode == "compare" and not (compare_settings or {}).get("backends"):
     blocked = True
+if fold_settings and (backend == "grid" and method == "vectorised" and mode != "compare"
+                      or (fold_settings["min_profitable"] or 0) > fold_settings["count"]):
+    blocked = True
 
 
 def start():
@@ -376,7 +444,7 @@ def start():
            "constraints": {"min_trades": int(min_trades) or None, "max_drawdown": max_drawdown or None,
                            "min_profit_factor": min_profit_factor or None},
            "split": {"train_fraction": 1 - holdout} if holdout and not walk else None,  # compare uses it too
-           "walk_forward": walk_settings, "stability": stability,
+           "walk_forward": walk_settings, "stability": stability, "folds": fold_settings,
            "fingerprint": data_module.fingerprint(data_dir, spec, frames)}
     return jobs.start_job(data_dir, job, frames)
 
@@ -391,8 +459,8 @@ def start():
 # What the check shown was made for, so it is not shown for other settings. Each point's run is also kept
 # on disk (optimise.range_check's cache), so checking again after leaving the page or a restart runs only
 # the points it has not run before (none, for the same settings).
-signature = json.dumps([spec_hash(spec), space, int(min_trades), holdout, walk_settings], sort_keys=True,
-                       default=str)
+signature = json.dumps([spec_hash(spec), space, int(min_trades), holdout, walk_settings,
+                        (fold_settings or {}).get("count")], sort_keys=True, default=str)
 checked = st.session_state.get("range_check")
 if checked is not None and checked["signature"] != signature:
     checked = None
@@ -409,7 +477,8 @@ def check_ranges():
     rows = optimise.range_check(spec, frames, space, int(min_trades), window=window, data_dir=data_dir,
                                 offline=settings.get("offline", False),
                                 static_rate=settings["vectorbtx"].get("static_rate"),
-                                cache=data_dir / "cache" / "range_check.json")
+                                cache=data_dir / "cache" / "range_check.json",
+                                folds=(fold_settings or {}).get("count"))
     return {"signature": signature, "rows": rows, "hopeless": bool(min_trades) and not any(r["enough"] for r in rows)}
 
 
@@ -472,6 +541,19 @@ if checked is not None:
     else:
         st.caption(f"Checked: the strategy at its own settings and every end of every range make at least "
                    f"{int(min_trades):,} trades on the history the search uses.")
+    # With folds: the trades each fold makes at the strategy's own settings. ⚠️ A fold's score from a handful of
+    # trades is mostly noise (the owner's job #27: 4 to 8 a fold), and combining the folds then rewards luck.
+    fold_trades = own.get("fold_trades")
+    if fold_settings and fold_trades:
+        counted = ", ".join(f"{count:,}" for count in fold_trades)
+        if min(fold_trades) < 10:
+            trade_metric = optimise.METRICS[metric]["label"] in ("Profit factor", "Expectancy", "SQN", "GHPR")
+            st.warning(f"At its own settings the strategy makes {counted} trades in the {len(fold_trades)} folds. Under "
+                       "about 10 trades a fold, a fold's score is mostly chance, and combining the folds rewards luck: "
+                       "use fewer folds" + (", or a metric of the returns (such as the Sharpe ratio) rather than of "
+                                            "the trades" if trade_metric else "") + ".", icon=":material/warning:")
+        else:
+            st.caption(f"At its own settings the strategy makes {counted} trades in the {len(fold_trades)} folds.")
     with st.expander("The ranges' ends, checked", expanded=checked["hopeless"]):
         ui.table(pd.DataFrame(shown_rows), column_config={
             "What the backtest said": st.column_config.TextColumn(width="large")})
@@ -545,6 +627,9 @@ def job_list():
             # How long it has run, and how long is left at the pace of the trials so far (once a few
             # are in: the first ones also carry each process's start).
             parts = [f"{done:,} of {total:,} trials"]
+            if job.screened and not pd.isna(job.screened):
+                # optimise.screen: too few entry signals for the minimum trades, so no backtest was run.
+                parts.append(f"{int(job.screened):,} ruled out from their signals")
             if job.best_value is not None and not pd.isna(job.best_value):
                 parts.append(f"best so far {job.best_value:.4g}")
             elapsed = since(job.started_at)

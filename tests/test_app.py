@@ -1000,10 +1000,10 @@ def test_every_card_folds_by_its_title(tmp_path, monkeypatch):
     assert not app.exception, [item.value for item in app.exception]
 
 
-def finished_job(tmp_path, held_back=0.3, constraints=None, instrument=None):
+def finished_job(tmp_path, held_back=0.3, constraints=None, instrument=None, folds=None, budget=6):
     """A small real optimisation (the MA cross on synthetic prices, six random trials, 30% held back), run in
     this process: the worker's own main, on a job folder written as jobs.start_job writes one. `instrument`:
-    fields to change on the pair."""
+    fields to change on the pair; `folds`: the job's folds, as the Optimise page sets them."""
     import pickle
     from openstrategy_studio import config, jobs, optimise, store, worker
     from conftest import make_ohlcv
@@ -1017,17 +1017,18 @@ def finished_job(tmp_path, held_back=0.3, constraints=None, instrument=None):
     spec["optimise"]["variables"] = {"features.fast.params.timeperiod": {"start": 3, "stop": 8, "step": 1},
                                      "features.slow.params.timeperiod": {"start": 15, "stop": 30, "step": 5}}
     job = {"name": "MA cross: random", "kind": "optimise", "spec": spec, "space": optimise.build_space(spec),
-           "compare": None, "backend": "random", "backend_options": {"batch": 1}, "budget": 6, "metric": "sharpe",
+           "compare": None, "backend": "random", "backend_options": {"batch": 1}, "budget": budget, "metric": "sharpe",
            "direction": "maximize", "seed": 0, "workers": 1, "settings": config.load_settings(),
            "constraints": constraints or {}, "split": {"train_fraction": 1 - held_back} if held_back else None,
-           "walk_forward": None, "stability": False, "job_id": "test-job", "created_at": jobs.now(),
+           "walk_forward": None, "stability": False, "folds": folds, "job_id": "test-job", "created_at": jobs.now(),
            "data_dir": str(data_dir)}
     job_dir = data_dir / "jobs" / "test-job"
     job_dir.mkdir(parents=True)
     jobs.write_json(job_dir / "job.json", job)
     with open(job_dir / "frames.pkl", "wb") as handle:
         pickle.dump(make_ohlcv(500, ("EURUSD=X",)), handle)
-    jobs.write_json(job_dir / "progress.json", {"status": "starting", "done": 0, "budget": 6, "updated_at": jobs.now()})
+    jobs.write_json(job_dir / "progress.json", {"status": "starting", "done": 0, "budget": budget,
+                                                "updated_at": jobs.now()})
     store.add_job(data_dir, "test-job", job["name"], "optimise", "random", job["created_at"], job_dir)
     assert worker.main(job_dir) == "done", jobs.read_progress(job_dir).get("error")
     return job_dir
@@ -1477,8 +1478,57 @@ def test_a_stopped_job_is_reported_until_another_is_started(tmp_path, monkeypatc
     assert table["#"].tolist() == [2, 1]
 
 
+def test_a_job_scored_across_folds_shows_them(tmp_path, monkeypatch):
+    """The owner (26 November 2026): the best trial's numbers in sample should carry a range from the folds. A real
+    job scored across six folds: the card sets the whole searched history beside the held-back test, then the
+    folds combined and the probability of backtest overfitting; the backtest's table has a column across the
+    folds, with a box per number under it."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    from conftest import windows_or_skip
+
+    windows_or_skip()
+    from openstrategy_studio import jobs
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    job_dir = finished_job(tmp_path, folds={"count": 6, "summary": "mean_less_sd", "min_profitable": None},
+                           budget=16)
+    summary = jobs.read_summary(job_dir)
+    assert len(summary["folds"]["windows"]) == 6 and summary["in_sample"]["n_trades"] is not None
+    trials = jobs.read_trials(job_dir)
+    assert trials[trials["phase"] == "search"]["folds_json"].notna().all()
+    assert set(trials["phase"]) >= {"search", "in_sample", "held_out"}
+    app = testing.AppTest.from_file(str(APP / "pages" / "5_Optimiser_results.py"), default_timeout=300)
+    app.run()
+    assert not app.exception, [item.value for item in app.exception]
+    labels = [item.label for item in app.metric]
+    assert "Sharpe ratio, across 6 folds" in labels and "Probability of backtest overfitting" in labels, labels
+    assert any(item.value.startswith("Each fold's Sharpe ratio: ") for item in app.caption)
+    table = next(frame.value for frame in app.dataframe if "In sample, across its 6 folds" in frame.value.columns)
+    assert ", median " in table.set_index("")["In sample, across its 6 folds"]["Trades"]
+    assert any("The 6 folds" in item.value for item in app.markdown)
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+    # The Optimise page: folds for a rule strategy, with what each choice does; never for a portfolio.
+    page = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    page.session_state["spec"] = load_template("ma_cross")
+    page.session_state["spec_rev"] = 0
+    page.run()
+    toggle = next(item for item in page.toggle if item.label == "Score each trial across folds")
+    toggle.set_value(True).run()
+    assert not page.exception, [item.value for item in page.exception]
+    assert {"Folds", "Folds that must be profitable (0 = off)"} <= {item.label for item in page.number_input}
+    assert "Combine the folds by" in [item.label for item in page.selectbox]
+    assert not settings_without_a_tooltip(page), settings_without_a_tooltip(page)
+    portfolio = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    portfolio.session_state["spec"] = load_template("sixty_forty")
+    portfolio.session_state["spec_rev"] = 0
+    portfolio.run()
+    assert next(item for item in portfolio.toggle if item.label == "Score each trial across folds").disabled
+
+
 def test_a_job_with_no_valid_trial_says_why(tmp_path, monkeypatch):
-    """Every trial under the minimum trades: the page says so, with the commonest reason, not an empty page."""
+    """Every trial under the minimum trades: the page says so, with the commonest reason, not an empty page. Here a
+    minimum no trial's entry signals reach, so every trial is ruled out from its signals, with no backtest
+    (optimise.screen), and the page says that, and how many it counted."""
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
     monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
@@ -1487,18 +1537,22 @@ def test_a_job_with_no_valid_trial_says_why(tmp_path, monkeypatch):
     app.run()
     assert not app.exception, [item.value for item in app.exception]
     (warning,) = [item.value for item in app.warning if "No trial was valid" in item.value]
-    assert "Most often: only N trades (6 of 6 trials)" in warning and "The most trades any trial made was" in warning
+    assert "Most often: at most N trades: only N entry signals (not run) (6 of 6 trials)" in warning, warning
+    assert "The most entry signals any trial had was" in warning, warning
+    assert any(item.value.startswith("6 of 6 trials were ruled out from their signals alone") for item in app.caption)
     assert not [item for item in app.metric if "in sample" in item.label]
 
 
 def test_a_job_with_no_valid_trial_says_what_the_backtests_said(tmp_path, monkeypatch):
     """The owner's MA job (20 November 2026): every trial said only "only 1 trades". Now the page names what
     vectorbtX said most often about the trials' runs, with the Studio's hint, and each trial's notes are in
-    the table. Here every entry is under the minimum stake (risk 100 over 60 points is a stake of 1.67)."""
+    the table. Here every entry is under the minimum stake (risk 100 over 60 points is a stake of 1.67). A minimum
+    of one trade, which every trial's signals reach, so each is run (a higher one is ruled out from the signals
+    before vectorbtX can say anything: optimise.screen)."""
     testing = pytest.importorskip("streamlit.testing.v1")
     pytest.importorskip("vectorbtx")
     monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
-    finished_job(tmp_path, constraints={"min_trades": 30}, instrument={"min_size": 5.0})
+    finished_job(tmp_path, constraints={"min_trades": 1}, instrument={"min_size": 5.0})
     app = testing.AppTest.from_file(str(APP / "pages" / "5_Optimiser_results.py"), default_timeout=180)
     app.run()
     assert not app.exception, [item.value for item in app.exception]

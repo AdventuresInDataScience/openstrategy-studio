@@ -267,6 +267,7 @@ def list_jobs(data_dir):
                      "kind": job["kind"], **_asked(job["path"]),
                      "backend": job["backend"], "created_at": job["created_at"], "status": progress["status"],
                      "done": progress.get("done", 0), "budget": progress.get("budget", 0),
+                     "screened": progress.get("screened", 0),     # of `done`, ruled out from their signals
                      "best_value": progress.get("best_value"), "path": job["path"],
                      # For the Optimise page's progress card: what it is doing, and since when.
                      "stage": progress.get("stage"), "fold": progress.get("fold"),

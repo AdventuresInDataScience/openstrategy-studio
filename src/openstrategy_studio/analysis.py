@@ -12,6 +12,7 @@ code mentions a theme.
 
 import json
 import math
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -833,7 +834,7 @@ OUT_OF_SAMPLE = "Out of sample (held back)"
 WHOLE_PERIOD = "Whole period"
 CONTINUING = "Held back, inside the whole run"
 # What split_backtest returns: a saved backtest of another version is run again (the page checks).
-SPLIT_BACKTEST_VERSION = 2
+SPLIT_BACKTEST_VERSION = 3          # 3: the folds (26 November 2026)
 
 
 def shown_number(value, how):
@@ -918,12 +919,19 @@ def split_backtest(job, frames, params, settings):
     the chart traded in the held-back years while the out-of-sample column made no trade at all,
     because a new account of 10,000 sized every entry below the minimum stake there.
 
+    A job scored across folds also has the folds (version 3, 26 November 2026): the best settings on each
+    fold of the searched history, each its own run from the starting cash as the search scored them, in a
+    row each, and a column "In sample, across its N folds" giving each number's lowest to highest, with the
+    median: the spread one in-sample number hides (the owner's point).
+
     Returns {"version", "results": extract_results of the whole run (with buy and hold),
     "windows": {part: extract_results of that part's own run}, "split": the first held-back bar
-    or None, "table": the numbers by part, formatted for the page}. Each part's vectorbtX
+    or None, "table": the numbers by part, formatted for the page, "folds": None, or {"rows": one per
+    fold ("fold", "from", "to", "annualised_return", "score" (its fold score) and score's keys),
+    "reference": the same numbers for the searched history in one run}}. Each part's vectorbtX
     warnings are in its results' meta, as a backtest's are.
     """
-    from .optimise import METRICS, split_window, trial_extras
+    from .optimise import METRICS, _scalar, fold_score, fold_windows, score, split_window, trial_extras
 
     keywords = {"data_dir": job.get("data_dir"), "offline": bool(settings.get("offline")),
                 "static_rate": (settings.get("vectorbtx") or {}).get("static_rate")}
@@ -937,6 +945,7 @@ def split_backtest(job, frames, params, settings):
     metric = METRICS.get(job["metric"])
     columns = {}
     shown = {}
+    searched = None             # the run of the history the search saw: in sample, or the whole when nothing was held back
     for label, window in windows.items():
         run = whole if window is None else engine.run_backtest(job["spec"], frames, params=params, window=window,
                                                                **keywords)
@@ -946,6 +955,33 @@ def split_backtest(job, frames, params, settings):
         columns[label] = _numbers(trial_extras(pf), objective, metric, index[0], index[-1],
                                   float(np.sum(pf.get_init_cash())))
         shown[label] = extract_results(run, benchmark=True)
+        if label == (IN_SAMPLE if split is not None else WHOLE_PERIOD):
+            searched = pf
+    folds = None
+    if job.get("folds") and job.get("kind") != "walk_forward" and metric is not None:
+        # The folds as the search scored them: the searched history cut the same way, each its own run from the
+        # starting cash, in one vectorbtX call. Each scored without the job's constraints (the minimum trades
+        # applies to the folds' total), so its numbers are its own.
+        train = windows.get(IN_SAMPLE)
+        cuts = fold_windows(frames["close"].index, train, int(job["folds"]["count"]))
+        run = engine.run_prepared(engine.prepare_run(job["spec"], frames, params=params, window=train, **keywords),
+                                  windows=cuts)
+        plain = {"metric": job["metric"]}
+        rows = []
+        for number, (pf, (start, end)) in enumerate(zip(run["pfs"], cuts)):
+            # What vectorbtX said about this fold: a warning naming its window, or naming none.
+            own = [note for note in run["warnings"]
+                   if f"(window {number + 1})" in note or not re.search(r"\(window \d+\)", note)]
+            found = {key: value for key, value in score(pf, plain, params, notes=own).items() if key != "params"}
+            years = (end - start) / pd.Timedelta(days=365.25)
+            rows.append({"fold": number + 1, "period": number + 1, "from": start, "to": end, **found,
+                         "annualised_return": _scalar(pf.annualized_return(group_by=True)),
+                         "score": fold_score(job["metric"], found["metric"], found["n_trades"], years)})
+        rows = pd.DataFrame(rows)
+        reference = {key: value for key, value in score(searched, plain, params).items() if key != "params"}
+        reference["annualised_return"] = _scalar(searched.annualized_return(group_by=True))
+        folds = {"rows": rows, "reference": reference}
+        columns[f"In sample, across its {len(rows)} folds"] = _fold_ranges(rows, metric, cuts)
     if split is not None:
         extras = continuing_extras(whole["pf"], split)
         # The objective of a part of a run is known only when it is one of the usual numbers.
@@ -953,7 +989,36 @@ def split_backtest(job, frames, params, settings):
         columns[CONTINUING] = _numbers(extras, objective, metric, split, frames["close"].index[-1],
                                        extras["start_value"])
     return {"version": SPLIT_BACKTEST_VERSION, "results": shown[WHOLE_PERIOD], "windows": shown, "split": split,
-            "table": pd.DataFrame(columns)}
+            "table": pd.DataFrame(columns), "folds": folds}
+
+
+def _fold_ranges(rows, metric, cuts):
+    """split_backtest's column of the folds: each of the usual numbers, and the objective, as its lowest to highest
+    over the folds, with the median ("4.1% to 31.0%, median 12.2%"), in _numbers' rows. A fold with no trades has
+    no Sharpe ratio or profit factor (shown_number's "—"), and is left out of those."""
+    def spread(column, how):
+        values = rows[column].astype(float)
+        values = values[np.isfinite(values)]
+        if values.empty:
+            return "—"
+        return (f"{shown_number(values.min(), how)} to {shown_number(values.max(), how)}, "
+                f"median {shown_number(values.median(), how)}")
+
+    extras = {"total_return": None, "max_drawdown": None, "sharpe": None, "n_trades": None, "profit_factor": None}
+    column = _numbers(extras, None, metric, cuts[0][0], cuts[-1][1], np.nan)
+    column["Starting value"] = "the starting cash, each fold"
+    for name, (key, how) in {"Total return": ("total_return", "pct"), "Max drawdown": ("max_drawdown", "pct"),
+                             "Sharpe ratio": ("sharpe", "ratio"), "Trades": ("n_trades", "count"),
+                             "Profit factor": ("profit_factor", "factor")}.items():
+        for row_name in (name, f"{name} (the objective)"):
+            if row_name in column:
+                column[row_name] = spread(key, how)
+    if f"{metric['label']} (the objective)" in column and metric["label"] not in _NUMBER_ROWS:
+        column[f"{metric['label']} (the objective)"] = spread("metric", "ratio")
+    return column
+
+
+_NUMBER_ROWS = ("Total return", "Max drawdown", "Sharpe ratio", "Trades", "Profit factor")
 
 
 def random_periods(job, frames, params, settings, count=20, length=0.4, within="whole", seed=0, progress=None):
@@ -1009,14 +1074,16 @@ PERIOD_NUMBERS = [("annualised_return", "Annualised return", "pct"), ("max_drawd
                   ("sharpe", "Sharpe ratio", "ratio"), ("n_trades", "Trades", "count")]
 
 
-def fig_periods(periods, reference, theme, metric=None):
+def fig_periods(periods, reference, theme, metric=None, title=None, reference_label="Whole history", item="Period"):
     """A box per number over the random periods (random_periods), every period a point beside it.
 
     One panel per number, each on its own axis (a drawdown and a trade count share no scale). `reference`:
     {column: value} for the whole history, drawn as a dashed line where it compares (not the trade count,
     which grows with the length). `metric`: (column, label, format) of the objective, a panel of its own
     first. Periods with no trade are left out of the boxes: their drawdown of 0 and their missing Sharpe
-    ratio describe no trading, not the strategy (the page counts them).
+    ratio describe no trading, not the strategy (the page counts them). Also the folds of a best trial
+    (split_backtest), with their own `title`, `reference_label` (the dashed line's) and `item` (the hover's
+    "Fold 3"); each row's number is its "period".
     """
     from plotly.subplots import make_subplots
 
@@ -1033,7 +1100,7 @@ def fig_periods(periods, reference, theme, metric=None):
     for number, (column, label, how) in enumerate(numbers, start=1):
         values = traded[column].astype(float) if column in traded else pd.Series(dtype=float)
         values = values[np.isfinite(values)]
-        hover = [f"Period {int(period)}: {str(start)[:10]} to {str(end)[:10]}" for period, start, end in
+        hover = [f"{item} {int(period)}: {str(start)[:10]} to {str(end)[:10]}" for period, start, end in
                  zip(traded.loc[values.index, "period"], traded.loc[values.index, "from"],
                      traded.loc[values.index, "to"])]
         fig.add_trace(go.Box(y=values, name=label, boxpoints="all", jitter=0.4, pointpos=-1.6,
@@ -1048,10 +1115,10 @@ def fig_periods(periods, reference, theme, metric=None):
         value = (reference or {}).get(column)
         if column != "n_trades" and value is not None and np.isfinite(value):
             fig.add_hline(y=value, line_dash="dash", line_width=1.5, line_color=muted, row=1, col=number)
-            fig.add_annotation(text="Whole history", x=0.5, xref=f"x{'' if number == 1 else number} domain",
+            fig.add_annotation(text=reference_label, x=0.5, xref=f"x{'' if number == 1 else number} domain",
                                y=value, yref=f"y{'' if number == 1 else number}", yanchor="bottom",
                                showarrow=False, font={"color": muted, "size": 11})
-    fig.update_layout(title=f"The best settings over {len(periods)} random periods", height=420)
+    fig.update_layout(title=title or f"The best settings over {len(periods)} random periods", height=420)
     return finish(fig, theme)
 
 

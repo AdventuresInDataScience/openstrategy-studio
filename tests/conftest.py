@@ -21,6 +21,20 @@ FIXTURES = Path(__file__).parent / "fixtures"
 os.environ["OPENSTRATEGY_STUDIO_WARM_UP"] = "0"
 
 
+def windows_or_skip():
+    """Skip a test of the folds when the vectorbtX installed has no `windows=` (docs/UPSTREAM.md issue 42: in the
+    vectorbtX checkout on 26 November 2026, not yet committed). ⚠️ Temporary: once uv.lock pins a vectorbtX with
+    it, every caller runs, and this can go."""
+    import inspect
+
+    pytest.importorskip("vectorbtx")
+    from openstrategy_studio import engine
+
+    if "windows" not in inspect.signature(engine.vectorbtx().x.PortfolioBacktest).parameters:
+        pytest.skip("the vectorbtX installed has no windows= (docs/UPSTREAM.md issue 42): commit it, then "
+                    "uv lock --upgrade-package vectorbtx")
+
+
 def make_ohlcv(n=400, symbols=("AAA",), seed=0, freq="B", start="2020-01-01", base=1.1):
     rng = np.random.default_rng(seed)
     index = pd.date_range(start, periods=n, freq=freq)
