@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY, name TEXT, spec_hash TEXT, created_at TEXT, summary TEXT, path TEXT
 );
 CREATE TABLE IF NOT EXISTS jobs (
-    job_id TEXT PRIMARY KEY, name TEXT, kind TEXT, backend TEXT, created_at TEXT, path TEXT, number INTEGER
+    job_id TEXT PRIMARY KEY, name TEXT, kind TEXT, backend TEXT, created_at TEXT, path TEXT, number INTEGER,
+    saved INTEGER DEFAULT 0
 );
 """
 
@@ -44,11 +45,16 @@ def _connect(data_dir):
         conn.commit()
     # Jobs listed before they had numbers (25 November 2026) are numbered once, in the order they were started,
     # so each keeps its number when later ones are added.
-    if "number" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
+    job_columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "number" not in job_columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN number INTEGER")
         for number, (job_id,) in enumerate(conn.execute("SELECT job_id FROM jobs ORDER BY created_at, job_id")
                                            .fetchall(), start=1):
             conn.execute("UPDATE jobs SET number = ? WHERE job_id = ?", (number, job_id))
+        conn.commit()
+    # Jobs listed before they could be saved (26 November 2026) start unsaved.
+    if "saved" not in job_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN saved INTEGER DEFAULT 0")
         conn.commit()
     return conn
 
@@ -129,4 +135,15 @@ def list_jobs(data_dir):
 
 
 def delete_job(data_dir, job_id):
+    """Take a job off the index (jobs.delete_job removes its folder as well)."""
     _write(data_dir, "DELETE FROM jobs WHERE job_id = ?", (job_id,))
+
+
+def save_job(data_dir, job_id, saved=True):
+    """Mark a job saved, or not. A saved job is one to keep: "Delete the jobs not saved" leaves it alone."""
+    _write(data_dir, "UPDATE jobs SET saved = ? WHERE job_id = ?", (int(bool(saved)), job_id))
+
+
+def rename_job(data_dir, job_id, name):
+    """A job's name in every list. Its job.json keeps the name it started with, which nothing lists."""
+    _write(data_dir, "UPDATE jobs SET name = ? WHERE job_id = ?", (name, job_id))

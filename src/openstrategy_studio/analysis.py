@@ -117,6 +117,18 @@ def finish(fig, theme, glow=False):
     return fig
 
 
+def log_scale(fig):
+    """The figure's value axis on a log scale, so equal percentage moves are the same height: a fall from
+    2,000,000 to 1,000,000 looks as big as one from 2,000 to 1,000, which a long history needs to be read.
+
+    Only the main y axis (a second one, such as the rolling figure's volatility, keeps its own). ⚠️ A log
+    axis cannot show zero or less: plotly leaves such points out, so an account that went below zero shows
+    a gap there. The page says so beside the checkbox.
+    """
+    fig.update_layout(yaxis_type="log")
+    return fig
+
+
 def _diverging(theme):
     # Some themes (nike, for one) set no colourscale, so fall back to a neutral one.
     template = pio.templates[theme] if theme in pio.templates else None
@@ -328,6 +340,10 @@ WARNING_HINTS = {
                            "Skip the trade under 'When a trade is bigger than the account can fund'.",
     "minimum tradeable size": "In the Studio: raise the risk or the amount on the Build page's Risk tab, tighten the "
                               "stop, or set min_size in the instrument grid (Setup tab) to your broker's.",
+    # vectorbtX's words for an entry sized as a share of an account that has lost everything (docs/UPSTREAM.md 40).
+    "account at or below zero": "In the Studio: a trade before these lost more than the account, so the strategy "
+                                "stopped trading. Lower the risk or the share on the Build page's Risk tab, widen "
+                                "the stop, or lower the leverage in the instrument grid (Setup tab).",
     "borrowed the securities for free": "In the Studio: set borrow_rate in the instrument grid (Build page, Setup "
                                         "tab), or 0 if the borrow really is free.",
     "Carry skipped": "In the Studio: name both base_currency and quote_currency in the instrument grid (Build page, "
@@ -656,23 +672,25 @@ def _has_trades(results):
     return len(results.get("trades", [])) > 0
 
 
-# name: label, function, whether it is a line figure (glow applies), when it is available, and whether it
-# runs along the dates (so fig_split can mark where an optimisation's held-back history starts).
+# name: label, function, whether it is a line figure (glow applies), when it is available, whether it
+# runs along the dates (so fig_split can mark where an optimisation's held-back history starts), and
+# whether it can be drawn on a log scale (log_scale: a value or a price that stays above zero, not a
+# drawdown, a return or a count).
 FIGURES = {
     "equity": {"label": "Equity vs benchmark", "fn": fig_equity, "lines": True, "when": lambda r: True,
-               "dates": True},
+               "dates": True, "log": True},
     "drawdown": {"label": "Underwater drawdown", "fn": fig_drawdown, "lines": True, "when": lambda r: True,
                  "dates": True},
     "monthly": {"label": "Monthly returns", "fn": fig_monthly, "lines": False, "when": lambda r: True},
     "rolling": {"label": "Rolling metrics", "fn": fig_rolling, "lines": True, "when": lambda r: True,
                 "dates": True},
     "price": {"label": "Price chart with trades", "fn": fig_price, "lines": False, "when": lambda r: True,
-              "dates": True},
+              "dates": True, "log": True},
     "trades": {"label": "Trade PnL", "fn": fig_trades, "lines": False, "when": _has_trades, "dates": True},
     "distribution": {"label": "Return distribution", "fn": fig_distribution, "lines": False, "when": _has_trades},
     "mae_mfe": {"label": "MAE and MFE", "fn": fig_mae_mfe, "lines": False, "when": _has_trades},
     "monte_carlo": {"label": "Monte Carlo fan", "fn": fig_monte_carlo, "lines": False,
-                    "when": lambda r: len(r.get("trades", [])) > 1},
+                    "when": lambda r: len(r.get("trades", [])) > 1, "log": True},
     "exposure": {"label": "Exposure and leverage", "fn": fig_exposure, "lines": True,
                  "when": lambda r: "exposure" in r, "dates": True},
     "holding_costs": {"label": "Holding costs", "fn": fig_holding_costs, "lines": True,
@@ -1053,16 +1071,19 @@ def mark_split(fig, split, end, theme):
     return fig
 
 
-def fig_split(results, split, theme, glow=False, view="equity", **options):
-    """A tear-sheet figure (FIGURES) with the held-back part marked (mark_split) when it runs along the dates.
+def fig_split(results, split, theme, glow=False, view="equity", log=False, **options):
+    """A tear-sheet figure (FIGURES) with the held-back part marked (mark_split) when it runs along the dates,
+    and on a log scale when `log` and the figure can be (FIGURES[view]["log"]; any other ignores it).
 
     A figure across trades or returns (the distribution, MAE and MFE, Monte Carlo) has no dates to mark,
     and neither has a run with nothing held back (split None).
     """
     fig = FIGURES[view]["fn"](results, theme, glow and FIGURES[view]["lines"], **options)
-    if split is not None and FIGURES[view].get("dates"):
-        for item in fig if isinstance(fig, tuple) else (fig,):
+    for item in fig if isinstance(fig, tuple) else (fig,):
+        if split is not None and FIGURES[view].get("dates"):
             mark_split(item, split, results["series"].index[-1], theme)
+        if log and FIGURES[view].get("log"):
+            log_scale(item)
     return fig
 
 

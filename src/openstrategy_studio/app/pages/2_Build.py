@@ -1437,7 +1437,9 @@ with form:
                                                               for output in outputs], key="preview:overlays",
                                                   help="Feature lines to draw over the price, to check they look "
                                                        "right before backtesting.")
-                    ui.chart(analysis.fig_preview(frames, computed, compiled, symbol, theme, overlays))
+                    log = row[0].checkbox("Log scale", key=ui.kept("preview:log", False), help=ui.LOG_SCALE_HELP)
+                    figure = analysis.fig_preview(frames, computed, compiled, symbol, theme, overlays)
+                    ui.chart(analysis.log_scale(figure) if log else figure)
                 else:
                     ui.chart(analysis.fig_weight_preview(compiled["weights"], compiled["schedule"], theme))
                     st.caption(f"{int(compiled['schedule'].sum())} rebalance dates.")

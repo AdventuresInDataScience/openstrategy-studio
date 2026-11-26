@@ -576,7 +576,7 @@ def job_list():
         rows = []
         for job in finished.itertuples():
             compared = job.searches if job.kind == "compare" and isinstance(job.searches, list) else None
-            rows.append({"#": job.number, "Job": job.name,
+            rows.append({"#": job.number, "Saved": bool(job.saved), "Job": job.name,
                          "Search": ("Compared: " + ", ".join(optimise.search_label(item) for item in compared)
                                     if compared else optimise.search_label(job.backend, job.backend_options)),
                          "Objective": optimise.objective_label(job.metric, job.direction) if job.metric else "",
@@ -584,10 +584,34 @@ def job_list():
                          "Best": "—" if job.best_value is None or pd.isna(job.best_value) else f"{job.best_value:.4g}",
                          "Trials": trials_done(job),
                          "Started": str(job.created_at)[:16].replace("T", " ")})
-        ui.table(pd.DataFrame(rows), column_config={"#": st.column_config.NumberColumn(width="small", format="%d")})
+        ui.table(pd.DataFrame(rows), column_config={
+            "#": st.column_config.NumberColumn(width="small", format="%d"),
+            "Saved": st.column_config.CheckboxColumn(width="small", help="Saved on the Optimiser results page: "
+                                                                         "kept when the jobs not saved are deleted.")})
         # Words, not st.page_link: a link needs the whole multipage app, which a page tested on its own lacks.
         st.caption("Each job's best settings, in and out of sample, and its backtest are on the **Optimiser "
-                   "results** page in the menu, under its number.")
+                   "results** page in the menu, under its number. Save, rename or delete a job there.")
+        # Tidying up (the owner, 26 November 2026: the list was just always there). Every finished job that is
+        # not saved, after a confirmation; a running job is never in it, and neither is a saved one.
+        unsaved = finished[~finished["saved"]]
+        if not unsaved.empty:
+            with st.popover(f"Delete the jobs not saved ({len(unsaved)})", icon=":material/delete_sweep:",
+                            help="Deletes every finished job that is not saved, with its trials, backtest and log, "
+                                 "once you confirm. Save the jobs to keep on the Optimiser results page first."):
+                names = ", ".join((f"#{job.number} " if job.number else "") + job.name for job in unsaved.itertuples())
+                st.write(f"Delete these {len(unsaved)} jobs, with their trials, backtests and logs? Saved and "
+                         f"running jobs stay. This cannot be undone.\n\n{names}")
+                if st.button("Delete them for good", key="delete-unsaved-jobs", type="primary",
+                             icon=":material/delete_forever:"):
+                    def delete_unsaved():
+                        for job in unsaved.itertuples():
+                            jobs.delete_job(data_dir, job.job_id)
+                        return len(unsaved)
+
+                    count = ui.run_guarded("Deleting the jobs", delete_unsaved)
+                    if count:
+                        st.session_state.pop("best_backtest", None)
+                        st.rerun()
 
 
 with ui.section("Jobs", "account", "opt-jobs"):

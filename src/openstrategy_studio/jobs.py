@@ -212,6 +212,28 @@ def cancel_job(job_dir):
     (Path(job_dir) / "cancel").touch()
 
 
+def delete_job(data_dir, job_id):
+    """A job off the index, and its folder (its trials, its backtest, its log) off the disk. It cannot be undone.
+
+    A job still starting or running is refused: its worker would go on writing into a folder that is gone.
+    Cancel it first. ⚠️ Only a folder inside <data_dir>/jobs is removed, whatever the index says, so a damaged
+    index can never point the delete at anything else.
+    """
+    import shutil
+
+    row = store.list_jobs(data_dir).set_index("job_id").loc[job_id]
+    job_dir = Path(row["path"])
+    if read_progress(job_dir)["status"] in ("starting", "running"):
+        raise ValueError(f"{row['name']} is still running. Cancel it on the Optimise page, then delete it.")
+    jobs_root = (Path(data_dir) / "jobs").resolve()
+    if job_dir.exists() and job_dir.resolve().parent == jobs_root:
+        # A file the page has just read can be briefly locked on Windows.
+        retry_while_locked(lambda: shutil.rmtree(job_dir))
+    store.delete_job(data_dir, job_id)
+    _ASKED.pop(str(job_dir), None)
+    return job_dir
+
+
 # What a job was asked to do, by its folder: job.json never changes once written, and the Optimise page
 # lists every job every few seconds while one runs.
 _ASKED = {}
@@ -233,14 +255,15 @@ def list_jobs(data_dir):
     """Every job with its current progress and what it searched for, newest first.
 
     "number" is the job's # (store.next_job_number; 0 for none, which the index's own numbering leaves no
-    job without); "metric", "direction", "backend_options" and "searches" are its own (_asked), for the
-    jobs table's objective and method.
+    job without); "saved" whether it is marked to keep (store.save_job); "metric", "direction",
+    "backend_options" and "searches" are its own (_asked), for the jobs table's objective and method.
     """
     rows = []
     for _, job in store.list_jobs(data_dir).iterrows():
         progress = read_progress(job["path"])
         number = job.get("number")
         rows.append({"job_id": job["job_id"], "number": 0 if pd.isna(number) else int(number), "name": job["name"],
+                     "saved": bool(job.get("saved") == 1),          # NaN (no row value) is not saved
                      "kind": job["kind"], **_asked(job["path"]),
                      "backend": job["backend"], "created_at": job["created_at"], "status": progress["status"],
                      "done": progress.get("done", 0), "budget": progress.get("budget", 0),

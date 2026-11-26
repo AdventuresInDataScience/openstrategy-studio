@@ -37,6 +37,6 @@ The Studio starts with a blank strategy each time. **Start from** at the top giv
 
 **5. Account.** Purple sections: the starting cash and reporting currency, how several symbols share the cash, interest rates for holding costs, and the engine's finer points (a random seed, what an opposite entry does).
 
-**Preview** marks every signal on the chart. **Pipeline** draws the strategy. **Strategy file** shows it as JSON and as a standalone vectorbtX script.
+**Preview** marks every signal on the chart; **Log scale** draws the price on a log axis, for a long history. **Pipeline** draws the strategy. **Strategy file** shows it as JSON and as a standalone vectorbtX script.
 
 Optimisation ranges are not set here: add the values to search on the **Optimise** page, and set their ranges there.

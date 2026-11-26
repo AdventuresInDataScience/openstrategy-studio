@@ -79,14 +79,27 @@ def vectorbt():
 
 
 def versions():
-    """Installed versions recorded with every saved run."""
+    """Installed versions recorded with every saved run, and part of the range check's cache key.
+
+    ⚠️ A library installed from git keeps its version number from commit to commit (vectorbtX is 0.1.0 at
+    every one), so the commit it was installed from is added, as in "0.1.0+47afc3e". Without it a bump
+    that changes results (vectorbtX issue 41) left the range check showing the trade counts from before
+    it, and a saved run could not say which vectorbtX it was made with.
+    """
+    import json
+
     found = {}
     for name in ("vectorbt", "vectorbtx", "ta_patterns", "butchc", "optuna", "plotly", "pandas", "numpy",
                  "streamlit", "plotly-themes", "marsopt", "nevergrad", "scipy", "openstrategy-studio"):
         try:
-            found[name] = importlib.metadata.version(name)
+            distribution = importlib.metadata.distribution(name)
         except importlib.metadata.PackageNotFoundError:
             found[name] = None
+            continue
+        # pip and uv write where a package came from (PEP 610); a git install names its commit there.
+        origin = distribution.read_text("direct_url.json")
+        commit = (json.loads(origin).get("vcs_info") or {}).get("commit_id") if origin else None
+        found[name] = f"{distribution.version}+{commit[:7]}" if commit else distribution.version
     return found
 
 

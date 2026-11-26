@@ -93,13 +93,15 @@ with st.expander("Compare saved runs"):
                                 help="Saved runs to draw on one chart and list side by side.")
         if chosen:
             compare_theme, compare_glow = ui.theme_picker(settings, "compare")
+            log = st.checkbox("Log scale", key=ui.kept("compare:log", False), help=ui.LOG_SCALE_HELP)
             curves = []
             table = {}
             for run_id in chosen:
                 saved = analysis.load_results(runs.set_index("run_id").loc[run_id, "path"])
                 curves.append((labels[run_id], saved["series"]["value"]))
                 table[labels[run_id]] = saved["stats"]["portfolio"]["all"]
-            ui.chart(analysis.fig_compare(curves, compare_theme, compare_glow))
+            figure = analysis.fig_compare(curves, compare_theme, compare_glow)
+            ui.chart(analysis.log_scale(figure) if log else figure)
             ui.table(pd.DataFrame(table).astype(str), hide_index=False)
 
 last = st.session_state.get("last_run")

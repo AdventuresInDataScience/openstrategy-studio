@@ -1041,6 +1041,63 @@ def check_flat_account_ratios():
     return present, f"{trades} trades; sharpe_ratio() {sharpe}, sortino_ratio() {sortino} (expected NaN for both)"
 
 
+# ---------------------------------------------------------------------------
+# 40. A share of a balance below zero is a negative size, and vectorbt raises ValueError
+# ---------------------------------------------------------------------------
+
+def check_share_of_a_negative_balance():
+    # A 5x spread bet, each entry worth 4.8 times the balance at its signal bar. The first trade gaps
+    # down 30% (bars 1 to 3) and loses about 144% of the account: its balance is -4,400 from then on,
+    # so the second entry (bar 5) should not be placed. But the re-sizing loop's first run sizes every
+    # entry from the starting cash, so in that run the second trade is open and rises 5% a bar. The
+    # next pass sizes from that run's account: at the exit's bar the balance is -4,400 while the
+    # equity is well above zero, so 4.8 x the balance is a negative size, the leverage cap (from the
+    # positive equity) leaves it, and vectorbt raises "Negative size is not allowed" on the exit's bar.
+    # It should settle: one round trip (two orders), the account below zero, no second entry.
+    o, h, l, c = frames([100.0, 100.0, 100.0, 70.0, 70.0, 70.0] + [70.0 * 1.05 ** k for k in range(1, 12)])
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "leverage": 5.0, "min_size": 1.0, "increment": 1.0}
+    try:
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", 0), ("X", 5)]),
+                                     exits=mask(c.index, ["X"], [("X", 3), ("X", 15)]),
+                                     notional_pct=4.8, risk_of="balance", init_cash=10_000, freq="D")
+    except ValueError as error:
+        return True, f"raised ValueError: {str(error)[:60]} (should settle: two orders, no second entry)"
+    orders = len(pf.orders.records)
+    return orders != 2, f"{orders} orders (should be 2: the first round trip only)"
+
+
+# ---------------------------------------------------------------------------
+# 41. A levered account's buying power is a loan fixed at the start, so a grown account cannot use its leverage
+# ---------------------------------------------------------------------------
+
+def check_grown_account_funds_its_leverage():
+    # A 10x spread bet on 10,000, each entry worth 5x the equity at its signal bar. The engine is handed
+    # init_cash x leverage = 100,000 of cash, a loan of 90,000 fixed for the whole run. The first entry
+    # (5 x 10,000 = 50,000, 500 a point at 100) doubles the price, so the account is worth 60,000. The
+    # second entry should be 5 x 60,000 = 300,000 (1,500 a point at 200), well inside the 10x limit
+    # (600,000); but the engine's cash is the loan plus the account, 150,000, so vectorbt cuts it to 750
+    # a point (2.5x), with no warning. Holding costs are left out here (no rates); the engine's cash does
+    # not see them either, since they are charged after the simulation.
+    o, h, l, c = frames([100.0, 100.0] + [100.0 + 25.0 * k for k in range(1, 5)] + [200.0] * 6)
+    instrument = {"mode": "spreadbet", "point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                  "slippage": 0.0, "leverage": 10.0, "min_size": 1.0, "increment": 1.0}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pf = vbt.x.PortfolioBacktest(close=c, open=o, high=h, low=l, instruments={"X": instrument},
+                                     entries=mask(c.index, ["X"], [("X", 0), ("X", 7)]),
+                                     exits=mask(c.index, ["X"], [("X", 5), ("X", 10)]),
+                                     notional_pct=5.0, risk_of="equity", init_cash=10_000, freq="D")
+    records = pf.orders.records
+    sizes = [float(size) for size in records["size"]]
+    said = [str(item.message)[:80] for item in caught if "cash" in str(item.message).lower()]
+    second = sizes[2] if len(sizes) > 2 else float("nan")
+    return (abs(second - 1500.0) > 1e-6,
+            f"order sizes {sizes} (the second entry should be 1500: 5 x an equity of 60,000 at 200); "
+            f"warnings about the cash: {said or 'none'}")
+
+
 CHECKS = [
     (1, "Short signals are not shifted to the next bar (lookahead)", check_short_signals_shifted),
     (2, "SingleBacktest(base_currency=) is read as the account currency", check_single_backtest_base_currency),
@@ -1084,6 +1141,10 @@ CHECKS = [
      check_cut_entries_build_the_run_once),
     (38, "A minimum commission on an exit is worked out from another order's size", check_exit_commission_from_its_own_size),
     (39, "A run that never trades has a Sharpe and a Sortino ratio of +inf", check_flat_account_ratios),
+    (40, "A share of a balance below zero is a negative size, and vectorbt raises ValueError",
+     check_share_of_a_negative_balance),
+    (41, "A levered account's buying power is a loan fixed at the start, so a grown account cannot use its leverage",
+     check_grown_account_funds_its_leverage),
 ]
 
 

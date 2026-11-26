@@ -713,6 +713,39 @@ def test_every_hinted_warning_is_matched_by_vectorbtxs_words():
     assert len(notes) == 2 and all(hinted), notes
     assert "Risk tab" in hinted[0] and "min_size" in hinted[1]
 
+    # An account that has lost everything (vectorbtX 47afc3e, docs/UPSTREAM.md 40): a 5x spread bet worth
+    # 4.8 times the balance gaps 30% down, so the second entry is a share of a balance below zero.
+    spec = competing_spec({}, symbols=("AAA",))
+    spec["setup"]["trading"] = "spreadbet"
+    spec["features"]["pulse"]["params"]["code"] = ("out = close * 0.0\nout.iloc[0] = 1.0\nout.iloc[5] = 1.0\n"
+                                                    "out.iloc[3] = 2.0\nout.iloc[15] = 2.0\nreturn out")
+    spec["instruments"]["AAA"] = {"point_size": 1.0, "quote_currency": "USD", "spread_points": 0.0,
+                                  "slippage": 0.0, "leverage": 5.0, "min_size": 1.0, "increment": 1.0}
+    spec["risk"]["sizing"] = {"notional_pct": 4.8, "risk_of": "balance"}
+    prices = [100.0] * 3 + [70.0] * 3 + [70.0 * 1.05 ** k for k in range(1, 12)]
+    index = pd.bdate_range("2024-01-01", periods=len(prices))
+    frame = lambda values: pd.DataFrame({"AAA": np.asarray(values, dtype=float)}, index=index)
+    data = {"open": frame(prices), "high": frame([p + 0.5 for p in prices]),
+            "low": frame([p - 0.5 for p in prices]), "close": frame(prices), "volume": frame([1000.0] * len(prices))}
+    broke = engine.run_backtest(spec, data)["warnings"]
+    found = [hint for note, hint in analysis.warning_hints(broke) if "at or below zero" in note]
+    assert found and "lost more than the account" in found[0], broke
+
+
+def test_a_git_install_is_versioned_by_its_commit():
+    """vectorbtX is 0.1.0 at every commit, so its version names the commit it was installed from: saved runs
+    record it, and the range check's cache is keyed by it, so a bump never reuses an older vectorbtX's
+    trade counts (it would have, at the fix for docs/UPSTREAM.md 41)."""
+    pytest.importorskip("vectorbtx")
+    import importlib.metadata
+    import json
+
+    origin = importlib.metadata.distribution("vectorbtx").read_text("direct_url.json")
+    commit = (json.loads(origin).get("vcs_info") or {}).get("commit_id") if origin else None
+    found = engine.versions()["vectorbtx"]
+    assert found.startswith(importlib.metadata.version("vectorbtx"))
+    assert found.endswith(f"+{commit[:7]}") if commit else "+" not in found
+
 
 def test_the_warm_up_runs_every_template_without_stored_data(tmp_path, monkeypatch):
     pytest.importorskip("vectorbtx")

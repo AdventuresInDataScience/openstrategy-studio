@@ -1067,12 +1067,19 @@ def test_the_optimiser_results_lead_with_the_best_settings_in_and_out_of_sample(
     assert set(settings_table["Searched"]) == {"3 to 8 by 1", "15 to 30 by 5"}
     best = summary["best_params"]
     assert settings_table.set_index("Setting").loc["fast › timeperiod", "Best"] == str(best["features.fast.params.timeperiod"])
-    # The trials table names the settings too, never as param: paths.
+    # The trials table names the settings too, never as param: paths. It is in the other view.
+    view = next(item for item in app.get("button_group") if item.label == "Show")
+    view.set_value("How the search went").run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert not [item for item in app.get("button_group") if item.label == "Tear sheet of"]
     trials_table = app.dataframe[-1].value
     assert "fast › timeperiod" in trials_table.columns and not any(str(c).startswith("param:") for c in trials_table.columns)
-    # The best trial's backtest: its out-of-sample objective is the job's held-back number.
-    next(button for button in app.button if button.label == "Show its backtest").click().run()
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+    next(item for item in app.get("button_group") if item.label == "Show").set_value("The best trial's backtest").run()
     assert not app.exception, [item.value for item in app.exception]
+    # The best trial's backtest opens on its own, with no button (the owner, 26 November 2026): its out-of-sample
+    # objective is the job's held-back number. The search's tables are the other view.
+    assert not [button for button in app.button if button.label == "Show its backtest"]
     assert not reruns, "the stored backtest was run again"
     shown = app.session_state["best_backtest"]
     assert shown["split"] is not None
@@ -1091,13 +1098,84 @@ def test_the_optimiser_results_lead_with_the_best_settings_in_and_out_of_sample(
     part.set_value("Out of sample (held back)").run()
     assert not app.exception, [item.value for item in app.exception]
     assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
-    # A job from before the backtest was saved runs it, with the same numbers.
+    # The equity curve on a log scale, from the checkbox beside the view.
+    next(box for box in app.checkbox if box.label == "Log scale").check().run()
+    assert not app.exception, [item.value for item in app.exception]
+    # A job from before the backtest was saved runs it, with the same numbers, and keeps it, so it runs once.
     (job_dir / "best_backtest.pkl").unlink()
     del app.session_state["best_backtest"]
-    next(button for button in app.button if button.label == "Show its backtest").click().run()
+    app.run()
     assert not app.exception, [item.value for item in app.exception]
     assert reruns == [1]
     assert app.session_state["best_backtest"]["table"].equals(table)
+    assert (job_dir / "best_backtest.pkl").exists()
+    del app.session_state["best_backtest"]
+    app.run()
+    assert reruns == [1]
+
+
+def test_a_job_is_saved_renamed_and_deleted(tmp_path, monkeypatch):
+    """The owner (26 November 2026): the list of jobs was just always there. Beside the results page's picker a job
+    is saved (★) or renamed, keeping it picked, and deleted after a confirmation, with its folder; the Optimise
+    page deletes every finished job not saved; a running job is never deleted."""
+    testing = pytest.importorskip("streamlit.testing.v1")
+    pytest.importorskip("vectorbtx")
+    import os
+    import shutil
+    from openstrategy_studio import config, jobs, store
+
+    monkeypatch.setenv("OPENSTRATEGY_STUDIO_HOME", str(tmp_path))
+    job_dir = finished_job(tmp_path)
+    data_dir = config.data_dir(config.load_settings())
+    copy_dir = job_dir.parent / "copy-job"                  # a second finished job, newer than the first
+    shutil.copytree(job_dir, copy_dir)
+    store.add_job(data_dir, "copy-job", "Copy", "optimise", "random", jobs.now(), copy_dir)
+    listed = lambda: jobs.list_jobs(data_dir).set_index("job_id")
+    picker = lambda app: next(item for item in app.selectbox if item.label == "Job")
+    button = lambda app, label: next(item for item in app.button if item.label == label)
+
+    app = testing.AppTest.from_file(str(APP / "pages" / "5_Optimiser_results.py"), default_timeout=180)
+    app.run()
+    assert picker(app).value == "copy-job"                  # the newest first
+    picker(app).set_value("test-job").run()
+    button(app, "Save").click().run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert listed().loc["test-job", "saved"] and not listed().loc["copy-job", "saved"]
+    assert picker(app).value == "test-job" and any(option.startswith("#1 MA cross: random ★") for option in
+                                                     picker(app).options)
+    next(box for box in app.text_input if box.label == "New name").input("Best MA").run()
+    button(app, "Rename").click().run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert listed().loc["test-job", "name"] == "Best MA" and picker(app).value == "test-job"
+    assert not settings_without_a_tooltip(app), settings_without_a_tooltip(app)
+
+    # The Optimise page lists which are saved, and deletes the rest.
+    page = testing.AppTest.from_file(str(APP / "pages" / "4_Optimise.py"), default_timeout=180)
+    page.session_state["spec"] = load_template("ma_cross")
+    page.session_state["spec_rev"] = 0
+    page.run()
+    table = next(frame.value for frame in page.dataframe if "Saved" in frame.value.columns)
+    assert table.set_index("#")["Saved"].to_dict() == {1: True, 2: False}
+    button(page, "Delete them for good").click().run()
+    assert not page.exception, [item.value for item in page.exception]
+    assert not copy_dir.exists() and job_dir.exists() and list(listed().index) == ["test-job"]
+
+    # A running job is never deleted: its worker would write into a folder that is gone.
+    progress = jobs.read_json(job_dir / "progress.json")
+    jobs.write_json(job_dir / "progress.json", dict(progress, status="running", pid=os.getpid(), updated_at=jobs.now()))
+    (job_dir / "heartbeat").touch()
+    with pytest.raises(ValueError, match="still running"):
+        jobs.delete_job(data_dir, "test-job")
+    jobs.write_json(job_dir / "progress.json", progress)
+
+    # Unsaved, then deleted from the results page, after the confirmation.
+    app.run()
+    button(app, "Unsave").click().run()
+    assert not listed().loc["test-job", "saved"]
+    button(app, "Delete for good").click().run()
+    assert not app.exception, [item.value for item in app.exception]
+    assert not job_dir.exists() and store.list_jobs(data_dir).empty
+    assert any("No optimisations yet" in item.value for item in app.markdown)
 
 
 def test_the_best_trials_chart_marks_where_the_held_back_part_starts():
@@ -1123,6 +1201,11 @@ def test_the_best_trials_chart_marks_where_the_held_back_part_starts():
     assert not [shape for shape in analysis.fig_split(results, split, "page", view="monthly").layout.shapes
                 if shape.type == "rect"]
     assert not analysis.fig_split(results, None, "page").layout.shapes
+    # A log scale where the figure can take one (a value or a price), and nowhere else (a drawdown is below zero).
+    for view in ("equity", "price"):
+        assert analysis.fig_split(results, split, "page", view=view, log=True).layout.yaxis.type == "log", view
+    assert analysis.fig_split(results, split, "page", view="drawdown", log=True).layout.yaxis.type != "log"
+    assert analysis.fig_split(results, split, "page", view="equity").layout.yaxis.type != "log"
 
 
 def test_the_held_back_part_inside_the_whole_run_is_the_charts():
@@ -1387,7 +1470,7 @@ def test_a_stopped_job_is_reported_until_another_is_started(tmp_path, monkeypatc
     assert not said, said
     table = app.dataframe[-1].value.set_index("Job")
     # One trials cell says how a job ended (no Status or Budget column), and the search names its method too.
-    assert list(table.columns) == ["#", "Search", "Objective", "Best", "Trials", "Started"]
+    assert list(table.columns) == ["#", "Saved", "Search", "Objective", "Best", "Trials", "Started"]
     assert table.loc["MA cross: old", "Trials"] == "0 of 200, stopped from outside before it finished"
     assert table.loc["MA cross: new", "Trials"] == "0 of 200"
     assert table.loc["MA cross: new", "Search"] == "BUTChC · Bayesian update tree"

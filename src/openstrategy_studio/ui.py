@@ -207,6 +207,14 @@ def prune_variables():
 # Output helpers
 # ---------------------------------------------------------------------------
 
+# The one tooltip of every "Log scale" checkbox (the tear sheets, the saved runs compared, the walk-forward
+# curve, the Build preview), each of which draws its figure through analysis.log_scale.
+LOG_SCALE_HELP = ("Draws the values on a log axis, so equal percentage moves are the same height: a fall from "
+                  "2,000,000 to 1,000,000 looks as big as one from 2,000 to 1,000. Long histories and accounts "
+                  "that grew a lot read better this way. A value at or below zero cannot be drawn on it and "
+                  "leaves a gap.")
+
+
 def chart(fig):
     # ⚠️ theme=None ALWAYS: the default theme="streamlit" overrides the template's
     # colours and defeats plotly-themes. width="stretch" replaces the deprecated
@@ -287,6 +295,11 @@ def tear_sheet(results, prefix, run_id, settings=None, theme=None, glow=False, s
     if theme is None:
         with row[1]:
             theme, glow = theme_picker(settings, prefix)
+    # A log axis for a value or a price (the owner, 26 November 2026: a 1975 to 2026 history is unreadable
+    # without one). Kept for the session, one per tear sheet, and offered only where the figure can take it.
+    log = False
+    if analysis.FIGURES[name].get("log"):
+        log = row[0].checkbox("Log scale", key=kept(f"{prefix}:log", False), help=LOG_SCALE_HELP)
     options = {}
     if name == "price":
         symbols = results["meta"]["symbols"]
@@ -305,11 +318,11 @@ def tear_sheet(results, prefix, run_id, settings=None, theme=None, glow=False, s
         options["paths"] = st.select_slider("Paths", [100, 250, 500, 1000, 2500], value=500, key=f"{prefix}:paths",
                                             help="How many times the trades are put in a random order to draw the "
                                                  "bands. More gives steadier bands and takes longer.")
-    # Built only when selected, and cached on (run, view, theme, split, options).
+    # Built only when selected, and cached on (run, view, theme, split, log scale, options).
     cache = st.session_state.setdefault("figures", {})
-    cache_key = (run_id, name, theme, glow, str(split), tuple(sorted(options.items())))
+    cache_key = (run_id, name, theme, glow, str(split), log, tuple(sorted(options.items())))
     if cache_key not in cache:
-        cache[cache_key] = analysis.fig_split(results, split, theme, glow, name, **options)
+        cache[cache_key] = analysis.fig_split(results, split, theme, glow, name, log=log, **options)
     figure = cache[cache_key]
     for item in figure if isinstance(figure, tuple) else (figure,):
         chart(item)
